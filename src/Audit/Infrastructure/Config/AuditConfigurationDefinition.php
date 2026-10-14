@@ -17,6 +17,7 @@ use Symfony\Component\Config\Definition\Builder\NodeBuilder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAgent;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AuditOrchestrator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\ReviewerAgent;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\ConfigurationNotices;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFileType;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityType;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\ProjectFileScanner;
@@ -122,6 +123,9 @@ final readonly class AuditConfigurationDefinition
                                 ->end()
                             ->end()
                             ->defaultValue([])
+                            ->validate()
+                                ->always($this->deprecateUnknownRiskPatternBuckets(...))
+                            ->end()
                         ->end()
                         ->arrayNode('secret_scrubbing')
                             ->addDefaultsIfNotSet()
@@ -467,6 +471,20 @@ final readonly class AuditConfigurationDefinition
     private function modelOverrideNode(string $name, string $emptyStringError): OptionalModelNodeDefinition
     {
         return (new OptionalModelNodeDefinition($name, $emptyStringError))->defaultNull();
+    }
+
+    /**
+     * @param array<array-key, mixed> $customRiskPatterns
+     *
+     * @return array<array-key, mixed>
+     */
+    private function deprecateUnknownRiskPatternBuckets(array $customRiskPatterns): array
+    {
+        foreach (ConfigurationNotices::ofRiskPatternBuckets($customRiskPatterns) as $notice) {
+            trigger_deprecation('vinceamstoutz/symfony-security-auditor', '1.22', $notice);
+        }
+
+        return $customRiskPatterns;
     }
 
     /**
