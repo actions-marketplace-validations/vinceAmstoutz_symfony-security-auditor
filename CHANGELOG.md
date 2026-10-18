@@ -39,6 +39,7 @@ This project adheres to [Semantic Versioning 2.0.0](https://semver.org). See [`d
 
 ### Bugfixes 🐛
 
+- `audit app/src` audits the project `app` narrowed to `src`, as `audit app --path src` does, instead of finding no file: a folder with no `composer.json` and nothing to scan is read as part of the Composer project it lies in, whose configuration applies, and a `--path` given from outside a project reaches it the same way ([#634](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/634))
 - A pipeline stage or token estimator defined in an application's own autoconfigured `services.yaml` now joins the audit; an autoconfigured stage runs at priority `0`, before `IngestionStage`, unless it sets a lower one ([#565](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/565))
 - An application whose `ai.yaml` configures several platforms is told so, with the platforms named and how to select one, instead of `No AI platform is configured` ([#595](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/595))
 - `install.ps1` honors `SSA_INIT=1` and runs `init` right after installing; an `init` that fails only prints a warning and keeps the installed binary ([#562](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/562))
