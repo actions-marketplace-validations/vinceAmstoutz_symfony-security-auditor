@@ -149,6 +149,7 @@ This project adheres to [Semantic Versioning 2.0.0](https://semver.org). See [`d
 
 ### Core 🧱
 
+- `mcp:serve`, the `audit` MCP tool and its input schema are marked experimental: they may change in any release and are no longer covered by the backward compatibility promise ([#633](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/633))
 - Cached attacker and reviewer answers refresh once after upgrading ([#442](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/442), [#449](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/449), [#467](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/467), [#517](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/517), [#615](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/615))
 - A custom `RecordVulnerabilityToolFactoryInterface` tool implements `RecordingToolInterface` and answers `RecordingToolInterface::RECORDED` for a call it took in; any other answer counts as a refusal ([#410](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/410), [#474](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/474))
 - Custom security-config parsers can implement `LoadOrderAwareSecurityConfigParserInterface` (since 1.22) to order configuration files as Symfony loads them ([#511](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/511))
