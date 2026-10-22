@@ -65,6 +65,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\NullAttacker
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\NullReviewerCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\AttackerAgentDefinitionFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\AuditConfigurationDefinition;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\CheapAttackerClientNoticePass;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\ContainerParameterRegistrar;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\TypedNodeEnvPlaceholderException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\PricingPlatformPass;
@@ -108,6 +109,7 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
     {
         $container->addCompilerPass(new PricingPlatformPass(PlatformInterface::class));
         $container->addCompilerPass(new UnselectedPlatformsPass(PlatformInterface::class));
+        $container->addCompilerPass(new CheapAttackerClientNoticePass());
     }
 
     #[Override]
@@ -307,18 +309,22 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
                 service('logger'),
             ]);
 
-        foreach (['security_auditor.attacker_client', 'security_auditor.reviewer_client'] as $clientId) {
-            $servicesConfigurator->set(\sprintf('%s.usage_booking', $clientId), LLMClientInterface::class)
-                ->private()
-                ->decorate($clientId, null, \PHP_INT_MAX)
-                ->factory([UsageBookingClientFactory::class, 'around'])
-                ->args([
-                    service('.inner'),
-                    service(TokenUsageRecorder::class),
-                    service(BudgetTracker::class),
-                    service(UnpricedCostCapWarning::class),
-                ]);
-        }
+        $this->bookUsageOf($servicesConfigurator, 'security_auditor.attacker_client');
+        $this->bookUsageOf($servicesConfigurator, 'security_auditor.reviewer_client');
+    }
+
+    private function bookUsageOf(ServicesConfigurator $servicesConfigurator, string $clientId): void
+    {
+        $servicesConfigurator->set(\sprintf('%s.usage_booking', $clientId), LLMClientInterface::class)
+            ->private()
+            ->decorate($clientId, null, \PHP_INT_MAX)
+            ->factory([UsageBookingClientFactory::class, 'around'])
+            ->args([
+                service('.inner'),
+                service(TokenUsageRecorder::class),
+                service(BudgetTracker::class),
+                service(UnpricedCostCapWarning::class),
+            ]);
     }
 
     private function registerImplementationAliases(ServicesConfigurator $servicesConfigurator, BundleConfiguration $bundleConfiguration): void
@@ -415,6 +421,7 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
                 $cheapModel,
                 $bundleConfiguration->llm->attackerMaxOutputTokens(),
             ));
+        $this->bookUsageOf($servicesConfigurator, 'security_auditor.cheap_attacker_client');
 
         $this->registerCheapAttackerCache($servicesConfigurator, $bundleConfiguration);
 

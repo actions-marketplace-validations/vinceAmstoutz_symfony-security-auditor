@@ -568,6 +568,30 @@ final class SymfonySecurityAuditorBundleTest extends TestCase
         yield 'audit.escalation.cheap_model' => [['audit' => ['escalation' => ['enabled' => true, 'cheap_model' => 5]]], 'symfony_security_auditor.audit.escalation.cheap_model'];
     }
 
+    /**
+     * @param array<string, mixed> $config
+     */
+    #[DataProvider('textKeysSetToNoText')]
+    public function test_bundle_refuses_a_text_key_set_to_no_text_with_a_configuration_error_naming_it(array $config, string $path, string $type): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessage(\sprintf('Invalid type for path "%s". Expected "string", but got "%s".', $path, $type));
+
+        $this->loadParameters([...['model' => 'gpt-4o'], ...$config]);
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>, string, string}>
+     */
+    public static function textKeysSetToNoText(): iterable
+    {
+        yield 'cache.dir set to null' => [['cache' => ['dir' => null]], 'symfony_security_auditor.cache.dir', 'null'];
+        yield 'audit.baseline set to a switch' => [['audit' => ['baseline' => true]], 'symfony_security_auditor.audit.baseline', 'bool'];
+        yield 'audit.output set to a number' => [['audit' => ['output' => 5]], 'symfony_security_auditor.audit.output', 'int'];
+        yield 'audit.report_path_prefix set to a number' => [['audit' => ['report_path_prefix' => 123]], 'symfony_security_auditor.audit.report_path_prefix', 'int'];
+        yield 'the instructions of a custom skill set to a number' => [['audit' => ['custom_skills' => ['pricing' => ['file_type' => 'controller', 'instructions' => 5]]]], 'symfony_security_auditor.audit.custom_skills.pricing.instructions', 'int'];
+    }
+
     public function test_bundle_accepts_a_null_attacker_model_falling_back_to_model(): void
     {
         $containerBuilder = $this->loadParameters(['model' => 'gpt-4o', 'attacker_model' => null]);
@@ -1092,6 +1116,36 @@ final class SymfonySecurityAuditorBundleTest extends TestCase
         self::assertStringContainsString('|collect-json|', $jsonSalt);
     }
 
+    /**
+     * @return iterable<string, array{array<string, mixed>, string, string}>
+     */
+    public static function toolsScopeKeySaltSegments(): iterable
+    {
+        yield 'tools on the audited files, by default' => [['tools_enabled' => true, 'max_tool_iterations' => 7, 'reviewer_tools_enabled' => true, 'reviewer_max_tool_iterations' => 3], '|tools-on-7|', '|tools-on-3|'];
+        yield 'tools on the audited files, named' => [['tools_enabled' => true, 'max_tool_iterations' => 7, 'reviewer_tools_enabled' => true, 'reviewer_max_tool_iterations' => 3, 'tools_scope' => 'audited'], '|tools-on-7|', '|tools-on-3|'];
+        yield 'tools on every scanned file' => [['tools_enabled' => true, 'max_tool_iterations' => 7, 'reviewer_tools_enabled' => true, 'reviewer_max_tool_iterations' => 3, 'tools_scope' => 'scanned'], '|tools-on-7-scanned|', '|tools-on-3-scanned|'];
+        yield 'no tools, whatever their scope' => [['tools_enabled' => false, 'reviewer_tools_enabled' => false, 'tools_scope' => 'scanned'], '|tools-off|', '|tools-off|'];
+    }
+
+    /**
+     * @param array<string, mixed> $audit
+     */
+    #[DataProvider('toolsScopeKeySaltSegments')]
+    public function test_bundle_key_salts_fold_in_the_tools_scope_only_when_the_tools_are_on(array $audit, string $attackerToolsSegment, string $reviewerToolsSegment): void
+    {
+        $containerBuilder = $this->loadParameters(['model' => 'gpt-4o', 'audit' => $audit + ['escalation' => ['enabled' => true]]]);
+
+        foreach (['symfony_security_auditor.cache.key_salt', 'symfony_security_auditor.cache.cheap_attacker_key_salt'] as $attackerSaltParameter) {
+            $attackerKeySalt = $containerBuilder->getParameter($attackerSaltParameter);
+            self::assertIsString($attackerKeySalt);
+            self::assertStringContainsString($attackerToolsSegment, $attackerKeySalt);
+        }
+
+        $reviewerKeySalt = $containerBuilder->getParameter('symfony_security_auditor.cache.reviewer_key_salt');
+        self::assertIsString($reviewerKeySalt);
+        self::assertStringEndsWith(\sprintf('%sbatch-1|max-output-4096', $reviewerToolsSegment), $reviewerKeySalt);
+    }
+
     public function test_bundle_propagates_secret_scrubbing_config_to_parameters(): void
     {
         $containerBuilder = $this->loadParameters([
@@ -1226,6 +1280,81 @@ final class SymfonySecurityAuditorBundleTest extends TestCase
         $budgetTracker = $this->getPrivateService($kernel, BudgetTracker::class);
         self::assertInstanceOf(BudgetTracker::class, $budgetTracker);
         self::assertSame(240, $budgetTracker->tokensUsed());
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function cheapClientReplacements(): iterable
+    {
+        yield 'the cheap client aliasing the custom client' => [UsageReportingLLMClient::class];
+        yield 'the cheap client aliasing the replaced reviewer client' => ['security_auditor.reviewer_client'];
+    }
+
+    /**
+     * @throws InvalidTokenUsageException
+     */
+    #[DataProvider('cheapClientReplacements')]
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_a_custom_llm_client_replacing_the_escalation_cheap_client_has_its_usage_booked_once_a_call(string $aliasTarget): void
+    {
+        $kernel = $this->boot(['model' => 'gpt-4o', 'audit' => ['escalation' => ['enabled' => true]]], registerHostServices: function (ContainerBuilder $containerBuilder) use ($aliasTarget): void {
+            $this->replaceBothClientsWithAUsageReportingOne($containerBuilder);
+            $containerBuilder->setAlias('security_auditor.cheap_attacker_client', $aliasTarget);
+        });
+
+        foreach (['security_auditor.cheap_attacker_client', 'security_auditor.reviewer_client'] as $clientId) {
+            $llmClient = $this->getPrivateService($kernel, $clientId);
+            self::assertInstanceOf(LLMClientInterface::class, $llmClient);
+            $llmClient->complete('system', 'user');
+        }
+
+        $tokenUsageRecorder = $this->getPrivateService($kernel, TokenUsageRecorder::class);
+        self::assertInstanceOf(TokenUsageRecorder::class, $tokenUsageRecorder);
+        self::assertSame([200, 40], [$tokenUsageRecorder->snapshot()->inputTokens(), $tokenUsageRecorder->snapshot()->outputTokens()]);
+        $budgetTracker = $this->getPrivateService($kernel, BudgetTracker::class);
+        self::assertInstanceOf(BudgetTracker::class, $budgetTracker);
+        self::assertSame(240, $budgetTracker->tokensUsed());
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws NegativeTokenCountException
+     * @throws InvalidTokenUsageException
+     * @throws LLMRequestTooLargeException
+     * @throws InvalidRetryConfigurationException
+     * @throws MissingAiPlatformException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_the_escalation_cheap_client_stays_the_bundled_client_on_the_platform_when_only_the_other_two_are_replaced(): void
+    {
+        $kernel = $this->boot(['model' => 'gpt-4o', 'audit' => ['escalation' => ['enabled' => true, 'cheap_model' => 'gpt-4o-mini']]], registerHostServices: $this->replaceBothClientsWithAUsageReportingOne(...));
+        $llmClient = $this->getPrivateService($kernel, 'security_auditor.cheap_attacker_client');
+        self::assertInstanceOf(SymfonyAiLLMClient::class, $llmClient);
+        self::assertSame('gpt-4o-mini', $llmClient->model());
+
+        $llmResponse = $llmClient->complete('system', 'user');
+
+        $tokenUsageRecorder = $this->getPrivateService($kernel, TokenUsageRecorder::class);
+        self::assertInstanceOf(TokenUsageRecorder::class, $tokenUsageRecorder);
+        self::assertGreaterThan(0, $llmResponse->inputTokens());
+        self::assertSame([$llmResponse->inputTokens(), $llmResponse->outputTokens()], [$tokenUsageRecorder->snapshot()->inputTokens(), $tokenUsageRecorder->snapshot()->outputTokens()]);
+    }
+
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_audit_run_notes_the_escalation_cheap_client_still_on_the_platform_when_only_the_other_two_are_replaced(): void
+    {
+        $kernel = $this->boot(['model' => 'gpt-4o', 'audit' => ['escalation' => ['enabled' => true, 'cheap_model' => 'gpt-4o-mini']]], registerHostServices: $this->replaceBothClientsWithAUsageReportingOne(...));
+
+        self::assertSame(
+            ['audit.escalation is enabled and an application client replaces security_auditor.attacker_client and security_auditor.reviewer_client but not security_auditor.cheap_attacker_client: the cheap first pass still runs on the bundled client, which sends the code to the symfony/ai platform with audit.escalation.cheap_model. Replace security_auditor.cheap_attacker_client as well (see docs/extending.md), or set audit.escalation.enabled: false.'],
+            $kernel->getContainer()->getParameter('symfony_security_auditor.config_notices'),
+        );
     }
 
     #[RunInSeparateProcess]

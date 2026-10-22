@@ -27,6 +27,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
  */
 final readonly class AttackerAnalysisRequest
 {
+    private KnownFiles $knownFiles;
+
     /**
      * @param list<ProjectFile>   $files
      * @param list<Vulnerability> $previousFindings  findings already validated by the
@@ -56,7 +58,9 @@ final readonly class AttackerAnalysisRequest
         public array $rejectedFindings = [],
         public array $candidateFindings = [],
         public ?array $toolFiles = null,
-    ) {}
+    ) {
+        $this->knownFiles = new KnownFiles($this->filesForTools());
+    }
 
     /**
      * @return list<ProjectFile>
@@ -64,6 +68,18 @@ final readonly class AttackerAnalysisRequest
     public function filesForTools(): array
     {
         return $this->toolFiles ?? $this->files;
+    }
+
+    /**
+     * The files a finding reported on `$chunk` is named by: the chunk's own,
+     * then every file the investigation tools may open, so a finding another
+     * chunk's file was reported under is named by that file too.
+     *
+     * @param list<ProjectFile> $chunk
+     */
+    public function knownFilesFor(array $chunk): KnownFiles
+    {
+        return new KnownFiles($chunk, $this->knownFiles);
     }
 
     /**

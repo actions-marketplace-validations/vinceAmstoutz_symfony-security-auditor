@@ -35,7 +35,7 @@ interface LLMClientInterface
 `completeWithTools()` drives an autonomous tool-using conversation: as long as the model emits tool calls (and the iteration cap is not reached), the client executes them via the supplied `ToolRegistry` (also under `Audit\Domain\Port\Tool\`) and feeds the results back. What the auditor reads from it depends on the collection mode:
 
 - **Structured collection** (`audit.structured_collection` and `audit.reviewer_structured_collection`, both on by default): the registry holds the `record_vulnerability` (attacker) or `record_review` (reviewer) tool, and the findings and verdicts are what the model records through it. A client that supports tools offers the model every definition `$toolRegistry->definitions()` returns and runs each call through `$toolRegistry->execute()`; its answer text is then not read.
-- **A client that ignores the tools**, as the stub below does by delegating to `complete()`: _since 1.22_, while a client has never read the recording tool's definition nor called it, its answers are read the way the JSON path reads them, and the run warns once: `The LLM client never offered the record_vulnerability tool to the model, so its answers are read as JSON; set audit.structured_collection: false for a client that ignores tools.` (`record_review` and `audit.reviewer_structured_collection` for the reviewer). Once it has done either, in any turn, it counts as offering the tools for the rest of the run, so a client that builds the tool schemas once and keeps them is read as before. For the attacker, an empty answer means no findings and a JSON array carries them; for the reviewer, a JSON object (an array of them, keyed by `id`, for a batch) carries the verdict; any other answer records the chunk or the finding as errored. The structured prompts ask for tool calls, not JSON, so run such a client with both keys set to `false`, whose prompts ask for the JSON it must return.
+- **A client that ignores the tools**, as the stub below does by delegating to `complete()`: _since 1.22_, while a client has never read the recording tool's definition nor called it, its answers are read the way the JSON path reads them, and the run warns once: `The LLM client never offered the record_vulnerability tool to the model, so its answers are read as JSON; set audit.structured_collection: false for a client that ignores tools.` (`record_review` and `audit.reviewer_structured_collection` for the reviewer). Once it has done either, in any turn, it counts as offering the tools for the rest of the run, so a client that builds the tool schemas once and keeps them is read as before. For the attacker, an empty answer means no findings and a JSON array carries them (a lone finding object is read as that one finding); for the reviewer, a JSON object (an array of them, keyed by `id`, for a batch) carries the verdict; any other answer records the chunk or the finding as errored. The structured prompts ask for tool calls, not JSON, so run such a client with both keys set to `false`, whose prompts ask for the JSON it must return.
 - **JSON path** (both keys `false`): `complete()` answers with the JSON array of findings or the verdict object, and `completeWithTools()` is only called with `audit.tools_enabled` or `audit.reviewer_tools_enabled`, to offer the investigation tools (`read_file`, `grep`, …); a client that does not support tools may delegate it to `complete()`.
 
 The default implementation (`SymfonyAiLLMClient`) delegates to `symfony/ai`'s `PlatformInterface`. Replace it when you need direct HTTP calls, custom retry logic, or a provider that `symfony/ai` does not support.
@@ -159,6 +159,16 @@ services:
         public: true
 
     security_auditor.reviewer_client:
+        alias: App\Llm\AcmeLlmClient
+        public: true
+```
+
+With `audit.escalation.enabled`, the cheap first pass runs on a third client, `security_auditor.cheap_attacker_client`, which the bundle builds on the symfony/ai platform with `audit.escalation.cheap_model` whatever the other two are: replace it as well, or the cheap pass still sends the code to that platform, and stops the run when there is none. _Since 1.22_ its usage is booked like theirs, and `audit:run` notes before the run starts that the cheap pass stays on that platform when either of them is replaced and this one is not. Its answers are cached apart from the main pass's, under `security_auditor.cheap_attacker_cache` rather than `AttackerCacheInterface`, so a cheap answer is never served to the expensive model: to keep them in your own store, point that id at an `AttackerCacheInterface` service of its own.
+
+```yaml
+# config/services.yaml
+services:
+    security_auditor.cheap_attacker_client:
         alias: App\Llm\AcmeLlmClient
         public: true
 ```
