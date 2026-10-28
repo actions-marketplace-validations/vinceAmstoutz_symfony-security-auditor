@@ -47,6 +47,8 @@ final readonly class ProcessReleaseClient implements ReleaseClientInterface
 
     private const float PROCESS_TIMEOUT_SECONDS = 660.0;
 
+    private const int PROGRESS_INTERVAL_MICROSECONDS = 200_000;
+
     /**
      * @param Closure(list<string>): Process $processBuilder the curl command builder (use self::defaultProcessBuilder() in production); tests inject a stub
      */
@@ -95,30 +97,60 @@ final readonly class ProcessReleaseClient implements ReleaseClientInterface
      * @throws SelfUpdateFailedException
      */
     #[Override]
-    public function download(string $url, string $destination): void
+    public function download(string $url, string $destination, ?Closure $onProgress = null): void
     {
-        $this->run(['--max-time', self::DOWNLOAD_MAX_TRANSFER_SECONDS, '--output', $destination, '--max-filesize', self::DOWNLOAD_MAX_FILESIZE_BYTES, $url], $url);
+        $this->run(
+            ['--max-time', self::DOWNLOAD_MAX_TRANSFER_SECONDS, '--output', $destination, '--max-filesize', self::DOWNLOAD_MAX_FILESIZE_BYTES, $url],
+            $url,
+            $onProgress instanceof Closure ? static fn () => $onProgress(self::receivedBytes($destination)) : null,
+        );
     }
 
     /**
-     * @param list<string> $arguments
+     * @param list<string>           $arguments
+     * @param (Closure(): void)|null $whileRunning
      *
      * @throws SelfUpdateFailedException
      */
-    private function run(array $arguments, string $url): Process
+    private function run(array $arguments, string $url, ?Closure $whileRunning = null): Process
     {
         $process = ($this->processBuilder)($arguments);
 
         try {
-            $process->run();
+            $process->start();
+            while ($process->isRunning()) {
+                $process->checkTimeout();
+                $this->report($whileRunning);
+                usleep(self::PROGRESS_INTERVAL_MICROSECONDS);
+            }
         } catch (ExceptionInterface $exception) {
             throw SelfUpdateFailedException::forFailedDownload($url, $exception);
         }
+
+        $this->report($whileRunning);
 
         if (!$process->isSuccessful()) {
             throw SelfUpdateFailedException::forFailedDownload($url, reason: trim($process->getErrorOutput()));
         }
 
         return $process;
+    }
+
+    private static function receivedBytes(string $destination): int
+    {
+        $handle = is_file($destination) ? fopen($destination, 'r') : false;
+        $stat = false === $handle ? false : fstat($handle);
+
+        return false === $stat ? 0 : $stat['size'];
+    }
+
+    /**
+     * @param (Closure(): void)|null $whileRunning
+     */
+    private function report(?Closure $whileRunning): void
+    {
+        if ($whileRunning instanceof Closure) {
+            $whileRunning();
+        }
     }
 }
