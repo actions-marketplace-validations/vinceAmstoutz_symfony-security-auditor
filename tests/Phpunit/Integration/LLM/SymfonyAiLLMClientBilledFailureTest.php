@@ -14,8 +14,12 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM;
 
 use Override;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
+use RuntimeException;
+use Symfony\AI\Platform\Exception\AuthenticationException;
+use Symfony\AI\Platform\Exception\InvalidArgumentException as PlatformInvalidArgumentException;
 use Symfony\AI\Platform\Exception\MalformedToolCallException;
 use Symfony\AI\Platform\Exception\MaxOutputTokensException;
 use Symfony\AI\Platform\Exception\RuntimeException as PlatformRuntimeException;
@@ -134,6 +138,34 @@ final class SymfonyAiLLMClientBilledFailureTest extends TestCase
         self::assertSame([[50000, 4096]], $this->fakeRateLimiter->recorded);
         self::assertContains([self::REPORTED_USAGE_DEBUG, ['stop_reason' => 'length', 'input_tokens' => 50000, 'output_tokens' => 4096]], $this->messageCollectingLogger->records);
         self::assertNotContains(self::ESTIMATED_INPUT_DEBUG, array_column($this->messageCollectingLogger->records, 0));
+    }
+
+    /**
+     * @param array<string, int> $usage
+     *
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws LLMProviderException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws InvalidToolRegistryException
+     */
+    #[DataProvider('usageReportingNoPromptTokensCases')]
+    public function test_complete_with_tools_books_a_tool_call_the_output_limit_cut_off_whose_usage_reports_no_prompt_tokens_at_its_estimated_input_tokens(array $usage): void
+    {
+        $this->client(new ScriptedDeferredPlatform([$this->toolCallCutOffByTheOutputLimit($usage)]))->completeWithTools('sys', 'user', StructuredVulnerabilityCollectionSession::begin(new RecordVulnerabilityToolFactory(), new NullLogger(), [])->toolRegistry, 3);
+
+        self::assertSame(4103, $this->budgetTracker->tokensUsed());
+        self::assertSame([7, 4096], [$this->tokenUsageRecorder->snapshot()->inputTokens(), $this->tokenUsageRecorder->snapshot()->outputTokens()]);
+        self::assertSame([[7, 4096]], $this->fakeRateLimiter->recorded);
+        self::assertContains([self::REPORTED_USAGE_DEBUG, ['stop_reason' => 'length', 'input_tokens' => 7, 'output_tokens' => 4096]], $this->messageCollectingLogger->records);
+    }
+
+    /** @return iterable<string, array{array<string, int>}> */
+    public static function usageReportingNoPromptTokensCases(): iterable
+    {
+        yield 'a completion count alone' => [['completion_tokens' => 4096]];
+        yield 'a prompt of zero from a local OpenAI-compatible server' => [['prompt_tokens' => 0, 'completion_tokens' => 4096]];
     }
 
     /**
@@ -389,6 +421,201 @@ final class SymfonyAiLLMClientBilledFailureTest extends TestCase
     }
 
     /**
+     * @param array<string, mixed> $body
+     *
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
+     * @throws MissingAiPlatformException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
+     */
+    #[DataProvider('gatewayRefusalsWithoutAnErrorOrChoicesCases')]
+    public function test_complete_answers_a_gateway_refusal_whose_json_body_reads_as_an_empty_answer_as_an_empty_response_without_booking_it(int $status, array $body): void
+    {
+        $scriptedDeferredPlatform = new ScriptedDeferredPlatform([$this->gatewayRefusal($status, $body)]);
+
+        $llmResponse = $this->client($scriptedDeferredPlatform)->complete('sys', 'user');
+
+        self::assertSame('empty_content', $llmResponse->stopReason());
+        self::assertSame(1, $scriptedDeferredPlatform->invocations);
+        $this->assertNothingWasBooked();
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws InvalidToolRegistryException
+     * @throws LLMRequestTooLargeException
+     * @throws MissingAiPlatformException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
+     */
+    public function test_complete_with_tools_answers_a_gateway_refusal_whose_json_body_reads_as_an_empty_answer_as_an_empty_response_without_booking_it(): void
+    {
+        $scriptedDeferredPlatform = new ScriptedDeferredPlatform([$this->gatewayRefusal(404, ['detail' => 'Not Found'])]);
+
+        $llmResponse = $this->client($scriptedDeferredPlatform)->completeWithTools('sys', 'user', StructuredVulnerabilityCollectionSession::begin(new RecordVulnerabilityToolFactory(), new NullLogger(), [])->toolRegistry, 3);
+
+        self::assertSame('empty_content', $llmResponse->stopReason());
+        self::assertSame(1, $scriptedDeferredPlatform->invocations);
+        $this->assertNothingWasBooked();
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws MissingAiPlatformException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
+     */
+    public function test_complete_batch_answers_a_gateway_refusal_whose_json_body_reads_as_an_empty_answer_as_an_empty_response_without_booking_it(): void
+    {
+        $scriptedDeferredPlatform = new ScriptedDeferredPlatform([$this->gatewayRefusal(404, ['detail' => 'Not Found']), $this->gatewayRefusal(404, ['detail' => 'Not Found'])]);
+
+        $llmResponses = $this->client($scriptedDeferredPlatform)->completeBatch([['system' => 'sys', 'user' => 'user']], 2);
+
+        self::assertSame('empty_content', $llmResponses[0]->stopReason());
+        self::assertSame(1, $scriptedDeferredPlatform->invocations);
+        $this->assertNothingWasBooked();
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws InvalidToolRegistryException
+     * @throws MissingAiPlatformException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
+     */
+    public function test_complete_batch_with_tools_answers_a_gateway_refusal_whose_json_body_reads_as_an_empty_answer_as_an_empty_response_without_booking_it(): void
+    {
+        $scriptedDeferredPlatform = new ScriptedDeferredPlatform([$this->gatewayRefusal(404, ['detail' => 'Not Found']), $this->gatewayRefusal(404, ['detail' => 'Not Found']), $this->gatewayRefusal(404, ['detail' => 'Not Found'])]);
+
+        $llmResponses = $this->client($scriptedDeferredPlatform)->completeBatchWithTools([['system' => 'sys', 'user' => 'user', 'tools' => StructuredVulnerabilityCollectionSession::begin(new RecordVulnerabilityToolFactory(), new NullLogger(), [])->toolRegistry]], 2, 3);
+
+        self::assertSame('empty_content', $llmResponses[0]->stopReason());
+        self::assertSame(1, $scriptedDeferredPlatform->invocations);
+        $this->assertNothingWasBooked();
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
+     * @throws MissingAiPlatformException
+     * @throws TransientLLMFailureException
+     */
+    public function test_complete_still_aborts_on_a_refusal_the_bridge_named_as_an_authentication_failure_without_booking_it(): void
+    {
+        $scriptedDeferredPlatform = new ScriptedDeferredPlatform([$this->gatewayRefusal(401, ['error' => ['message' => 'Incorrect API key']], new AuthenticationException('Incorrect API key'))]);
+
+        $aborted = false;
+        try {
+            $this->client($scriptedDeferredPlatform)->complete('sys', 'user');
+        } catch (NonTransientLLMFailureException) {
+            $aborted = true;
+        }
+
+        self::assertTrue($aborted);
+        self::assertSame(1, $scriptedDeferredPlatform->invocations);
+        $this->assertNothingWasBooked();
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
+     * @throws MissingAiPlatformException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
+     */
+    public function test_complete_still_retries_a_refusal_whose_bridge_message_reads_as_transient(): void
+    {
+        $scriptedDeferredPlatform = new ScriptedDeferredPlatform([$this->gatewayRefusal(403, ['message' => 'busy'], new PlatformRuntimeException('Gateway temporarily unavailable')), $this->answer('[]', new TokenUsage(promptTokens: 20, completionTokens: 5))]);
+
+        $llmResponse = $this->client($scriptedDeferredPlatform)->complete('sys', 'user');
+
+        self::assertSame('[]', $llmResponse->content());
+        self::assertSame(2, $scriptedDeferredPlatform->invocations);
+        self::assertSame(25, $this->budgetTracker->tokensUsed());
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws InvalidToolRegistryException
+     * @throws LLMProviderException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     */
+    public function test_complete_with_tools_ends_a_conversation_venice_closed_with_empty_text_as_an_empty_answer_booked_at_its_reported_usage(): void
+    {
+        $structuredVulnerabilityCollectionSession = StructuredVulnerabilityCollectionSession::begin(new RecordVulnerabilityToolFactory(), new NullLogger(), []);
+        $scriptedDeferredPlatform = new ScriptedDeferredPlatform([$this->toolCallRecordingAFinding(), $this->veniceEmptyCompletion()]);
+
+        $llmResponse = $this->client($scriptedDeferredPlatform)->completeWithTools('sys', 'user', $structuredVulnerabilityCollectionSession->toolRegistry, 3);
+
+        self::assertSame('empty_content', $llmResponse->stopReason());
+        self::assertCount(1, $structuredVulnerabilityCollectionSession->drain());
+        self::assertSame([1000, 1], $this->fakeRateLimiter->recorded[1]);
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws InvalidToolRegistryException
+     * @throws LLMProviderException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     */
+    public function test_complete_batch_with_tools_ends_a_conversation_venice_closed_with_empty_text_as_an_empty_answer(): void
+    {
+        $structuredVulnerabilityCollectionSession = StructuredVulnerabilityCollectionSession::begin(new RecordVulnerabilityToolFactory(), new NullLogger(), []);
+        $scriptedDeferredPlatform = new ScriptedDeferredPlatform([$this->toolCallRecordingAFinding(), $this->veniceEmptyCompletion()]);
+
+        $llmResponses = $this->client($scriptedDeferredPlatform)->completeBatchWithTools([['system' => 'sys', 'user' => 'user', 'tools' => $structuredVulnerabilityCollectionSession->toolRegistry]], 2, 3);
+
+        self::assertSame('empty_content', $llmResponses[0]->stopReason());
+        self::assertCount(1, $structuredVulnerabilityCollectionSession->drain());
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws LLMProviderException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     */
+    public function test_complete_answers_venice_empty_text_as_an_empty_answer_booked_at_its_reported_usage(): void
+    {
+        $llmResponse = $this->client(new ScriptedDeferredPlatform([$this->veniceEmptyCompletion()]))->complete('sys', 'user');
+
+        self::assertSame('empty_content', $llmResponse->stopReason());
+        self::assertSame(1001, $this->budgetTracker->tokensUsed());
+    }
+
+    /** @return iterable<string, array{int, array<string, mixed>}> */
+    public static function gatewayRefusalsWithoutAnErrorOrChoicesCases(): iterable
+    {
+        yield 'a 404 from a wrong base url path' => [404, ['detail' => 'Not Found']];
+        yield 'a 403 from a gateway' => [403, ['message' => 'Forbidden']];
+        yield 'a 422 from a validation layer' => [422, ['detail' => [['msg' => 'field required']]]];
+    }
+
+    /**
      * @throws InvalidTokenUsageException
      */
     private function assertNothingWasBooked(): void
@@ -405,6 +632,27 @@ final class SymfonyAiLLMClientBilledFailureTest extends TestCase
         $payloadTooLarge->method('toArray')->willReturn(['message' => 'Request size limit exceeded']);
 
         return new DeferredResult(new ThrowingConverter(new PlatformRuntimeException('Response does not contain choices.')), new RawHttpResult($payloadTooLarge), []);
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     */
+    private function gatewayRefusal(int $status, array $body, ?RuntimeException $runtimeException = null): DeferredResult
+    {
+        $refusal = self::createStub(ResponseInterface::class);
+        $refusal->method('getStatusCode')->willReturn($status);
+        $refusal->method('toArray')->willReturn($body);
+
+        return new DeferredResult(new ThrowingConverter($runtimeException ?? new PlatformRuntimeException('Response does not contain choices.')), new RawHttpResult($refusal), []);
+    }
+
+    private function veniceEmptyCompletion(): DeferredResult
+    {
+        return new DeferredResult(
+            new ThrowingConverter(new PlatformInvalidArgumentException('No completions found in the response.'), new RawUsageExtractor()),
+            new InMemoryRawResult(['id' => 'chatcmpl-2', 'object' => 'chat.completion', 'model' => 'qwen3-235b', 'choices' => [['index' => 0, 'message' => ['role' => 'assistant', 'content' => ''], 'finish_reason' => 'stop']], 'usage' => ['prompt_tokens' => 1000, 'completion_tokens' => 1, 'total_tokens' => 1001]]),
+            [],
+        );
     }
 
     private function toolCallRecordingAFinding(): DeferredResult
@@ -425,11 +673,16 @@ final class SymfonyAiLLMClientBilledFailureTest extends TestCase
         ])])), new InMemoryRawResult(), []);
     }
 
-    private function toolCallCutOffByTheOutputLimit(): DeferredResult
+    /**
+     * @param array<string, int>|null $usage
+     */
+    private function toolCallCutOffByTheOutputLimit(?array $usage = null): DeferredResult
     {
+        $chatCompletion = $this->chatCompletion('length', '{"type":"sql_injection","title":"SQL inj', 50000, 4096);
+
         return new DeferredResult(
             new ThrowingConverter(new MalformedToolCallException(self::MALFORMED_ARGUMENTS), new RawUsageExtractor()),
-            new InMemoryRawResult($this->chatCompletion('length', '{"type":"sql_injection","title":"SQL inj', 50000, 4096)),
+            new InMemoryRawResult(null === $usage ? $chatCompletion : ['usage' => $usage] + $chatCompletion),
             [],
         );
     }

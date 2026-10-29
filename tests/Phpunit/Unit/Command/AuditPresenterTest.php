@@ -148,13 +148,14 @@ final class AuditPresenterTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_failure_exit_omits_success_message(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
 
-        $this->auditPresenter->result($symfonyStyle, $this->makeCriticalReport(), Command::FAILURE);
+        $this->auditPresenter->result($symfonyStyle, $this->makeCriticalReport(), Command::FAILURE, '--fail-on-incomplete');
 
         $display = $bufferedOutput->fetch();
         self::assertStringContainsString('CRITICAL', $display);
@@ -167,13 +168,14 @@ final class AuditPresenterTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_failure_exit_reflects_the_actual_risk_level_not_a_hardcoded_critical(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
 
-        $this->auditPresenter->result($symfonyStyle, $this->makeHighRiskReport(), Command::FAILURE);
+        $this->auditPresenter->result($symfonyStyle, $this->makeHighRiskReport(), Command::FAILURE, '--fail-on-incomplete');
 
         $display = $bufferedOutput->fetch();
         self::assertStringContainsString('Risk: HIGH', $display);
@@ -185,13 +187,14 @@ final class AuditPresenterTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_failure_exit_uses_singular_wording_for_exactly_one_vulnerability(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
 
-        $this->auditPresenter->result($symfonyStyle, $this->makeSingleVulnerabilityReport(), Command::FAILURE);
+        $this->auditPresenter->result($symfonyStyle, $this->makeSingleVulnerabilityReport(), Command::FAILURE, '--fail-on-incomplete');
 
         $flattened = preg_replace('/[\s!]+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringContainsString('1 vulnerability found.', $flattened);
@@ -209,13 +212,14 @@ final class AuditPresenterTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_failure_exit_does_not_blame_a_gate_it_cannot_identify(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
 
-        $this->auditPresenter->result($symfonyStyle, $this->makeLowRiskReport(), Command::FAILURE);
+        $this->auditPresenter->result($symfonyStyle, $this->makeLowRiskReport(), Command::FAILURE, '--fail-on-incomplete');
 
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringNotContainsString('at or above the fail-on threshold', $flattened);
@@ -225,16 +229,17 @@ final class AuditPresenterTest extends TestCase
 
     /**
      * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_an_incomplete_audit_never_claims_it_completed(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
-        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext = $this->contextWithAFile();
         $auditContext->recordCoverage('attacker', 'src/Analyzed.php', 'analyzed');
         $auditContext->recordCoverage('attacker', 'src/A.php', 'errored');
 
-        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), Command::SUCCESS);
+        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), Command::SUCCESS, '--fail-on-incomplete');
 
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringContainsString('[WARNING] Audit incomplete: 1 file(s) could not be fully analyzed', $flattened);
@@ -242,16 +247,17 @@ final class AuditPresenterTest extends TestCase
 
     /**
      * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_an_incomplete_audit_names_the_flag_that_would_fail_it(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
-        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext = $this->contextWithAFile();
         $auditContext->recordCoverage('attacker', 'src/Analyzed.php', 'analyzed');
         $auditContext->recordCoverage('attacker', 'src/A.php', 'errored');
 
-        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), Command::SUCCESS);
+        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), Command::SUCCESS, '--fail-on-incomplete');
 
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringContainsString('Risk: SAFE | Vulnerabilities: 0. Pass --fail-on-incomplete to fail the run when this happens.', $flattened);
@@ -259,16 +265,17 @@ final class AuditPresenterTest extends TestCase
 
     /**
      * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_an_incomplete_audit_failed_on_purpose_says_why(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
-        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext = $this->contextWithAFile();
         $auditContext->recordCoverage('attacker', 'src/Analyzed.php', 'analyzed');
         $auditContext->recordCoverage('attacker', 'src/A.php', 'errored');
 
-        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), 3);
+        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), 3, '--fail-on-incomplete');
 
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringContainsString('[ERROR] Audit incomplete: 1 file(s) could not be fully analyzed', $flattened);
@@ -280,16 +287,34 @@ final class AuditPresenterTest extends TestCase
 
     /**
      * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
+     */
+    public function test_an_incomplete_audit_failed_by_the_configuration_names_its_key(): void
+    {
+        $bufferedOutput = new BufferedOutput();
+        $auditContext = $this->contextWithAFile();
+        $auditContext->recordCoverage('attacker', 'src/Analyzed.php', 'analyzed');
+        $auditContext->recordCoverage('attacker', 'src/A.php', 'errored');
+
+        $this->auditPresenter->incompleteRunNotice(new SymfonyStyle(new StringInput(''), $bufferedOutput), AuditReport::fromContext($auditContext), 3, 'audit.fail_on_incomplete');
+
+        $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
+        self::assertStringContainsString('[ERROR] Audit incomplete: 1 file(s) could not be fully analyzed, so the absence of findings there proves nothing. Risk: SAFE | Vulnerabilities: 0. The run fails because audit.fail_on_incomplete is set.', $flattened);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_a_failed_gate_on_an_incomplete_audit_also_says_it_is_incomplete(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
-        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext = $this->contextWithAFile();
         $auditContext->recordCoverage('attacker', 'src/Analyzed.php', 'analyzed');
         $auditContext->recordCoverage('attacker', 'src/A.php', 'errored');
 
-        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), Command::FAILURE);
+        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), Command::FAILURE, '--fail-on-incomplete');
 
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringContainsString('Audit failed a configured gate.', $flattened);
@@ -305,12 +330,28 @@ final class AuditPresenterTest extends TestCase
     {
         $bufferedOutput = new BufferedOutput();
 
-        $this->auditPresenter->result(new SymfonyStyle(new StringInput(''), $bufferedOutput), $this->reportThatAnalyzedNoFile(), Command::FAILURE);
+        $this->auditPresenter->result(new SymfonyStyle(new StringInput(''), $bufferedOutput), $this->reportThatAnalyzedNoFile(), Command::FAILURE, '--fail-on-incomplete');
 
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringContainsString('[ERROR] Audit incomplete: none of the 2 file(s) in scope could be analyzed, so the run has no verdict. Vulnerabilities: 0. A run with no verdict cannot pass, so it fails.', $flattened);
         self::assertStringNotContainsString('Audit failed a configured gate.', $flattened);
         self::assertStringNotContainsString('[WARNING]', $flattened);
+        self::assertStringNotContainsString('SAFE', $flattened);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_result_for_a_scan_that_found_no_file_gives_no_verdict(): void
+    {
+        $bufferedOutput = new BufferedOutput();
+
+        $this->auditPresenter->result(new SymfonyStyle(new StringInput(''), $bufferedOutput), AuditReport::fromContext(AuditContext::forProject($this->tmpDir)), Command::FAILURE, '--fail-on-incomplete');
+
+        $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
+        self::assertStringContainsString('[ERROR] The scan found no file to audit, so the run has no verdict. A run with no verdict cannot pass, so it fails.', $flattened);
+        self::assertStringNotContainsString('Audit complete', $flattened);
+        self::assertStringNotContainsString('Audit failed a configured gate.', $flattened);
         self::assertStringNotContainsString('SAFE', $flattened);
     }
 
@@ -334,7 +375,7 @@ final class AuditPresenterTest extends TestCase
         )->withReviewerValidation(true));
         $bufferedOutput = new BufferedOutput();
 
-        $this->auditPresenter->result(new SymfonyStyle(new StringInput(''), $bufferedOutput), AuditReport::fromContext($auditContext), Command::SUCCESS);
+        $this->auditPresenter->result(new SymfonyStyle(new StringInput(''), $bufferedOutput), AuditReport::fromContext($auditContext), Command::SUCCESS, '--fail-on-incomplete');
 
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringContainsString('[WARNING] Audit incomplete: 1 file(s) could not be fully analyzed, so the absence of findings there proves nothing. Risk: SAFE | Vulnerabilities: 1.', $flattened);
@@ -349,7 +390,7 @@ final class AuditPresenterTest extends TestCase
     {
         $bufferedOutput = new BufferedOutput();
 
-        $this->auditPresenter->incompleteRunNotice(new SymfonyStyle(new StringInput(''), $bufferedOutput), $this->reportThatAnalyzedNoFile(), Command::SUCCESS);
+        $this->auditPresenter->incompleteRunNotice(new SymfonyStyle(new StringInput(''), $bufferedOutput), $this->reportThatAnalyzedNoFile(), Command::SUCCESS, '--fail-on-incomplete');
 
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringContainsString('[WARNING] Audit incomplete: none of the 2 file(s) in scope could be analyzed, so the run has no verdict. Vulnerabilities: 0. Pass --fail-on-incomplete to fail the run when this happens.', $flattened);
@@ -388,41 +429,44 @@ final class AuditPresenterTest extends TestCase
 
     /**
      * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
      */
     public function test_the_incomplete_run_notice_stays_silent_for_a_complete_audit(): void
     {
         $bufferedOutput = new BufferedOutput();
 
-        $this->auditPresenter->incompleteRunNotice(new SymfonyStyle(new StringInput(''), $bufferedOutput), AuditReport::fromContext(AuditContext::forProject($this->tmpDir)), Command::SUCCESS);
+        $this->auditPresenter->incompleteRunNotice(new SymfonyStyle(new StringInput(''), $bufferedOutput), AuditReport::fromContext($this->contextWithAFile()), Command::SUCCESS, '--fail-on-incomplete');
 
         self::assertSame('', $bufferedOutput->fetch());
     }
 
     /**
      * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_an_incomplete_audit_emits_no_success_message(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
-        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext = $this->contextWithAFile();
         $auditContext->recordCoverage('attacker', 'src/Analyzed.php', 'analyzed');
         $auditContext->recordCoverage('attacker', 'src/A.php', 'errored');
 
-        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), Command::SUCCESS);
+        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($auditContext), Command::SUCCESS, '--fail-on-incomplete');
 
         self::assertStringNotContainsString('Audit complete. Risk:', $bufferedOutput->fetch());
     }
 
     /**
      * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
      */
     public function test_result_for_success_exit_emits_success_message(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
 
-        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext(AuditContext::forProject($this->tmpDir)), Command::SUCCESS);
+        $this->auditPresenter->result($symfonyStyle, AuditReport::fromContext($this->contextWithAFile()), Command::SUCCESS, '--fail-on-incomplete');
 
         $display = $bufferedOutput->fetch();
         self::assertStringContainsString('Audit complete. Risk:', $display);
@@ -466,6 +510,32 @@ final class AuditPresenterTest extends TestCase
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
         self::assertStringContainsString('first notice about the cache', $flattened);
         self::assertStringContainsString('second notice about batching', $flattened);
+    }
+
+    public function test_min_score_below_range_says_the_value_never_fails_a_run(): void
+    {
+        $bufferedOutput = new BufferedOutput();
+        $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
+
+        $this->auditPresenter->minScoreBelowRange($symfonyStyle, -7);
+
+        self::assertStringContainsString(
+            '--min-score -7 is below 0, the lowest normalized score, so it never fails a run. Use a value from 0 to 100.',
+            preg_replace('/\s+/', ' ', str_replace('!', '', $bufferedOutput->fetch())) ?? '',
+        );
+    }
+
+    public function test_min_score_above_range_says_the_value_fails_every_run(): void
+    {
+        $bufferedOutput = new BufferedOutput();
+        $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
+
+        $this->auditPresenter->minScoreAboveRange($symfonyStyle, 101);
+
+        self::assertStringContainsString(
+            '--min-score 101 is above 100, the highest normalized score, so it fails every run. Use a value from 0 to 100.',
+            preg_replace('/\s+/', ' ', str_replace('!', '', $bufferedOutput->fetch())) ?? '',
+        );
     }
 
     public function test_baseline_generated_reports_the_path_and_count(): void
@@ -1009,17 +1079,42 @@ final class AuditPresenterTest extends TestCase
         self::assertStringEndsWith("1 file(s) in scope.\n\n", $bufferedOutput->fetch());
     }
 
-    public function test_scanned_files_warns_when_nothing_matched(): void
+    public function test_no_files_matched_names_the_project_and_the_paths_it_applied(): void
     {
         $bufferedOutput = new BufferedOutput();
         $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
 
-        $this->auditPresenter->scannedFiles($symfonyStyle, []);
+        $this->auditPresenter->noFilesMatched($symfonyStyle, '/work/demo', ['src/Command', 'lib']);
 
         $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
-        self::assertStringContainsString('No files matched.', $flattened);
-        self::assertStringContainsString('included_paths', $flattened);
+        self::assertStringContainsString('No files matched under "/work/demo" for --path src/Command, lib.', $flattened);
+        self::assertStringContainsString('Check that each --path exists in the project, relative to its root, and holds PHP, Twig, YAML or XML files.', $flattened);
+        self::assertStringNotContainsString('included_paths', $flattened);
         self::assertStringNotContainsString('file(s) in scope', $flattened);
+    }
+
+    public function test_no_files_matched_without_a_path_filter_names_only_the_project(): void
+    {
+        $bufferedOutput = new BufferedOutput();
+        $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
+
+        $this->auditPresenter->noFilesMatched($symfonyStyle, '/work/demo', []);
+
+        $flattened = preg_replace('/\s+/', ' ', $bufferedOutput->fetch()) ?? '';
+        self::assertStringContainsString('No files matched under "/work/demo". Check your included_paths configuration.', $flattened);
+        self::assertStringNotContainsString('--path', $flattened);
+    }
+
+    public function test_no_files_matched_prints_the_paths_it_names_on_one_line_without_terminal_control_characters(): void
+    {
+        $bufferedOutput = new BufferedOutput();
+        $symfonyStyle = new SymfonyStyle(new StringInput(''), $bufferedOutput);
+
+        $this->auditPresenter->noFilesMatched($symfonyStyle, "/work/de\x1b[2Jmo", ["src\n##[error]forged"]);
+
+        $rendered = $bufferedOutput->fetch();
+        self::assertStringNotContainsString("\x1b", $rendered);
+        self::assertStringNotContainsString('##[', $rendered);
     }
 
     public function test_scanned_files_hint_points_to_the_flag_with_the_file_count(): void
@@ -1200,6 +1295,18 @@ final class AuditPresenterTest extends TestCase
      * @throws InvalidAuditContextException
      * @throws InvalidProjectFileException
      */
+    private function contextWithAFile(): AuditContext
+    {
+        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext->setProjectFiles([ProjectFile::create('src/Foo.php', $this->tmpDir.'/src/Foo.php', '<?php')]);
+
+        return $auditContext;
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
+     */
     private function reportThatAnalyzedNoFile(): AuditReport
     {
         $auditContext = AuditContext::forProject($this->tmpDir);
@@ -1218,10 +1325,11 @@ final class AuditPresenterTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
      */
     private function makeSingleVulnerabilityReport(): AuditReport
     {
-        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext = $this->contextWithAFile();
         $auditContext->addVulnerability(
             Vulnerability::of(
                 new VulnerabilityClassification(VulnerabilityType::SQL_INJECTION, VulnerabilitySeverity::CRITICAL, 'Critical vuln', 0.9),
@@ -1239,10 +1347,11 @@ final class AuditPresenterTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
      */
     private function makeCriticalReport(): AuditReport
     {
-        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext = $this->contextWithAFile();
         for ($i = 1; $i <= 5; ++$i) {
             $auditContext->addVulnerability(
                 Vulnerability::of(
@@ -1265,10 +1374,11 @@ final class AuditPresenterTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
      */
     private function makeLowRiskReport(): AuditReport
     {
-        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext = $this->contextWithAFile();
         $auditContext->addVulnerability(
             Vulnerability::of(
                 new VulnerabilityClassification(VulnerabilityType::SQL_INJECTION, VulnerabilitySeverity::MEDIUM, 'Medium vuln', 0.9),
@@ -1286,10 +1396,11 @@ final class AuditPresenterTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
      */
     private function makeHighRiskReport(): AuditReport
     {
-        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext = $this->contextWithAFile();
         for ($i = 1; $i <= 5; ++$i) {
             $auditContext->addVulnerability(
                 Vulnerability::of(

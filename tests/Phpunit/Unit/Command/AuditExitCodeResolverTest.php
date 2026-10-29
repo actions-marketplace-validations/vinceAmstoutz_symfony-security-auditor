@@ -125,6 +125,10 @@ final class AuditExitCodeResolverTest extends TestCase
         yield 'a score above the minimum passes' => [0, 90, Command::SUCCESS];
         yield 'a high-risk report the risk gate lets through still fails the score gate' => [4, 70, Command::FAILURE];
         yield 'a minimum of zero can never fail' => [4, 0, Command::SUCCESS];
+        yield 'a minimum just above the highest score fails even a perfect score' => [0, 101, Command::FAILURE];
+        yield 'a minimum far above the highest score fails even a perfect score' => [0, 150, Command::FAILURE];
+        yield 'a minimum just below zero can never fail' => [4, -1, Command::SUCCESS];
+        yield 'a minimum far below zero can never fail' => [4, -50, Command::SUCCESS];
     }
 
     /**
@@ -256,6 +260,20 @@ final class AuditExitCodeResolverTest extends TestCase
     public function test_a_complete_report_passes_when_asked_to_fail_on_an_incomplete_one(): void
     {
         self::assertSame(Command::SUCCESS, $this->auditExitCodeResolver->resolve($this->reportWith(0), RiskLevel::Critical, null, true));
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_report_whose_scan_left_a_file_out_passes_when_asked_to_fail_on_an_incomplete_one(): void
+    {
+        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext->setProjectFiles([ProjectFile::create('src/Audited.php', $this->tmpDir.'/src/Audited.php', '<?php')]);
+        $auditContext->recordCoverage('scan', 'src/Big.php', 'skipped');
+        $auditContext->recordCoverage('attacker', 'src/Audited.php', 'analyzed');
+
+        self::assertSame(Command::SUCCESS, $this->auditExitCodeResolver->resolve(AuditReport::fromContext($auditContext), RiskLevel::Critical, null, true));
     }
 
     /**

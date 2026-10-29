@@ -29,19 +29,73 @@ final readonly class ReportDiffer implements ReportDifferInterface
     #[Override]
     public function diff(string $previousReportPath, string $currentReportPath): ReportDiff
     {
-        $loadedReport = $this->reportFindingsLoader->load($previousReportPath);
-        $currentReport = $this->reportFindingsLoader->load($currentReportPath);
+        return $this->compare(
+            $this->reportFindingsLoader->load($previousReportPath),
+            $this->reportFindingsLoader->load($currentReportPath),
+        );
+    }
+
+    #[Override]
+    public function diffSeries(array $reportPaths): array
+    {
+        $reportDiffs = [];
+        $previousReport = null;
+        foreach ($reportPaths as $reportPath) {
+            $currentReport = $this->reportFindingsLoader->load($reportPath);
+            if ($previousReport instanceof LoadedReport) {
+                $reportDiffs[] = $this->compare($previousReport, $currentReport);
+            }
+
+            $previousReport = $currentReport;
+        }
+
+        return $reportDiffs;
+    }
+
+    private function compare(LoadedReport $loadedReport, LoadedReport $currentReport): ReportDiff
+    {
         $previousFindings = $this->indexByFingerprint($loadedReport->findings);
         $currentFindings = $this->indexByFingerprint($currentReport->findings);
 
-        [$fixed, $unverified] = $this->partitionByAnalysis($this->only($previousFindings, $currentFindings), $currentReport);
+        [$suppressed, $disappeared] = $this->partitionBySuppression($this->only($previousFindings, $currentFindings), $currentReport->suppressedFingerprints);
+        [$fixed, $unverified] = $this->partitionByAnalysis($disappeared, $currentReport);
 
         return new ReportDiff(
             $this->only($currentFindings, $previousFindings),
             $fixed,
             $this->intersect($currentFindings, $previousFindings),
-            $unverified,
+            [...$suppressed, ...$unverified],
         );
+    }
+
+    /**
+     * A finding the current run found again and left out of its report —
+     * accepted by the baseline, or muted by type — is not fixed. Each
+     * fingerprint the report lists as suppressed shelters one disappeared
+     * finding, the way a baseline entry covers one finding.
+     *
+     * @param list<DiffFinding> $disappeared
+     * @param list<string>      $suppressedFingerprints
+     *
+     * @return array{list<DiffFinding>, list<DiffFinding>}
+     */
+    private function partitionBySuppression(array $disappeared, array $suppressedFingerprints): array
+    {
+        $credits = array_count_values($suppressedFingerprints);
+        $suppressed = [];
+        $remaining = [];
+        foreach ($disappeared as $finding) {
+            if (\array_key_exists($finding->fingerprint, $credits) && $credits[$finding->fingerprint] > 0) {
+                --$credits[$finding->fingerprint];
+                $suppressed[] = $finding;
+
+                continue;
+            }
+
+            $remaining[] = $finding;
+        }
+
+        return [$suppressed, $remaining];
     }
 
     /**

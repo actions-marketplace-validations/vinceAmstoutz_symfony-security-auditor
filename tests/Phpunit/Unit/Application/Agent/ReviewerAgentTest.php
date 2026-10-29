@@ -51,6 +51,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ToolBatchCapableLLMCl
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\NonTransientLLMFailureException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\ReviewerPromptBuilder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Tool\RecordReviewToolFactory;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\Agent\Fixture\ReviewerAgentHarness;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\Pipeline\Fixture\RecordingProgressReporter;
 
 final class ReviewerAgentTest extends TestCase
@@ -1172,7 +1173,7 @@ final class ReviewerAgentTest extends TestCase
         ));
         self::assertCount(2, $reviewedEvents);
         self::assertSame(['accepted' => true, 'status' => 'validated', 'type' => 'broken_access_control', 'file' => 'src/A.php', 'line' => 1], $reviewedEvents[0][1]);
-        self::assertSame(['accepted' => false, 'status' => 'rejected', 'type' => 'broken_access_control', 'file' => 'src/B.php', 'line' => 1], $reviewedEvents[1][1]);
+        self::assertSame(['accepted' => false, 'status' => 'errored', 'type' => 'broken_access_control', 'file' => 'src/B.php', 'line' => 1], $reviewedEvents[1][1]);
     }
 
     /**
@@ -1491,7 +1492,7 @@ final class ReviewerAgentTest extends TestCase
      * @throws InvalidToolRegistryException
      * @throws InvalidVulnerabilityNarrativeException
      */
-    public function test_batch_mode_rejects_all_when_response_is_empty(): void
+    public function test_batch_mode_records_all_errored_when_response_is_empty(): void
     {
         $vulnerability = $this->makeVulnerabilityAt('src/A.php');
         $b = $this->makeVulnerabilityAt('src/B.php');
@@ -1520,8 +1521,8 @@ final class ReviewerAgentTest extends TestCase
         self::assertFalse($result[1]->isReviewerValidated());
         self::assertSame(
             [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'rejected'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'rejected'],
+                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'errored'],
+                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'errored'],
             ],
             $auditContext->coverage(),
         );
@@ -1584,7 +1585,7 @@ final class ReviewerAgentTest extends TestCase
      * @throws InvalidToolRegistryException
      * @throws InvalidVulnerabilityNarrativeException
      */
-    public function test_batch_mode_records_coverage_rejected_for_vulnerabilities_missing_from_response(): void
+    public function test_batch_mode_records_coverage_errored_for_vulnerabilities_missing_from_response(): void
     {
         $vulnerability = $this->makeVulnerabilityAt('src/A.php');
         $b = $this->makeVulnerabilityAt('src/B.php');
@@ -1616,7 +1617,7 @@ final class ReviewerAgentTest extends TestCase
         self::assertSame(
             [
                 ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'rejected'],
+                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'errored'],
             ],
             $auditContext->coverage(),
         );
@@ -2098,7 +2099,7 @@ final class ReviewerAgentTest extends TestCase
      * @throws InvalidToolRegistryException
      * @throws InvalidVulnerabilityNarrativeException
      */
-    public function test_it_records_coverage_rejected_when_reviewer_returns_empty_response(): void
+    public function test_it_records_coverage_errored_when_reviewer_returns_empty_response(): void
     {
         $vulnerability = $this->makeVulnerability();
 
@@ -2113,7 +2114,7 @@ final class ReviewerAgentTest extends TestCase
         $reviewerAgent->review([$vulnerability], [], $auditContext);
 
         self::assertSame(
-            [['stage' => 'reviewer', 'file' => 'src/Controller/UserController.php', 'status' => 'rejected']],
+            [['stage' => 'reviewer', 'file' => 'src/Controller/UserController.php', 'status' => 'errored']],
             $auditContext->coverage(),
         );
     }
@@ -2233,116 +2234,6 @@ final class ReviewerAgentTest extends TestCase
      * @throws InvalidToolRegistryException
      * @throws InvalidVulnerabilityNarrativeException
      */
-    public function test_sequential_review_marks_findings_not_yet_reached_aborted_on_budget_exceeded_mid_run(): void
-    {
-        $vulnerabilities = [
-            $this->makeVulnerabilityAt('src/A.php'),
-            $this->makeVulnerabilityAt('src/B.php'),
-            $this->makeVulnerabilityAt('src/C.php'),
-        ];
-
-        $callCount = 0;
-        $llmClient = self::createStub(LLMClientInterface::class);
-        $llmClient
-            ->method('complete')
-            ->willReturnCallback(static function () use (&$callCount): LLMResponse {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw BudgetExceededException::forTokens(500, 100);
-                }
-
-                return LLMResponse::of('{"accepted": true}', 'claude', 'end_turn', TokenUsageSnapshot::of(1, 1));
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-        $reviewerAgent = $this->makeReviewerAgent($llmClient);
-
-        $budgetExceeded = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (BudgetExceededException) {
-            $budgetExceeded = true;
-        }
-
-        self::assertTrue($budgetExceeded, 'The reviewer must rethrow BudgetExceededException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'aborted'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'aborted'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [['file' => 'src/A.php', 'validated' => true]],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_sequential_review_marks_findings_not_yet_reached_errored_on_provider_exception_mid_run(): void
-    {
-        $vulnerabilities = [
-            $this->makeVulnerabilityAt('src/A.php'),
-            $this->makeVulnerabilityAt('src/B.php'),
-            $this->makeVulnerabilityAt('src/C.php'),
-        ];
-
-        $callCount = 0;
-        $llmClient = self::createStub(LLMClientInterface::class);
-        $llmClient
-            ->method('complete')
-            ->willReturnCallback(static function () use (&$callCount): LLMResponse {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw new LLMProviderException('platform unreachable');
-                }
-
-                return LLMResponse::of('{"accepted": true}', 'claude', 'end_turn', TokenUsageSnapshot::of(1, 1));
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-        $reviewerAgent = $this->makeReviewerAgent($llmClient);
-
-        $providerFailed = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (LLMProviderException) {
-            $providerFailed = true;
-        }
-
-        self::assertTrue($providerFailed, 'The reviewer must rethrow LLMProviderException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'errored'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'errored'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [['file' => 'src/A.php', 'validated' => true]],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
     public function test_batch_review_propagates_llm_provider_exception_instead_of_swallowing_it(): void
     {
         $batch = [$this->makeVulnerabilityAt('src/A.php'), $this->makeVulnerabilityAt('src/B.php')];
@@ -2397,150 +2288,6 @@ final class ReviewerAgentTest extends TestCase
         $this->expectException(BudgetExceededException::class);
 
         $reviewerAgent->review($batch, [], AuditContext::forProject($this->tmpDir));
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_batch_mode_marks_findings_in_batches_not_yet_reached_aborted_on_budget_exceeded_mid_run(): void
-    {
-        $vulnerabilities = $this->makeVulnerabilitiesAt('src/A.php', 'src/B.php', 'src/C.php', 'src/D.php', 'src/E.php', 'src/F.php');
-
-        $batch1Response = (string) json_encode([
-            ['id' => $vulnerabilities[0]->id(), 'accepted' => true],
-            ['id' => $vulnerabilities[1]->id(), 'accepted' => true],
-        ]);
-
-        $callCount = 0;
-        $llmClient = self::createStub(LLMClientInterface::class);
-        $llmClient
-            ->method('complete')
-            ->willReturnCallback(static function () use (&$callCount, $batch1Response): LLMResponse {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw BudgetExceededException::forTokens(500, 100);
-                }
-
-                return LLMResponse::of($batch1Response, 'claude', 'end_turn', TokenUsageSnapshot::of(0, 0));
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(),
-                new NullLogger(),
-            ),
-            new ReviewerModeConfiguration(
-                batchSize: 2,
-            ),
-        );
-
-        $budgetExceeded = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (BudgetExceededException) {
-            $budgetExceeded = true;
-        }
-
-        self::assertTrue($budgetExceeded, 'The reviewer must rethrow BudgetExceededException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'aborted'],
-                ['stage' => 'reviewer', 'file' => 'src/D.php', 'status' => 'aborted'],
-                ['stage' => 'reviewer', 'file' => 'src/E.php', 'status' => 'aborted'],
-                ['stage' => 'reviewer', 'file' => 'src/F.php', 'status' => 'aborted'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [
-                ['file' => 'src/A.php', 'validated' => true],
-                ['file' => 'src/B.php', 'validated' => true],
-            ],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_batch_mode_marks_findings_in_batches_not_yet_reached_errored_on_provider_exception_mid_run(): void
-    {
-        $vulnerabilities = $this->makeVulnerabilitiesAt('src/A.php', 'src/B.php', 'src/C.php', 'src/D.php', 'src/E.php', 'src/F.php');
-
-        $batch1Response = (string) json_encode([
-            ['id' => $vulnerabilities[0]->id(), 'accepted' => true],
-            ['id' => $vulnerabilities[1]->id(), 'accepted' => true],
-        ]);
-
-        $callCount = 0;
-        $llmClient = self::createStub(LLMClientInterface::class);
-        $llmClient
-            ->method('complete')
-            ->willReturnCallback(static function () use (&$callCount, $batch1Response): LLMResponse {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw new LLMProviderException('platform unreachable');
-                }
-
-                return LLMResponse::of($batch1Response, 'claude', 'end_turn', TokenUsageSnapshot::of(0, 0));
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(),
-                new NullLogger(),
-            ),
-            new ReviewerModeConfiguration(
-                batchSize: 2,
-            ),
-        );
-
-        $providerFailed = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (LLMProviderException) {
-            $providerFailed = true;
-        }
-
-        self::assertTrue($providerFailed, 'The reviewer must rethrow LLMProviderException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'errored'],
-                ['stage' => 'reviewer', 'file' => 'src/D.php', 'status' => 'errored'],
-                ['stage' => 'reviewer', 'file' => 'src/E.php', 'status' => 'errored'],
-                ['stage' => 'reviewer', 'file' => 'src/F.php', 'status' => 'errored'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [
-                ['file' => 'src/A.php', 'validated' => true],
-                ['file' => 'src/B.php', 'validated' => true],
-            ],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
     }
 
     #[Override]
@@ -2670,154 +2417,6 @@ final class ReviewerAgentTest extends TestCase
         self::assertCount(2, $reviewed);
         self::assertTrue($reviewed[0]->isReviewerValidated());
         self::assertTrue($reviewed[1]->isReviewerValidated());
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_concurrent_review_preserves_earlier_window_verdicts_and_marks_later_window_aborted_on_budget_exceeded(): void
-    {
-        $vulnerabilities = [
-            $this->makeVulnerabilityAt('src/A.php'),
-            $this->makeVulnerabilityAt('src/B.php'),
-            $this->makeVulnerabilityAt('src/C.php'),
-            $this->makeVulnerabilityAt('src/D.php'),
-        ];
-
-        $callCount = 0;
-        $llmClient = $this->createMock(BatchCapableLLMClientInterface::class);
-        $llmClient
-            ->expects(self::exactly(2))
-            ->method('completeBatch')
-            ->willReturnCallback(static function (array $requests) use (&$callCount): array {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw BudgetExceededException::forTokens(500, 100);
-                }
-
-                return array_map(
-                    static fn (): LLMResponse => LLMResponse::of('{"accepted": true}', 'm', 'end_turn', TokenUsageSnapshot::of(1, 1)),
-                    $requests,
-                );
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(),
-                new NullLogger(),
-            ),
-            new ReviewerModeConfiguration(
-                maxConcurrent: 2,
-            ),
-        );
-
-        $budgetExceeded = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (BudgetExceededException) {
-            $budgetExceeded = true;
-        }
-
-        self::assertTrue($budgetExceeded, 'The reviewer must rethrow BudgetExceededException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'aborted'],
-                ['stage' => 'reviewer', 'file' => 'src/D.php', 'status' => 'aborted'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [
-                ['file' => 'src/A.php', 'validated' => true],
-                ['file' => 'src/B.php', 'validated' => true],
-            ],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_concurrent_review_preserves_earlier_window_verdicts_and_marks_later_window_errored_on_provider_exception(): void
-    {
-        $vulnerabilities = [
-            $this->makeVulnerabilityAt('src/A.php'),
-            $this->makeVulnerabilityAt('src/B.php'),
-            $this->makeVulnerabilityAt('src/C.php'),
-            $this->makeVulnerabilityAt('src/D.php'),
-        ];
-
-        $callCount = 0;
-        $llmClient = $this->createMock(BatchCapableLLMClientInterface::class);
-        $llmClient
-            ->expects(self::exactly(2))
-            ->method('completeBatch')
-            ->willReturnCallback(static function (array $requests) use (&$callCount): array {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw new LLMProviderException('platform unreachable');
-                }
-
-                return array_map(
-                    static fn (): LLMResponse => LLMResponse::of('{"accepted": true}', 'm', 'end_turn', TokenUsageSnapshot::of(1, 1)),
-                    $requests,
-                );
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(),
-                new NullLogger(),
-            ),
-            new ReviewerModeConfiguration(
-                maxConcurrent: 2,
-            ),
-        );
-
-        $providerFailed = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (LLMProviderException) {
-            $providerFailed = true;
-        }
-
-        self::assertTrue($providerFailed, 'The reviewer must rethrow LLMProviderException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'errored'],
-                ['stage' => 'reviewer', 'file' => 'src/D.php', 'status' => 'errored'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [
-                ['file' => 'src/A.php', 'validated' => true],
-                ['file' => 'src/B.php', 'validated' => true],
-            ],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
     }
 
     /**
@@ -3130,16 +2729,65 @@ final class ReviewerAgentTest extends TestCase
         self::assertSame(['Reviewer agent validating findings', ['count' => 1, 'batch_size' => 1, 'tools_enabled' => true, 'structured_collection' => false]], $infoLogs[0]);
     }
 
-    private function makeReviewerAgent(LLMClientInterface $llmClient): ReviewerAgent
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
+     * @throws BudgetExceededException
+     * @throws LLMProviderException
+     * @throws InvalidToolRegistryException
+     * @throws InvalidTokenUsageException
+     */
+    public function test_its_tools_open_the_files_named_for_them_instead_of_the_audited_files(): void
+    {
+        $audited = [$this->makeFile('src/A.php')];
+        $toolFiles = [...$audited, $this->makeFile('src/Service/Clean.php')];
+        $toolFactory = $this->createMock(ToolRegistryFactoryInterface::class);
+        $toolFactory->expects(self::once())->method('forProjectFiles')->with($toolFiles)->willReturn(new ToolRegistry([], new NullLogger()));
+        $llmClient = self::createStub(LLMClientInterface::class);
+        $llmClient->method('completeWithTools')->willReturn(LLMResponse::of('{"accepted": true}', 'claude', 'end_turn', TokenUsageSnapshot::of(10, 10)));
+
+        $reviewed = $this->toolEnabledReviewerAgent($llmClient, $toolFactory)->review([$this->makeVulnerabilityAt('src/A.php')], $audited, new NullCoverageRecorder(), toolFiles: $toolFiles);
+
+        self::assertCount(1, $reviewed);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidProjectFileException
+     * @throws BudgetExceededException
+     * @throws LLMProviderException
+     * @throws InvalidToolRegistryException
+     * @throws InvalidTokenUsageException
+     */
+    public function test_its_tools_open_the_audited_files_when_no_other_files_are_named(): void
+    {
+        $audited = [$this->makeFile('src/A.php')];
+        $toolFactory = $this->createMock(ToolRegistryFactoryInterface::class);
+        $toolFactory->expects(self::once())->method('forProjectFiles')->with($audited)->willReturn(new ToolRegistry([], new NullLogger()));
+        $llmClient = self::createStub(LLMClientInterface::class);
+        $llmClient->method('completeWithTools')->willReturn(LLMResponse::of('{"accepted": true}', 'claude', 'end_turn', TokenUsageSnapshot::of(10, 10)));
+
+        $reviewed = $this->toolEnabledReviewerAgent($llmClient, $toolFactory)->review([$this->makeVulnerabilityAt('src/A.php')], $audited, new NullCoverageRecorder());
+
+        self::assertCount(1, $reviewed);
+    }
+
+    private function toolEnabledReviewerAgent(LLMClientInterface $llmClient, ToolRegistryFactoryInterface $toolRegistryFactory): ReviewerAgent
     {
         return new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(),
-                new NullLogger(),
-            ),
-            new ReviewerModeConfiguration(),
+            new ReviewerAgentCollaborators($llmClient, new ReviewerPromptBuilder(), new NullLogger()),
+            new ReviewerModeConfiguration(toolsEnabled: true, useStructuredCollection: false),
+            toolRegistryFactory: $toolRegistryFactory,
         );
+    }
+
+    private function makeReviewerAgent(LLMClientInterface $llmClient): ReviewerAgent
+    {
+        return ReviewerAgentHarness::reviewerAgent($llmClient);
     }
 
     /**
@@ -3662,201 +3310,6 @@ final class ReviewerAgentTest extends TestCase
      * @throws InvalidToolRegistryException
      * @throws InvalidVulnerabilityNarrativeException
      */
-    public function test_structured_single_review_preserves_a_verdict_recorded_before_a_later_round_of_the_same_review_aborts_on_budget_exceeded(): void
-    {
-        $vulnerability = $this->makeVulnerabilityAt('src/A.php');
-
-        $llmClient = $this->createMock(LLMClientInterface::class);
-        $llmClient
-            ->expects(self::once())
-            ->method('completeWithTools')
-            ->willReturnCallback(static function (string $system, string $user, ToolRegistry $toolRegistry) use ($vulnerability): LLMResponse {
-                $toolRegistry->execute('record_review', [
-                    'id' => $vulnerability->id(),
-                    'accepted' => true,
-                    'reviewer_notes' => 'recorded before the abort',
-                ]);
-
-                throw BudgetExceededException::forTokens(10, 5);
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(useStructuredCollection: true),
-                new NullLogger(),
-                recordReviewToolFactory: new RecordReviewToolFactory(),
-            ),
-            new ReviewerModeConfiguration(
-                useStructuredCollection: true,
-            ),
-        );
-
-        $budgetExceeded = false;
-        try {
-            $reviewerAgent->review([$vulnerability], [], $auditContext);
-        } catch (BudgetExceededException) {
-            $budgetExceeded = true;
-        }
-
-        self::assertTrue($budgetExceeded, 'The reviewer must rethrow BudgetExceededException.');
-        self::assertSame(
-            [['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated']],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [['file' => 'src/A.php', 'validated' => true]],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_structured_single_review_marks_findings_not_yet_reached_aborted_on_budget_exceeded_mid_run(): void
-    {
-        $vulnerabilities = [
-            $this->makeVulnerabilityAt('src/A.php'),
-            $this->makeVulnerabilityAt('src/B.php'),
-            $this->makeVulnerabilityAt('src/C.php'),
-        ];
-
-        $callCount = 0;
-        $llmClient = self::createStub(LLMClientInterface::class);
-        $llmClient
-            ->method('completeWithTools')
-            ->willReturnCallback(static function (string $system, string $user, ToolRegistry $toolRegistry) use (&$callCount, $vulnerabilities): LLMResponse {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw BudgetExceededException::forTokens(500, 100);
-                }
-
-                $toolRegistry->execute('record_review', ['id' => $vulnerabilities[0]->id(), 'accepted' => true]);
-
-                return LLMResponse::of('', 'claude', 'end_turn', TokenUsageSnapshot::of(1, 1));
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(useStructuredCollection: true),
-                new NullLogger(),
-                recordReviewToolFactory: new RecordReviewToolFactory(),
-            ),
-            new ReviewerModeConfiguration(
-                useStructuredCollection: true,
-            ),
-        );
-
-        $budgetExceeded = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (BudgetExceededException) {
-            $budgetExceeded = true;
-        }
-
-        self::assertTrue($budgetExceeded, 'The reviewer must rethrow BudgetExceededException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'aborted'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'aborted'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [['file' => 'src/A.php', 'validated' => true]],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_structured_single_review_marks_findings_not_yet_reached_errored_on_provider_exception_mid_run(): void
-    {
-        $vulnerabilities = [
-            $this->makeVulnerabilityAt('src/A.php'),
-            $this->makeVulnerabilityAt('src/B.php'),
-            $this->makeVulnerabilityAt('src/C.php'),
-        ];
-
-        $callCount = 0;
-        $llmClient = self::createStub(LLMClientInterface::class);
-        $llmClient
-            ->method('completeWithTools')
-            ->willReturnCallback(static function (string $system, string $user, ToolRegistry $toolRegistry) use (&$callCount, $vulnerabilities): LLMResponse {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw new LLMProviderException('platform unreachable');
-                }
-
-                $toolRegistry->execute('record_review', ['id' => $vulnerabilities[0]->id(), 'accepted' => true]);
-
-                return LLMResponse::of('', 'claude', 'end_turn', TokenUsageSnapshot::of(1, 1));
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(useStructuredCollection: true),
-                new NullLogger(),
-                recordReviewToolFactory: new RecordReviewToolFactory(),
-            ),
-            new ReviewerModeConfiguration(
-                useStructuredCollection: true,
-            ),
-        );
-
-        $providerFailed = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (LLMProviderException) {
-            $providerFailed = true;
-        }
-
-        self::assertTrue($providerFailed, 'The reviewer must rethrow LLMProviderException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'errored'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'errored'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [['file' => 'src/A.php', 'validated' => true]],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
     public function test_structured_collection_batch_marks_errored_on_throwable(): void
     {
         $llmClient = self::createStub(LLMClientInterface::class);
@@ -4000,66 +3453,6 @@ final class ReviewerAgentTest extends TestCase
                 ['file' => 'src/A.php', 'validated' => true],
                 ['file' => 'src/B.php', 'validated' => false],
             ],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_structured_collection_batch_preserves_a_verdict_recorded_before_the_batch_call_aborts_on_budget_exceeded(): void
-    {
-        $vulnerability = $this->makeVulnerabilityAt('src/A.php');
-        $neverReached = $this->makeVulnerabilityAt('src/B.php');
-
-        $llmClient = $this->createMock(LLMClientInterface::class);
-        $llmClient
-            ->expects(self::once())
-            ->method('completeWithTools')
-            ->willReturnCallback(static function (string $system, string $user, ToolRegistry $toolRegistry) use ($vulnerability): LLMResponse {
-                $toolRegistry->execute('record_review', ['id' => $vulnerability->id(), 'accepted' => true]);
-
-                throw BudgetExceededException::forTokens(10, 5);
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(useStructuredCollection: true),
-                new NullLogger(),
-                recordReviewToolFactory: new RecordReviewToolFactory(),
-            ),
-            new ReviewerModeConfiguration(
-                batchSize: 5,
-                useStructuredCollection: true,
-            ),
-        );
-
-        $budgetExceeded = false;
-        try {
-            $reviewerAgent->review([$vulnerability, $neverReached], [], $auditContext);
-        } catch (BudgetExceededException) {
-            $budgetExceeded = true;
-        }
-
-        self::assertTrue($budgetExceeded, 'The reviewer must rethrow BudgetExceededException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'aborted'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [['file' => 'src/A.php', 'validated' => true]],
             array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
         );
     }
@@ -4601,62 +3994,6 @@ final class ReviewerAgentTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws BudgetExceededException
      * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_concurrent_structured_review_preserves_a_verdict_recorded_before_the_whole_batch_call_aborts_on_budget_exceeded(): void
-    {
-        $vulnerability = $this->makeVulnerabilityAt('src/A.php');
-
-        $llmClient = $this->createMock(ToolBatchCapableLLMClientInterface::class);
-        $llmClient
-            ->expects(self::once())
-            ->method('completeBatchWithTools')
-            ->willReturnCallback(static function (array $requests) use ($vulnerability): array {
-                self::registryOf($requests[0])->execute('record_review', ['id' => $vulnerability->id(), 'accepted' => true]);
-
-                throw BudgetExceededException::forTokens(10, 5);
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(useStructuredCollection: true),
-                new NullLogger(),
-                recordReviewToolFactory: new RecordReviewToolFactory(),
-            ),
-            new ReviewerModeConfiguration(
-                maxConcurrent: 4,
-                useStructuredCollection: true,
-            ),
-        );
-
-        $budgetExceeded = false;
-        try {
-            $reviewerAgent->review([$vulnerability], [], $auditContext);
-        } catch (BudgetExceededException) {
-            $budgetExceeded = true;
-        }
-
-        self::assertTrue($budgetExceeded, 'The reviewer must rethrow BudgetExceededException.');
-        self::assertSame(
-            [['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated']],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [['file' => 'src/A.php', 'validated' => true]],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
      * @throws InvalidToolRegistryException
      * @throws InvalidVulnerabilityNarrativeException
      */
@@ -5006,150 +4343,6 @@ final class ReviewerAgentTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws BudgetExceededException
      * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_structured_concurrent_reviews_preserve_earlier_window_verdicts_and_mark_later_window_aborted_on_budget_exceeded(): void
-    {
-        $vulnerabilities = $this->makeVulnerabilitiesAt('src/A.php', 'src/B.php', 'src/C.php', 'src/D.php');
-
-        $callCount = 0;
-        $llmClient = $this->createMock(ToolBatchCapableLLMClientInterface::class);
-        $llmClient
-            ->expects(self::exactly(2))
-            ->method('completeBatchWithTools')
-            ->willReturnCallback(static function (array $requests) use (&$callCount, $vulnerabilities): array {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw BudgetExceededException::forTokens(10, 5);
-                }
-
-                foreach ($requests as $position => $request) {
-                    self::registryOf($request)->execute('record_review', ['id' => $vulnerabilities[$position]->id(), 'accepted' => true]);
-                }
-
-                return array_fill(0, \count($requests), LLMResponse::of('', 'm', 'end_turn', TokenUsageSnapshot::of(1, 1)));
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(useStructuredCollection: true),
-                new NullLogger(),
-                recordReviewToolFactory: new RecordReviewToolFactory(),
-            ),
-            new ReviewerModeConfiguration(
-                maxConcurrent: 2,
-                useStructuredCollection: true,
-            ),
-        );
-
-        $budgetExceeded = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (BudgetExceededException) {
-            $budgetExceeded = true;
-        }
-
-        self::assertTrue($budgetExceeded, 'The reviewer must rethrow BudgetExceededException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'aborted'],
-                ['stage' => 'reviewer', 'file' => 'src/D.php', 'status' => 'aborted'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [
-                ['file' => 'src/A.php', 'validated' => true],
-                ['file' => 'src/B.php', 'validated' => true],
-            ],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    public function test_structured_concurrent_reviews_preserve_earlier_window_verdicts_and_mark_later_window_errored_on_provider_exception(): void
-    {
-        $vulnerabilities = $this->makeVulnerabilitiesAt('src/A.php', 'src/B.php', 'src/C.php', 'src/D.php');
-
-        $callCount = 0;
-        $llmClient = $this->createMock(ToolBatchCapableLLMClientInterface::class);
-        $llmClient
-            ->expects(self::exactly(2))
-            ->method('completeBatchWithTools')
-            ->willReturnCallback(static function (array $requests) use (&$callCount, $vulnerabilities): array {
-                ++$callCount;
-                if (2 === $callCount) {
-                    throw new LLMProviderException('platform unreachable');
-                }
-
-                foreach ($requests as $position => $request) {
-                    self::registryOf($request)->execute('record_review', ['id' => $vulnerabilities[$position]->id(), 'accepted' => true]);
-                }
-
-                return array_fill(0, \count($requests), LLMResponse::of('', 'm', 'end_turn', TokenUsageSnapshot::of(1, 1)));
-            });
-
-        $auditContext = AuditContext::forProject($this->tmpDir);
-
-        $reviewerAgent = new ReviewerAgent(
-            new ReviewerAgentCollaborators(
-                $llmClient,
-                new ReviewerPromptBuilder(useStructuredCollection: true),
-                new NullLogger(),
-                recordReviewToolFactory: new RecordReviewToolFactory(),
-            ),
-            new ReviewerModeConfiguration(
-                maxConcurrent: 2,
-                useStructuredCollection: true,
-            ),
-        );
-
-        $providerFailed = false;
-        try {
-            $reviewerAgent->review($vulnerabilities, [], $auditContext);
-        } catch (LLMProviderException) {
-            $providerFailed = true;
-        }
-
-        self::assertTrue($providerFailed, 'The reviewer must rethrow LLMProviderException.');
-        self::assertSame(
-            [
-                ['stage' => 'reviewer', 'file' => 'src/A.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/B.php', 'status' => 'validated'],
-                ['stage' => 'reviewer', 'file' => 'src/C.php', 'status' => 'errored'],
-                ['stage' => 'reviewer', 'file' => 'src/D.php', 'status' => 'errored'],
-            ],
-            $auditContext->coverage(),
-        );
-        self::assertSame(
-            [
-                ['file' => 'src/A.php', 'validated' => true],
-                ['file' => 'src/B.php', 'validated' => true],
-            ],
-            array_map($this->reviewedFindingShape(...), $auditContext->drainReviewedFindings()),
-        );
-    }
-
-    /**
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws BudgetExceededException
-     * @throws LLMProviderException
      * @throws InvalidToolRegistryException
      * @throws InvalidVulnerabilityNarrativeException
      */
@@ -5398,7 +4591,7 @@ final class ReviewerAgentTest extends TestCase
      * @throws InvalidToolRegistryException
      * @throws InvalidVulnerabilityNarrativeException
      */
-    public function test_batched_review_cache_miss_stores_both_a_matched_and_an_implicitly_rejected_finding(): void
+    public function test_batched_review_cache_miss_stores_the_matched_finding_and_leaves_the_unjudged_one_out_of_the_cache(): void
     {
         $matched = $this->makeVulnerabilityAt('src/Matched.php');
         $unmatched = $this->makeVulnerabilityAt('src/Unmatched.php');
@@ -5433,8 +4626,7 @@ final class ReviewerAgentTest extends TestCase
 
         self::assertTrue($result[0]->isReviewerValidated());
         self::assertFalse($result[1]->isReviewerValidated());
-        self::assertSame(['id' => $matched->id(), 'accepted' => true], $storedVerdictsByFile['src/Matched.php']);
-        self::assertSame(['accepted' => false], $storedVerdictsByFile['src/Unmatched.php']);
+        self::assertSame(['src/Matched.php' => ['id' => $matched->id(), 'accepted' => true]], $storedVerdictsByFile);
     }
 
     /**
@@ -5564,11 +4756,7 @@ final class ReviewerAgentTest extends TestCase
 
     private static function registryOf(mixed $request): ToolRegistry
     {
-        self::assertIsArray($request);
-        $toolRegistry = $request['tools'] ?? null;
-        self::assertInstanceOf(ToolRegistry::class, $toolRegistry);
-
-        return $toolRegistry;
+        return ReviewerAgentHarness::registryOf($request);
     }
 
     /**
@@ -5576,7 +4764,7 @@ final class ReviewerAgentTest extends TestCase
      */
     private function reviewedFindingShape(Vulnerability $vulnerability): array
     {
-        return ['file' => $vulnerability->filePath(), 'validated' => $vulnerability->isReviewerValidated()];
+        return ReviewerAgentHarness::reviewedFindingShape($vulnerability);
     }
 
     private function coverageRecorderThrowingOnValidated(string $filePath): CoverageRecorderInterface
@@ -5607,24 +4795,7 @@ final class ReviewerAgentTest extends TestCase
         string $filePath,
         VulnerabilitySeverity $vulnerabilitySeverity = VulnerabilitySeverity::HIGH,
     ): Vulnerability {
-        return Vulnerability::of(
-            new VulnerabilityClassification(VulnerabilityType::BROKEN_ACCESS_CONTROL, $vulnerabilitySeverity, 'Test '.$filePath, 0.9),
-            new CodeLocation($filePath, 1, 5),
-            new VulnerabilityNarrative('Test', 'vec', 'proof', 'fix'),
-            'code',
-        );
-    }
-
-    /**
-     * @return list<Vulnerability>
-     *
-     * @throws InvalidCodeLocationException
-     * @throws InvalidVulnerabilityClassificationException
-     * @throws InvalidVulnerabilityNarrativeException
-     */
-    private function makeVulnerabilitiesAt(string ...$filePaths): array
-    {
-        return array_values(array_map($this->makeVulnerabilityAt(...), $filePaths));
+        return ReviewerAgentHarness::vulnerabilityAt($filePath, $vulnerabilitySeverity);
     }
 
     /**

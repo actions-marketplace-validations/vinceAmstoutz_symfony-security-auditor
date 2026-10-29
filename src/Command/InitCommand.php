@@ -18,6 +18,8 @@ use Symfony\Component\Console\Attribute\MapInput;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Exception\MissingInputException;
 use Symfony\Component\Console\Formatter\OutputFormatter;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Question\ChoiceQuestion;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\Filesystem\Filesystem;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Bridge\BridgeInstallerInterface;
@@ -38,6 +40,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\RoundTripYa
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfigFactoryInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfigWriterInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\XdgConfigPathResolver;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Pricing\PricedModelListInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\HiddenInputUnavailableException;
 
 use function Symfony\Component\String\b;
@@ -53,15 +56,19 @@ final readonly class InitCommand
 
     private const string MODEL_PLACEHOLDER = '<model id>';
 
+    private const string DEFAULT_MODEL = 'claude-opus-5-5';
+
     public function __construct(
         private XdgConfigPathResolver $xdgConfigPathResolver,
         private StandaloneConfigFactoryInterface $standaloneConfigFactory,
         private StandaloneConfigWriterInterface $standaloneConfigWriter,
         private BridgeInstallerInterface $bridgeInstaller,
+        private ComposerPreflight $composerPreflight,
         private CredentialStoreInterface $credentialStore,
         private Filesystem $filesystem = new Filesystem(),
         private ProviderKeyNormalizer $providerKeyNormalizer = new ProviderKeyNormalizer(),
         private CredentialPromptInterface $credentialPrompt = new HiddenCredentialPrompt(),
+        private ?PricedModelListInterface $pricedModelList = null,
     ) {}
 
     /**
@@ -70,11 +77,37 @@ final readonly class InitCommand
      */
     public function __invoke(
         SymfonyStyle $symfonyStyle,
+        InputInterface $input,
         #[MapInput] InitCommandInput $initCommandInput,
     ): int {
+        if ($this->declinesTheOverwriteUnasked($input, $initCommandInput->force)) {
+            return $this->configure($symfonyStyle, $initCommandInput);
+        }
+
+        return $this->composerPreflight->refusal($symfonyStyle) ?? $this->configure($symfonyStyle, $initCommandInput);
+    }
+
+    /**
+     * A run that cannot ask, without `--force`, leaves an existing
+     * configuration as it is, so it goes the way it always went, without
+     * checking first for a Composer it will not use.
+     *
+     * @throws UnresolvableConfigPathException
+     */
+    private function declinesTheOverwriteUnasked(InputInterface $input, bool $force): bool
+    {
+        return !$force && !$input->isInteractive() && $this->filesystem->exists($this->xdgConfigPathResolver->configFile());
+    }
+
+    /**
+     * @throws UnresolvableConfigPathException
+     * @throws BridgeInstallationFailedException
+     */
+    private function configure(SymfonyStyle $symfonyStyle, InitCommandInput $initCommandInput): int
+    {
         $configFile = $this->xdgConfigPathResolver->configFile();
 
-        $provider = b($initCommandInput->provider ?? $this->ask($symfonyStyle, 'Which AI provider do you want to use? (any symfony/ai platform — e.g. anthropic, openai, gemini, mistral, ollama, or generic.my_gateway for an AI gateway)', 'anthropic'))->trim()->toString();
+        $provider = b($initCommandInput->provider ?? $this->pick($symfonyStyle, 'Which AI provider do you want to use? Pick a number, or type any symfony/ai platform — e.g. ollama, or generic.my_gateway for an AI gateway', InitProviderChoices::names(), 'anthropic'))->trim()->toString();
 
         if ($this->refused($symfonyStyle, InitRefusal::forProviderText($provider))) {
             return Command::INVALID;
@@ -87,7 +120,7 @@ final readonly class InitCommand
             return Command::INVALID;
         }
 
-        $model = b($initCommandInput->model ?? $this->ask($symfonyStyle, 'Which model should the auditor use?', 'claude-opus-4-8'))->trim()->toString();
+        $model = b($initCommandInput->model ?? $this->askModel($symfonyStyle, $providerKey))->trim()->toString();
 
         if ($this->refused($symfonyStyle, InitRefusal::forModel($model, $providerKey))) {
             return Command::INVALID;
@@ -250,6 +283,37 @@ final readonly class InitCommand
         return !$force
             && $this->filesystem->exists($configFile)
             && !$symfonyStyle->confirm(\sprintf('A configuration already exists at %s. Overwrite it?', $configFile), false);
+    }
+
+    private function askModel(SymfonyStyle $symfonyStyle, ProviderKey $providerKey): string
+    {
+        $pricedModels = $this->pricedModelList?->pricedModels($providerKey->platform) ?? [];
+
+        return [] === $pricedModels
+            ? $this->ask($symfonyStyle, 'Which model should the auditor use?', self::DEFAULT_MODEL)
+            : $this->pick($symfonyStyle, 'Which model should the auditor use? Pick a number, or type any model id', $pricedModels, self::DEFAULT_MODEL);
+    }
+
+    /**
+     * @param list<string> $choices
+     */
+    private function pick(SymfonyStyle $symfonyStyle, string $question, array $choices, string $default): string
+    {
+        $choiceQuestion = new ChoiceQuestion($question, $choices, $default);
+        $choiceQuestion->setValidator(static fn (mixed $answer): string => self::chosen($choices, \is_string($answer) ? $answer : ''));
+
+        $answer = $symfonyStyle->askQuestion($choiceQuestion);
+        \assert(\is_string($answer));
+
+        return $answer;
+    }
+
+    /**
+     * @param list<string> $choices
+     */
+    private static function chosen(array $choices, string $answer): string
+    {
+        return ctype_digit($answer) ? $choices[(int) $answer] ?? $answer : $answer;
     }
 
     private function ask(SymfonyStyle $symfonyStyle, string $question, string $default): string

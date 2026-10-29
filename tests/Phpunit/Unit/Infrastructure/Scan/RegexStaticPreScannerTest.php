@@ -1889,6 +1889,32 @@ final class RegexStaticPreScannerTest extends TestCase
     /**
      * @throws InvalidCustomRiskPatternException
      */
+    #[DataProvider('valuesThatAreNoText')]
+    public function test_a_custom_risk_pattern_that_is_no_text_throws_at_construction_naming_its_key(mixed $regex, string $type): void
+    {
+        $this->expectException(InvalidCustomRiskPatternException::class);
+        $this->expectExceptionMessage(\sprintf('The scan.custom_risk_patterns.php.audit_log.regex setting is not a pattern: expected text, got %s.', $type));
+
+        new RegexStaticPreScanner([
+            'php' => [
+                'audit_log' => ['regex' => $regex, 'description' => 'test'],
+            ],
+        ]);
+    }
+
+    /**
+     * @return iterable<string, array{mixed, string}>
+     */
+    public static function valuesThatAreNoText(): iterable
+    {
+        yield 'a number' => [123, 'int'];
+        yield 'a decimal' => [1.5, 'float'];
+        yield 'a switch' => [true, 'bool'];
+    }
+
+    /**
+     * @throws InvalidCustomRiskPatternException
+     */
     public function test_an_empty_custom_risk_pattern_throws_at_construction(): void
     {
         $this->expectException(InvalidCustomRiskPatternException::class);
@@ -1969,6 +1995,117 @@ final class RegexStaticPreScannerTest extends TestCase
         $markers = $this->underATightBacktrackLimit(static fn (): array => $regexStaticPreScanner->scan([$projectFile]));
 
         self::assertSame([], $markers);
+    }
+
+    /**
+     * @param callable(int): string $content builds the file with the given number of characters between the two ends of the span
+     *
+     * @throws InvalidProjectFileException
+     * @throws InvalidRiskMarkerException
+     */
+    #[DataProvider('boundedSpanCases')]
+    public function test_a_span_between_the_two_ends_of_a_pattern_is_bounded(string $path, string $label, callable $content): void
+    {
+        $labelsAt = fn (int $span): array => array_map(
+            static fn (RiskMarker $riskMarker): string => $riskMarker->pattern(),
+            $this->regexStaticPreScanner->scan([ProjectFile::create($path, '/app/'.$path, $content($span))]),
+        );
+
+        self::assertContains($label, $labelsAt(512));
+        self::assertNotContains($label, $labelsAt(513));
+    }
+
+    /** @return iterable<string, array{0: string, 1: string, 2: callable(int): string}> */
+    public static function boundedSpanCases(): iterable
+    {
+        yield 'include up to the variable' => ['src/Service/Loader.php', 'dynamic_file_inclusion', static fn (int $span): string => "<?php\ninclude ".str_repeat('a', $span - 1).'$x;'];
+        yield 'LiveProp up to writable' => ['src/Twig/Components/Counter.php', 'live_prop_writable', static fn (int $span): string => "<?php\n#[AsLiveComponent]\n#[LiveProp(".str_repeat('a', $span).'writable: true)]'];
+        yield 'supports() parameters' => ['src/Security/FooAuthenticator.php', 'supports_returns_null', static fn (int $span): string => "<?php\nclass FooAuthenticator implements AuthenticatorInterface\n{ public function supports(".str_repeat('a', $span).') : bool { return null; } }'];
+        yield 'trusted_proxies up to the wildcard' => ['config/packages/framework.yaml', 'trusted_proxies_wildcard', static fn (int $span): string => 'trusted_proxies:'.str_repeat(' ', $span).'0.0.0.0/0'];
+        yield 'forced_ssl up to enabled' => ['config/packages/nelmio_security.yaml', 'hsts_disabled', static fn (int $span): string => 'forced_ssl:'.str_repeat(' ', $span).'enabled: false'];
+        yield 'ldap_search up to the concatenation' => ['src/Ldap/Directory.php', 'ldap_unescaped_filter_concat', static fn (int $span): string => "<?php\nldap_search(".str_repeat('a', $span).'.$name'];
+        yield 'query up to the quote' => ['src/Ldap/Directory.php', 'ldap_unescaped_filter_concat', static fn (int $span): string => "<?php\n\$ldap->query(".str_repeat('a', $span)."'.\$name"];
+        yield 'query after the quote' => ['src/Ldap/Directory.php', 'ldap_unescaped_filter_concat', static fn (int $span): string => "<?php\n\$ldap->query('".str_repeat('a', $span).'.$name'];
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidRiskMarkerException
+     */
+    #[DataProvider('filesTheMappingCannotRead')]
+    public function test_it_marks_a_controller_or_voter_the_access_control_map_could_not_read(string $relativePath, string $source): void
+    {
+        $markers = $this->unmappedAccessControlMarkers($relativePath, $source);
+
+        self::assertSame(
+            [[$relativePath, 1, 'The access-control map could not read this file, whose brackets nest too deeply or hold too many unmatched closers to parse safely: its routes, access checks and voter attributes are missing from the map, so read them in the code.']],
+            array_map(static fn (RiskMarker $riskMarker): array => [$riskMarker->filePath(), $riskMarker->line(), $riskMarker->description()], $markers),
+        );
+    }
+
+    /** @return iterable<string, array{string, string}> */
+    public static function filesTheMappingCannotRead(): iterable
+    {
+        yield 'a controller nested one level past the bar' => ['src/Controller/WipeController.php', '<?php $a = '.str_repeat('[', 5001).str_repeat(']', 5001).';'];
+        yield 'a voter holding a flood of stray closers' => ['src/Security/PostVoter.php', '<?php '.str_repeat(')', 1001)];
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidRiskMarkerException
+     */
+    #[DataProvider('filesTheMappingReadsOrNeverReads')]
+    public function test_it_does_not_mark_a_file_the_access_control_map_reads_or_never_reads(string $relativePath, string $source): void
+    {
+        self::assertSame([], $this->unmappedAccessControlMarkers($relativePath, $source));
+    }
+
+    /** @return iterable<string, array{string, string}> */
+    public static function filesTheMappingReadsOrNeverReads(): iterable
+    {
+        yield 'a controller nested to the bar' => ['src/Controller/WipeController.php', '<?php $a = '.str_repeat('[', 5000).str_repeat(']', 5000).';'];
+        yield 'a voter whose stray closers sit in a comment' => ['src/Security/PostVoter.php', '<?php /* '.str_repeat(')', 1001).' */'];
+        yield 'a service nested past the bar' => ['src/Service/Defaults.php', '<?php $a = '.str_repeat('[', 5001).str_repeat(']', 5001).';'];
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidRiskMarkerException
+     */
+    public function test_it_lists_each_file_s_markers_after_those_of_the_files_before_it(): void
+    {
+        $unreadable = '<?php $a = '.str_repeat('[', 5001).str_repeat(']', 5001).";\nunserialize(\$x);";
+
+        $markers = $this->regexStaticPreScanner->scan([
+            ProjectFile::create('src/Controller/AController.php', '/app/src/Controller/AController.php', $unreadable),
+            ProjectFile::create('src/Service/B.php', '/app/src/Service/B.php', "<?php\n\nunserialize(\$x);"),
+            ProjectFile::create('src/Controller/CController.php', '/app/src/Controller/CController.php', $unreadable),
+        ]);
+
+        self::assertSame(
+            [
+                ['src/Controller/AController.php', 2, 'unserialize_call'],
+                ['src/Controller/AController.php', 1, 'unmapped_access_control'],
+                ['src/Service/B.php', 3, 'unserialize_call'],
+                ['src/Controller/CController.php', 2, 'unserialize_call'],
+                ['src/Controller/CController.php', 1, 'unmapped_access_control'],
+            ],
+            array_map(static fn (RiskMarker $riskMarker): array => [$riskMarker->filePath(), $riskMarker->line(), $riskMarker->pattern()], $markers),
+        );
+    }
+
+    /**
+     * @return list<RiskMarker>
+     *
+     * @throws InvalidProjectFileException
+     * @throws InvalidRiskMarkerException
+     */
+    private function unmappedAccessControlMarkers(string $relativePath, string $source): array
+    {
+        return array_values(array_filter(
+            $this->regexStaticPreScanner->scan([ProjectFile::create($relativePath, '/app/'.$relativePath, $source)]),
+            static fn (RiskMarker $riskMarker): bool => 'unmapped_access_control' === $riskMarker->pattern(),
+        ));
     }
 
     /**

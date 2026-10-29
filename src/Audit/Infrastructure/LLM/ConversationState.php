@@ -14,14 +14,18 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM;
 
 use Symfony\AI\Platform\Message\MessageBag;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidTokenUsageException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\TokenUsageSnapshot;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMResponse;
 
 /**
- * One tool-using conversation's position in the wavefront: its message bag and
- * platform options, the token counters accumulated across rounds, whether a
- * tool has already run (a conversation that ran one cannot be restarted from
- * scratch), the finalized response once it has one, and the running estimate
- * the rate limiter reserves against.
+ * One tool-using conversation's position: its message bag and platform
+ * options, the token counters accumulated across rounds, whether a tool has
+ * already run (a conversation that ran one cannot be restarted from scratch),
+ * the finalized response once it has one, the running estimate the rate
+ * limiter reserves against, how many rounds it has left, the one in flight
+ * included, and whether the model ever called a tool that does not record (a
+ * conversation that only recorded lost nothing to the round limit).
  *
  * Updates are copy-on-write — `$bag` is a mutable collaborator whose contents
  * are appended in place, but every scalar transition returns a new instance.
@@ -43,7 +47,17 @@ final readonly class ConversationState
         public bool $toolsRan,
         public ?LLMResponse $response,
         public int $estimatedInputTokens,
+        public int $roundsLeft = 0,
+        public bool $askedToRead = false,
     ) {}
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    public static function start(MessageBag $messageBag, array $options, int $estimatedInputTokens): self
+    {
+        return new self($messageBag, $options, 0, 0, 0, 0, false, null, $estimatedInputTokens);
+    }
 
     /**
      * Whether every conversation of a window has its answer, so another round
@@ -62,6 +76,24 @@ final readonly class ConversationState
         return true;
     }
 
+    /**
+     * @param array<int, self> $states
+     *
+     * @return array<int, self>
+     */
+    public static function enterRound(array $states, int $round, int $maxToolIterations): array
+    {
+        return array_map(static fn (self $state): self => $state->withRoundsLeft($maxToolIterations - $round), $states);
+    }
+
+    /**
+     * @throws InvalidTokenUsageException
+     */
+    public function tokenUsage(): TokenUsageSnapshot
+    {
+        return TokenUsageSnapshot::of($this->input, $this->output, $this->cacheRead, $this->cacheCreation);
+    }
+
     public function withRecordedTokens(int $input, int $output, int $cacheRead, int $cacheCreation): self
     {
         return new self(
@@ -74,6 +106,8 @@ final readonly class ConversationState
             $this->toolsRan,
             $this->response,
             $this->estimatedInputTokens,
+            $this->roundsLeft,
+            $this->askedToRead,
         );
     }
 
@@ -89,10 +123,12 @@ final readonly class ConversationState
             $this->toolsRan,
             $llmResponse,
             $this->estimatedInputTokens,
+            $this->roundsLeft,
+            $this->askedToRead,
         );
     }
 
-    public function withExecutedTools(int $estimatedToolResultTokens): self
+    public function withExecutedTools(int $estimatedToolResultTokens, bool $askedToRead): self
     {
         return new self(
             $this->bag,
@@ -104,6 +140,25 @@ final readonly class ConversationState
             true,
             $this->response,
             $this->estimatedInputTokens + $estimatedToolResultTokens,
+            $this->roundsLeft,
+            $this->askedToRead || $askedToRead,
+        );
+    }
+
+    private function withRoundsLeft(int $roundsLeft): self
+    {
+        return new self(
+            $this->bag,
+            $this->options,
+            $this->input,
+            $this->output,
+            $this->cacheRead,
+            $this->cacheCreation,
+            $this->toolsRan,
+            $this->response,
+            $this->estimatedInputTokens,
+            $roundsLeft,
+            $this->askedToRead,
         );
     }
 }

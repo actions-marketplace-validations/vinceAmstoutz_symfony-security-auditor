@@ -34,6 +34,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Progress\ProgressR
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\Reviewer\ReviewerFeedbackHolder;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\BaselineWriteFailedException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\ReportWriteFailedException;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\ScanPathOutsideProjectException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\UnsafeBaselineWriteException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\UnsafeReportWriteException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\UnsupportedOutputFormatException;
@@ -75,6 +76,8 @@ final readonly class AuditCommand
         private RiskLevel $riskLevel = RiskLevel::Critical,
         private bool $pocSynthesisEnabled = false,
         private bool $fixSynthesisEnabled = false,
+        private AuditCommandDefaults $auditCommandDefaults = new AuditCommandDefaults(),
+        private BaselineFilePathsHolder $baselineFilePathsHolder = new BaselineFilePathsHolder(),
     ) {}
 
     /**
@@ -86,17 +89,66 @@ final readonly class AuditCommand
         SymfonyStyle $symfonyStyle,
         #[MapInput] AuditCommandInput $auditCommandInput,
     ): int {
-        $projectPath = $auditCommandInput->resolvedProjectPath();
+        $auditCommandInput->applyDefaults($this->auditCommandDefaults);
+
+        $auditTarget = AuditTarget::named($auditCommandInput->resolvedProjectPath(), $auditCommandInput->scanPaths(), $this->holdsScanFiles(...));
+        $projectPath = $auditTarget->projectPath;
         $this->auditedProjectPathHolder->set($projectPath);
 
         $displayStyle = $this->displayStyle($symfonyStyle, $auditCommandInput);
         $this->auditPresenter->header($displayStyle, $projectPath);
 
-        $this->auditPresenter->preflightWarnings($displayStyle, $this->secretScrubbingEnabled, $this->configNotices);
+        try {
+            $this->assertProjectIsDirectory($projectPath);
+            $scanPaths = ScanPathResolver::resolve($auditTarget->scanPaths, $projectPath);
+        } catch (InvalidAuditContextException|ScanPathOutsideProjectException $exception) {
+            $this->auditPresenter->error($displayStyle, $exception);
 
-        $scanPaths = $auditCommandInput->scanPaths();
+            return ExitCode::Failure->value;
+        }
+
+        if (null !== $auditTarget->folder) {
+            $this->auditPresenter->enclosingProject($displayStyle, $auditTarget->folder, $projectPath, $scanPaths);
+        }
+
+        $this->auditPresenter->preflightWarnings($displayStyle, $this->secretScrubbingEnabled, $this->configNotices);
+        $this->warnAboutMinScoreOutsideRange($displayStyle, $auditCommandInput);
 
         return $this->runAuditFlow($input, $symfonyStyle, $auditCommandInput, $projectPath, $scanPaths);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    private function holdsScanFiles(string $directory): bool
+    {
+        return $this->listScannedFilesUseCase->holdsAFile($directory);
+    }
+
+    private function warnAboutMinScoreOutsideRange(SymfonyStyle $symfonyStyle, AuditCommandInput $auditCommandInput): void
+    {
+        $belowRange = $auditCommandInput->minScoreBelowRange();
+        if (null !== $belowRange) {
+            $this->auditPresenter->minScoreBelowRange($symfonyStyle, $belowRange);
+        }
+
+        $aboveRange = $auditCommandInput->minScoreAboveRange();
+        if (null !== $aboveRange) {
+            $this->auditPresenter->minScoreAboveRange($symfonyStyle, $aboveRange);
+        }
+    }
+
+    /**
+     * Refuses a project that is not a directory before anything is scanned or
+     * warned about, so the one thing wrong is the one thing printed.
+     *
+     * @throws InvalidAuditContextException
+     */
+    private function assertProjectIsDirectory(string $projectPath): void
+    {
+        if (!is_dir($projectPath)) {
+            throw InvalidAuditContextException::forInvalidProjectPath($projectPath);
+        }
     }
 
     /**
@@ -138,6 +190,7 @@ final readonly class AuditCommand
                 $this->beginAuditRun($symfonyStyle, $auditCommandInput);
 
                 $this->reviewerFeedbackHolder->set($this->baselineProcessor->feedback($auditCommandInput->baseline));
+                $this->baselineFilePathsHolder->set($projectPath, $this->baselineProcessor->filePaths($auditCommandInput->baseline));
 
                 $report = $this->runAuditUseCase->execute($projectPath, $scanPaths, $auditCommandInput->noCache, $auditCommandInput->since, $this->acceptedFingerprintsFor($auditCommandInput));
                 $report = $this->findingTypeFilter->apply($report);
@@ -188,13 +241,20 @@ final readonly class AuditCommand
 
     /**
      * @param list<string> $scanPaths
+     *
+     * @throws InvalidAuditContextException
      */
     private function showScannedFiles(SymfonyStyle $symfonyStyle, string $projectPath, array $scanPaths, ?string $since): void
     {
-        $this->auditPresenter->scannedFiles(
-            $symfonyStyle,
-            $this->listScannedFilesUseCase->execute($projectPath, $scanPaths, $since),
-        );
+        $projectFiles = $this->listScannedFilesUseCase->execute($projectPath, $scanPaths, $since);
+
+        if ([] === $projectFiles) {
+            $this->auditPresenter->noFilesMatched($symfonyStyle, $projectPath, $scanPaths);
+
+            return;
+        }
+
+        $this->auditPresenter->scannedFiles($symfonyStyle, $projectFiles);
     }
 
     /**
@@ -258,16 +318,20 @@ final readonly class AuditCommand
      * output: a pipeline-skipped finding never reaches the report, so it
      * could not be rendered as a suppressed result — SARIF trades the
      * review-skip saving for suppressed results GitHub/GitLab can display.
+     * The baseline is read whatever the format, so a malformed entry stops
+     * the run before the first model call instead of after the whole audit.
      *
      * @return list<string>
      */
     private function acceptedFingerprintsFor(AuditCommandInput $auditCommandInput): array
     {
-        if (null !== $auditCommandInput->generateBaseline || OutputFormat::Sarif === $auditCommandInput->format) {
+        if (null !== $auditCommandInput->generateBaseline) {
             return [];
         }
 
-        return $this->baselineProcessor->acceptedFingerprints($auditCommandInput->baseline);
+        $acceptedFingerprints = $this->baselineProcessor->acceptedFingerprints($auditCommandInput->baseline);
+
+        return OutputFormat::Sarif === $auditCommandInput->format ? [] : $acceptedFingerprints;
     }
 
     /**
@@ -299,13 +363,13 @@ final readonly class AuditCommand
             $this->reportWriter->write($auditReport, $auditCommandInput->format, $auditCommandInput->output, $symfonyStyle);
         }
 
-        $exitCode = $auditCommandInput->failOnIncomplete && !$auditReport->isComplete() ? ExitCode::Incomplete->value : ExitCode::Success->value;
+        $exitCode = $auditCommandInput->failsOnIncomplete() && !$auditReport->isComplete() ? ExitCode::Incomplete->value : ExitCode::Success->value;
 
         if (!$auditCommandInput->isMachineReadableToStdout()) {
             $this->auditPresenter->baselineGenerated($symfonyStyle, $generateBaseline, $fingerprintCount);
         }
 
-        $this->auditPresenter->incompleteRunNotice($this->displayStyle($symfonyStyle, $auditCommandInput), $auditReport, $exitCode);
+        $this->auditPresenter->incompleteRunNotice($this->displayStyle($symfonyStyle, $auditCommandInput), $auditReport, $exitCode, $auditCommandInput->failOnIncompleteSetting());
 
         return $exitCode;
     }
@@ -329,16 +393,16 @@ final readonly class AuditCommand
             $baselineResult->report,
             $auditCommandInput->failOn ?? $this->riskLevel,
             $auditCommandInput->minScore,
-            $auditCommandInput->failOnIncomplete,
+            $auditCommandInput->failsOnIncomplete(),
         );
 
         if ($auditCommandInput->isMachineReadableToStdout()) {
-            $this->auditPresenter->incompleteRunNotice($this->displayStyle($symfonyStyle, $auditCommandInput), $baselineResult->report, $exitCode);
+            $this->auditPresenter->incompleteRunNotice($this->displayStyle($symfonyStyle, $auditCommandInput), $baselineResult->report, $exitCode, $auditCommandInput->failOnIncompleteSetting());
 
             return $exitCode;
         }
 
-        $this->auditPresenter->result($symfonyStyle, $baselineResult->report, $exitCode);
+        $this->auditPresenter->result($symfonyStyle, $baselineResult->report, $exitCode, $auditCommandInput->failOnIncompleteSetting());
 
         return $exitCode;
     }

@@ -13,11 +13,13 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan;
 
+use Closure;
 use Override;
 use PhpParser\Node;
 use PhpParser\Node\Arg;
 use PhpParser\Node\Expr\MethodCall;
 use PhpParser\Node\Expr\NullsafeMethodCall;
+use PhpParser\Node\Expr\StaticCall;
 use PhpParser\Node\Identifier;
 use PhpParser\Node\Scalar\String_;
 use PhpParser\Node\Stmt\Class_;
@@ -49,17 +51,21 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ControllerAccessContr
  */
 final readonly class PhpParserControllerAccessControlParser implements ControllerAccessControlParserInterface
 {
+    private const int MAX_GUARD_ATTRIBUTES_PER_ROUTE = 100;
+
     public function __construct(
         private RouteAttributeParser $routeAttributeParser = new RouteAttributeParser(),
         private NodeFinder $nodeFinder = new NodeFinder(),
         private ThisCallReachability $thisCallReachability = new ThisCallReachability(),
         private IsGrantedAttributeParser $isGrantedAttributeParser = new IsGrantedAttributeParser(),
+        private NestingDepthGuard $nestingDepthGuard = new NestingDepthGuard(),
+        private GuardConstantReader $guardConstantReader = new GuardConstantReader(),
     ) {}
 
     #[Override]
     public function parse(ProjectFile $projectFile): array
     {
-        if (!$projectFile->fileType()->isControllerLike()) {
+        if (!$projectFile->fileType()->isControllerLike() || !$this->nestingDepthGuard->admits($projectFile)) {
             return [];
         }
 
@@ -106,9 +112,10 @@ final readonly class PhpParserControllerAccessControlParser implements Controlle
     {
         $classHasIsGranted = $this->isGrantedAttributeParser->hasValueArg($class->attrGroups);
         $classLevelIsGranted = $this->isGrantedAttributeParser->extractValues($class->attrGroups);
-        $classConstants = $this->classConstantStrings($class);
+        $classGuardConstants = $this->guardConstantReader->fromAttributes($class->attrGroups);
+        $classConstants = ClassConstantStrings::of($class);
         $classRouteData = $this->routeAttributeParser->extract($class->attrGroups, $classConstants)[0];
-        $methodsByName = $this->methodsByName($class);
+        $reachableCallIndex = $this->denyAccessCallIndex($class);
 
         $entries = [];
         foreach ($class->getMethods() as $classMethod) {
@@ -116,12 +123,14 @@ final readonly class PhpParserControllerAccessControlParser implements Controlle
                 continue;
             }
 
-            $denyAccessCalls = $this->denyAccessCalls($classMethod, $methodsByName);
+            $reachableDenyAccessCalls = $reachableCallIndex->callsFrom($classMethod);
             $accessFlags = [
                 'classHasIsGranted' => $classHasIsGranted,
                 'classLevelIsGranted' => $classLevelIsGranted,
-                'methodHasDenyAccess' => [] !== $denyAccessCalls,
-                'denyAccessAttributes' => $this->attributesFromCalls($denyAccessCalls),
+                'methodHasDenyAccess' => [] !== $reachableDenyAccessCalls,
+                'denyAccessAttributes' => $this->attributesFromCalls($reachableDenyAccessCalls, $this->literalFirstArgument(...)),
+                'classGuardConstants' => $classGuardConstants,
+                'denyAccessConstants' => $this->attributesFromCalls($reachableDenyAccessCalls, $this->guardConstantReader->fromFirstArgument(...)),
             ];
 
             foreach ($this->buildEntries($filePath, $classMethod, $accessFlags, $classRouteData, $classConstants) as $entry) {
@@ -181,31 +190,6 @@ final readonly class PhpParserControllerAccessControlParser implements Controlle
     }
 
     /**
-     * A `path: self::ADMIN_PATH`/`path: static::ADMIN_PATH` argument references
-     * a class constant instead of a literal — a common way to centralize a
-     * route prefix. Resolving it to its declared string value (when the
-     * constant lives on this same class and holds a literal string) lets the
-     * renderer match it against `security.yaml` the same way a literal path
-     * already would; a constant declared elsewhere, or not a string literal,
-     * is left unresolved rather than guessed at.
-     *
-     * @return array<string, string>
-     */
-    private function classConstantStrings(Class_ $class): array
-    {
-        $constants = [];
-        foreach ($class->getConstants() as $classConst) {
-            foreach ($classConst->consts as $const) {
-                if ($const->value instanceof String_) {
-                    $constants[$const->name->toString()] = $const->value->value;
-                }
-            }
-        }
-
-        return $constants;
-    }
-
-    /**
      * A class-level `#[Route('/admin', name: 'admin_')]` acts as a path and
      * name prefix for every action's own `#[Route]` — Symfony's own attribute
      * route loader concatenates them, so a security.yaml `access_control`
@@ -213,9 +197,9 @@ final readonly class PhpParserControllerAccessControlParser implements Controlle
      * route name must be matched against the same joined values, not the
      * method's own attribute in isolation.
      *
-     * @param array{classHasIsGranted: bool, classLevelIsGranted: list<string>, methodHasDenyAccess: bool, denyAccessAttributes: list<string>} $accessFlags
-     * @param array{present: bool, path: ?string, methods: list<string>, name: ?string}                                                        $classRouteData
-     * @param array<string, string>                                                                                                            $classConstants
+     * @param array{classHasIsGranted: bool, classLevelIsGranted: list<string>, methodHasDenyAccess: bool, denyAccessAttributes: list<string>, classGuardConstants: list<string>, denyAccessConstants: list<string>} $accessFlags
+     * @param array{present: bool, path: ?string, methods: list<string>, name: ?string}                                                                                                                              $classRouteData
+     * @param array<string, string>                                                                                                                                                                                  $classConstants
      *
      * @return list<RouteAccessControl>
      */
@@ -223,6 +207,7 @@ final readonly class PhpParserControllerAccessControlParser implements Controlle
     {
         $methodLevelIsGranted = $this->isGrantedAttributeParser->extractValues($classMethod->attrGroups);
         $methodHasIsGrantedAttribute = $this->isGrantedAttributeParser->hasValueArg($classMethod->attrGroups);
+        $guardConstants = [...$this->guardConstantReader->fromAttributes($classMethod->attrGroups), ...$accessFlags['classGuardConstants'], ...$accessFlags['denyAccessConstants']];
 
         $entries = [];
         foreach ($this->routeAttributeParser->extract($classMethod->attrGroups, $classConstants) as $routeData) {
@@ -239,6 +224,7 @@ final readonly class PhpParserControllerAccessControlParser implements Controlle
                 methodHasIsGrantedAttribute: $methodHasIsGrantedAttribute,
                 classLevelIsGranted: $accessFlags['classLevelIsGranted'],
                 denyAccessAttributes: $accessFlags['denyAccessAttributes'],
+                guardConstants: $guardConstants,
             );
         }
 
@@ -273,53 +259,48 @@ final readonly class PhpParserControllerAccessControlParser implements Controlle
     }
 
     /**
-     * The reachable `denyAccessUnlessGranted()`/`isGranted()` calls of an action
-     * — including ones moved behind a shared private/protected helper (a common
+     * The `denyAccessUnlessGranted()`/`isGranted()` calls an action reaches —
+     * including ones moved behind a shared private/protected helper (a common
      * refactor for a repeated check), which would otherwise be invisible since
      * the action method's own body only calls the helper, never the guard
      * directly.
-     *
-     * @param array<string, ClassMethod> $methodsByName
-     *
-     * @return list<MethodCall|NullsafeMethodCall>
      */
-    private function denyAccessCalls(ClassMethod $classMethod, array $methodsByName): array
+    private function denyAccessCallIndex(Class_ $class): ReachableCallIndex
     {
-        $body = $this->thisCallReachability->reachableBody($classMethod, $methodsByName);
-        $methodCalls = [
-            ...$this->nodeFinder->findInstanceOf($body, MethodCall::class),
-            ...$this->nodeFinder->findInstanceOf($body, NullsafeMethodCall::class),
-        ];
-
-        return array_values(array_filter(
-            $methodCalls,
-            fn (MethodCall|NullsafeMethodCall $methodCall): bool => $this->isDenyAccessCall($methodCall),
-        ));
+        return $this->thisCallReachability->indexCalls($this->methodsByName($class), $this->isDenyAccessCall(...));
     }
 
     /**
-     * The attribute names guarded by the given `denyAccessUnlessGranted()`/
-     * `isGranted()` calls — the first argument of each, when it is a string
-     * literal. A non-literal attribute (enum case, variable, `new
-     * Expression(...)`) is left out rather than guessed at, mirroring how route
-     * paths are only resolved from literals. Duplicates are collapsed once,
-     * across every guard form, by {@see RouteAccessControl::guardAttributes()}.
+     * The attributes guarded by the given `denyAccessUnlessGranted()`/
+     * `isGranted()` calls, as `$attributeOf` reads the first argument of each:
+     * a string literal, or the class constant it names. Any other attribute
+     * (enum case, variable, `new Expression(...)`) is left out rather than
+     * guessed at, mirroring how route paths are only resolved from literals.
+     * Each distinct attribute is kept once, in the order it first appears, and
+     * only the first {@see self::MAX_GUARD_ATTRIBUTES_PER_ROUTE} are kept, so a
+     * chain of actions each reaching every later one cannot hold a quadratic
+     * number of names.
      *
-     * @param list<MethodCall|NullsafeMethodCall> $denyAccessCalls
+     * @param list<MethodCall|NullsafeMethodCall|StaticCall>                   $denyAccessCalls
+     * @param Closure(MethodCall|NullsafeMethodCall|StaticCall): (string|null) $attributeOf
      *
      * @return list<string>
      */
-    private function attributesFromCalls(array $denyAccessCalls): array
+    private function attributesFromCalls(array $denyAccessCalls, Closure $attributeOf): array
     {
-        $attributes = [];
-        foreach ($denyAccessCalls as $denyAccessCall) {
-            $firstArgument = $denyAccessCall->args[0] ?? null;
-            if ($firstArgument instanceof Arg && $firstArgument->value instanceof String_) {
-                $attributes[] = $firstArgument->value->value;
-            }
-        }
+        $attributes = array_filter(
+            array_map($attributeOf, $denyAccessCalls),
+            static fn (?string $attribute): bool => null !== $attribute,
+        );
 
-        return $attributes;
+        return \array_slice(array_unique($attributes), 0, self::MAX_GUARD_ATTRIBUTES_PER_ROUTE);
+    }
+
+    private function literalFirstArgument(MethodCall|NullsafeMethodCall|StaticCall $call): ?string
+    {
+        $firstArgument = $call->args[0] ?? null;
+
+        return $firstArgument instanceof Arg && $firstArgument->value instanceof String_ ? $firstArgument->value->value : null;
     }
 
     /**
@@ -332,13 +313,14 @@ final readonly class PhpParserControllerAccessControlParser implements Controlle
      * Symfony idiom to the shorthand `denyAccessUnlessGranted()`, used
      * whenever the action wants a custom denial message.
      */
-    private function isDenyAccessCall(MethodCall|NullsafeMethodCall $methodCall): bool
+    private function isDenyAccessCall(MethodCall|NullsafeMethodCall|StaticCall $methodCall): bool
     {
-        if ($methodCall->isFirstClassCallable()) {
+        if ($methodCall instanceof StaticCall || $methodCall->isFirstClassCallable()) {
             return false;
         }
 
         return $methodCall->name instanceof Identifier
-            && \in_array($methodCall->name->toString(), ['denyAccessUnlessGranted', 'isGranted'], true);
+            && \in_array($methodCall->name->toString(), ['denyAccessUnlessGranted', 'isGranted'], true)
+            && !$this->isGrantedAttributeParser->grantsOnlyPublicAccess($methodCall->args);
     }
 }

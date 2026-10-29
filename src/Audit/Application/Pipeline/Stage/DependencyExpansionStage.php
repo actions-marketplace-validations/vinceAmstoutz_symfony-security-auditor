@@ -15,6 +15,7 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Pipeline\Stage;
 
 use Override;
 use Psr\Log\LoggerInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Scan\ScanPathFilter;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ApplicationSecurityMap;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditContext;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\BuiltInStageName;
@@ -32,7 +33,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\StageInterface;
  * silently weakens an unrelated controller's access control is still caught.
  * Runs after `MappingStage`,
  * which builds the full-project `AccessControlMap` this stage reads from
- * regardless of diff filtering.
+ * regardless of diff filtering. A dependent outside the run's `--path` scope
+ * is left out, since the run audits nothing else.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -54,7 +56,7 @@ final readonly class DependencyExpansionStage implements StageInterface
     #[Override]
     public function process(AuditContext $auditContext): void
     {
-        if (self::DIRECT !== $this->sinceClosure || null === $auditContext->diffSinceRef()) {
+        if (!$this->widens($auditContext->diffSinceRef())) {
             return;
         }
 
@@ -66,11 +68,11 @@ final readonly class DependencyExpansionStage implements StageInterface
         $projectFiles = $auditContext->projectFiles();
         $changedPaths = array_flip(array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $projectFiles));
         $changedVoterAttributes = $this->changedVoterAttributes($changedPaths, $securityMap->authorizationRules());
-        $guardedPaths = $this->guardedControllerPaths($securityMap->entrypointAccessControls(), $changedVoterAttributes);
+        $guardedPaths = $this->guardedControllerPaths($securityMap->entrypointAccessControls(), $changedVoterAttributes, $this->voterConstantValues($securityMap->authorizationRules()));
 
         $newPaths = array_values(array_filter($guardedPaths, static fn (string $path): bool => !\array_key_exists($path, $changedPaths)));
 
-        $added = $this->resolveFiles($newPaths, $auditContext->mappingFiles());
+        $added = $this->resolveFiles($newPaths, ScanPathFilter::apply($auditContext->mappingFiles(), $auditContext->scanPaths()));
         if ([] === $added) {
             return;
         }
@@ -82,6 +84,14 @@ final readonly class DependencyExpansionStage implements StageInterface
             'changed_voter_attributes' => $changedVoterAttributes,
             'files_added' => \count($added),
         ]);
+    }
+
+    /**
+     * Whether a run against this git ref audits more than its diff.
+     */
+    public function widens(?string $diffSinceRef): bool
+    {
+        return self::DIRECT === $this->sinceClosure && null !== $diffSinceRef;
     }
 
     /**
@@ -103,16 +113,39 @@ final readonly class DependencyExpansionStage implements StageInterface
     }
 
     /**
+     * The string each voter's own constants hold, keyed as a guard names them,
+     * `Fully\Qualified\Class::NAME`, so `#[IsGranted(PostVoter::EDIT)]` reads
+     * as the attribute name it passes.
+     *
+     * @param list<VoterCapability> $voterCapabilities
+     *
+     * @return array<string, string>
+     */
+    private function voterConstantValues(array $voterCapabilities): array
+    {
+        $values = [];
+        foreach ($voterCapabilities as $voterCapability) {
+            foreach ($voterCapability->constantValues() as $name => $value) {
+                $values[\sprintf('%s::%s', $voterCapability->className(), $name)] = $value;
+            }
+        }
+
+        return $values;
+    }
+
+    /**
      * @param list<RouteAccessControl> $routeAccessControls
      * @param list<string>             $changedVoterAttributes
+     * @param array<string, string>    $voterConstantValues
      *
      * @return list<string>
      */
-    private function guardedControllerPaths(array $routeAccessControls, array $changedVoterAttributes): array
+    private function guardedControllerPaths(array $routeAccessControls, array $changedVoterAttributes, array $voterConstantValues): array
     {
         $paths = [];
         foreach ($routeAccessControls as $routeAccessControl) {
-            if ([] !== array_intersect($routeAccessControl->guardAttributes(), $changedVoterAttributes)) {
+            $guards = [...$routeAccessControl->guardAttributes(), ...array_intersect_key($voterConstantValues, array_flip($routeAccessControl->guardConstants()))];
+            if ([] !== array_intersect($guards, $changedVoterAttributes)) {
                 $paths[] = $routeAccessControl->filePath();
             }
         }

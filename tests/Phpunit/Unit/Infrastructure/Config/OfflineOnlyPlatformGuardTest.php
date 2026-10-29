@@ -19,6 +19,7 @@ use PHPUnit\Framework\TestCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\NonLocalPlatformEndpointException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\OfflineOnlyPlatformGuard;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandalonePlatformConfig;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandalonePlatformConfigResolver;
 
 final class OfflineOnlyPlatformGuardTest extends TestCase
 {
@@ -60,6 +61,33 @@ final class OfflineOnlyPlatformGuardTest extends TestCase
         yield 'uppercase host' => ['http://LOCALHOST:11434'];
         yield 'ipv4-mapped loopback' => ['http://[::ffff:127.0.0.1]:11434'];
         yield 'a percent-encoded path escaped for the container' => ['http://localhost:11434/v1%%2Fx%%3Fy'];
+        yield 'credentials in front of a local host' => ['http://user:s3cretpassword@127.0.0.1:11434'];
+    }
+
+    /**
+     * @throws NonLocalPlatformEndpointException
+     */
+    #[DataProvider('settingsThatAreNotEndpointsCases')]
+    public function test_a_setting_that_is_not_an_endpoint_does_not_make_a_local_platform_remote(string $key, string $value): void
+    {
+        $standalonePlatformConfig = new StandalonePlatformConfig(['ollama' => ['endpoint' => 'http://localhost:11434', $key => $value]]);
+
+        $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal($standalonePlatformConfig);
+
+        self::assertSame(['ollama' => ['endpoint' => 'http://localhost:11434', $key => $value]], $standalonePlatformConfig->platform);
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function settingsThatAreNotEndpointsCases(): iterable
+    {
+        yield 'an api key shaped like user:password' => ['api_key', 'user:s3cretpassword'];
+        yield 'an api key with a dash, a digit and an underscore' => ['api_key', 'team-7:tok_abcdef123456'];
+        yield 'an api key that is a secret store reference' => ['api_key', 'vault://kv/team-key'];
+        yield 'a model name with a tag' => ['model', 'llama3.2:3b'];
+        yield 'a mail address' => ['contact', 'mailto:ops@example.com'];
+        yield 'a scheme with a path and no authority' => ['socket', 'unix:/var/run/ollama.sock'];
     }
 
     /**
@@ -86,19 +114,47 @@ final class OfflineOnlyPlatformGuardTest extends TestCase
         yield 'public ipv6' => ['https://[2001:4860:4860::8888]:443'];
         yield 'ipv4-mapped public ipv6' => ['https://[::ffff:8.8.8.8]:443'];
         yield 'ipv4-mapped public ipv6 hex form' => ['https://[::ffff:808:808]:443'];
-        yield 'scheme without host' => ['file:///etc/passwd'];
     }
 
     /**
      * @throws NonLocalPlatformEndpointException
      */
-    public function test_it_judges_an_escaped_url_as_the_container_will_read_it(): void
+    #[DataProvider('quotedOriginCases')]
+    public function test_a_refusal_quotes_the_origin_of_the_endpoint_and_nothing_else(string $endpoint, string $quotedOrigin): void
     {
         $this->expectException(NonLocalPlatformEndpointException::class);
-        $this->expectExceptionMessage('"https://gw.example/v1%2Fx%3Fy"');
+        $this->expectExceptionMessage(\sprintf('would send your source code to "%s", which is not a loopback or private-range address.', $quotedOrigin));
 
         $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal(
-            new StandalonePlatformConfig(['generic' => ['gw' => ['base_url' => 'https://gw.example/v1%%2Fx%%3Fy']]]),
+            new StandalonePlatformConfig(['generic' => ['gw' => ['base_url' => $endpoint]]]),
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function quotedOriginCases(): iterable
+    {
+        yield 'no userinfo, port, path or query' => ['https://gw.example', 'https://gw.example'];
+        yield 'userinfo, path, query and fragment' => ['https://admin:hunter2@gw.example/v1?token=abc#frag', 'https://gw.example'];
+        yield 'a port' => ['https://gw.example:8443/v1/secret-path', 'https://gw.example:8443'];
+        yield 'userinfo and a port on an address' => ['https://u:p@8.8.8.8:8080', 'https://8.8.8.8:8080'];
+        yield 'a bracketed address and a port' => ['https://[2001:4860:4860::8888]:443/v1', 'https://[2001:4860:4860::8888]:443'];
+        yield 'an authority without a host' => ['file:///etc/passwd', 'file://'];
+        yield 'a percent sign escaped for the container' => ['https://gw.example/v1%%2Fx%%3Fy', 'https://gw.example'];
+        yield 'a local looking name used as credentials' => ['http://localhost:11434@gw.example', 'http://gw.example'];
+    }
+
+    /**
+     * @throws NonLocalPlatformEndpointException
+     */
+    public function test_an_endpoint_below_an_instance_named_like_the_api_key_is_still_inspected(): void
+    {
+        $this->expectException(NonLocalPlatformEndpointException::class);
+        $this->expectExceptionMessage('to "https://remote.example.com"');
+
+        $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal(
+            new StandalonePlatformConfig(['generic' => ['api_key' => ['base_url' => 'https://remote.example.com']]]),
         );
     }
 
@@ -158,6 +214,59 @@ final class OfflineOnlyPlatformGuardTest extends TestCase
     }
 
     /**
+     * @param array<array-key, mixed> $platform
+     *
+     * @throws NonLocalPlatformEndpointException
+     */
+    #[DataProvider('settingsADryRunReadFromAnUnsetVariableCases')]
+    public function test_a_dry_run_does_not_judge_a_setting_read_from_an_unset_variable(array $platform): void
+    {
+        $standalonePlatformConfig = new StandalonePlatformConfig($platform);
+
+        $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal($standalonePlatformConfig);
+
+        self::assertSame($platform, $standalonePlatformConfig->platform);
+    }
+
+    /**
+     * @return iterable<string, array{array<array-key, mixed>}>
+     */
+    public static function settingsADryRunReadFromAnUnsetVariableCases(): iterable
+    {
+        yield 'an endpoint' => [['ollama' => ['endpoint' => StandalonePlatformConfigResolver::UNNEEDED_CREDENTIAL]]];
+        yield 'an endpoint after a setting that is not one' => [['ollama' => ['model' => 'llama3.2', 'endpoint' => StandalonePlatformConfigResolver::UNNEEDED_CREDENTIAL]]];
+        yield 'a base url below an instance, beside its api key' => [['generic' => ['gw' => ['api_key' => StandalonePlatformConfigResolver::UNNEEDED_CREDENTIAL, 'base_url' => StandalonePlatformConfigResolver::UNNEEDED_CREDENTIAL]]]];
+        yield 'a base url after a nested block without one' => [['generic' => ['options' => ['model' => 'm'], 'base_url' => StandalonePlatformConfigResolver::UNNEEDED_CREDENTIAL]]];
+        yield 'a host url beside a local platform' => [['ollama' => ['endpoint' => 'http://localhost:11434'], 'lmstudio' => ['host_url' => StandalonePlatformConfigResolver::UNNEEDED_CREDENTIAL]]];
+    }
+
+    /**
+     * @throws NonLocalPlatformEndpointException
+     */
+    public function test_an_api_key_read_from_an_unset_variable_leaves_a_hosted_provider_hosted(): void
+    {
+        $this->expectException(NonLocalPlatformEndpointException::class);
+        $this->expectExceptionMessage('the "anthropic" platform is a hosted provider with no local endpoint configured');
+
+        $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal(
+            new StandalonePlatformConfig(['anthropic' => ['api_key' => StandalonePlatformConfigResolver::UNNEEDED_CREDENTIAL]]),
+        );
+    }
+
+    /**
+     * @throws NonLocalPlatformEndpointException
+     */
+    public function test_a_remote_endpoint_beside_a_setting_read_from_an_unset_variable_is_still_refused(): void
+    {
+        $this->expectException(NonLocalPlatformEndpointException::class);
+        $this->expectExceptionMessage('the "generic" platform would send your source code to "https://api.example.com"');
+
+        $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal(
+            new StandalonePlatformConfig(['generic' => ['base_url' => 'https://api.example.com', 'completions_path' => StandalonePlatformConfigResolver::UNNEEDED_CREDENTIAL]]),
+        );
+    }
+
+    /**
      * @throws NonLocalPlatformEndpointException
      */
     public function test_a_non_url_setting_is_not_mistaken_for_an_endpoint(): void
@@ -167,6 +276,19 @@ final class OfflineOnlyPlatformGuardTest extends TestCase
 
         $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal(
             new StandalonePlatformConfig(['ollama' => ['model' => 'llama3.2', 'region' => 'eu-west-3']]),
+        );
+    }
+
+    /**
+     * @throws NonLocalPlatformEndpointException
+     */
+    public function test_a_setting_that_is_not_a_string_is_not_mistaken_for_an_endpoint(): void
+    {
+        $this->expectException(NonLocalPlatformEndpointException::class);
+        $this->expectExceptionMessage('no local endpoint configured');
+
+        $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal(
+            new StandalonePlatformConfig(['ollama' => ['timeout' => 30, 'verify' => true, 'proxy' => null]]),
         );
     }
 
@@ -228,5 +350,35 @@ final class OfflineOnlyPlatformGuardTest extends TestCase
         $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal($standalonePlatformConfig);
 
         self::assertSame([], $standalonePlatformConfig->platform);
+    }
+
+    /**
+     * @param array<array-key, mixed> $platform
+     */
+    #[DataProvider('loopbackOnlyCases')]
+    public function test_it_tells_a_platform_that_stays_on_the_loopback_interface_from_one_that_does_not(array $platform, bool $loopbackOnly): void
+    {
+        self::assertSame($loopbackOnly, $this->offlineOnlyPlatformGuard->reachesOnlyLoopback(new StandalonePlatformConfig($platform)));
+    }
+
+    /**
+     * @return iterable<string, array{array<array-key, mixed>, bool}>
+     */
+    public static function loopbackOnlyCases(): iterable
+    {
+        yield 'a loopback name' => [['ollama' => ['endpoint' => 'http://localhost:11434']], true];
+        yield 'a loopback ipv4 address' => [['ollama' => ['endpoint' => 'http://127.0.0.1:11434']], true];
+        yield 'a loopback ipv6 address' => [['ollama' => ['endpoint' => 'http://[::1]:11434']], true];
+        yield 'an endpoint below an instance' => [['generic' => ['gw' => ['base_url' => 'http://127.0.0.1:8080']]], true];
+        yield 'credentials in front of a loopback host' => [['ollama' => ['endpoint' => 'http://user:s3cretpassword@127.0.0.1:11434']], true];
+        yield 'two platforms on the loopback interface' => [['ollama' => ['endpoint' => 'http://localhost:11434'], 'lmstudio' => ['host_url' => 'http://127.0.0.1:1234']], true];
+        yield 'a setting that is not an endpoint beside a loopback one' => [['ollama' => ['endpoint' => 'http://localhost:11434', 'api_key' => 'user:s3cretpassword']], true];
+        yield 'a private-range address' => [['ollama' => ['endpoint' => 'http://192.168.1.20:11434']], false];
+        yield 'a private network name' => [['ollama' => ['endpoint' => 'http://workstation.local:11434']], false];
+        yield 'a private-range address below an instance' => [['generic' => ['gw' => ['base_url' => 'http://10.0.0.2:8080']]], false];
+        yield 'a private-range address beside a loopback one' => [['ollama' => ['endpoint' => 'http://localhost:11434', 'base_url' => 'http://10.0.0.2:8080']], false];
+        yield 'a private-range platform after a loopback one' => [['ollama' => ['endpoint' => 'http://localhost:11434'], 'lmstudio' => ['host_url' => 'http://192.168.1.20:1234']], false];
+        yield 'a private-range platform before a loopback one' => [['lmstudio' => ['host_url' => 'http://192.168.1.20:1234'], 'ollama' => ['endpoint' => 'http://localhost:11434']], false];
+        yield 'a provider whose configuration is not a map beside a loopback one' => [['bedrock' => null, 'ollama' => ['endpoint' => 'http://localhost:11434']], true];
     }
 }

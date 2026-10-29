@@ -27,6 +27,7 @@ use Symfony\Component\Console\Output\ConsoleOutput;
 use Symfony\Component\Console\Output\OutputInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommand;
 use VinceAmstoutz\SymfonySecurityAuditor\Standalone\StandaloneApplication;
+use VinceAmstoutz\SymfonySecurityAuditor\Standalone\StandaloneConsoleCommandFactory;
 
 final class StandaloneApplicationTest extends TestCase
 {
@@ -182,6 +183,91 @@ final class StandaloneApplicationTest extends TestCase
         yield 'so does one whose path merely looks like the flag' => [\sprintf('%s -- --dry-run', AuditCommand::ALIAS), true];
         yield 'or like the listing flag' => [\sprintf('%s -- --show-scanned', AuditCommand::ALIAS), true];
         yield 'and so does any other command' => [self::SILENT_COMMAND, true];
+    }
+
+    #[DataProvider('projectsNamedOnTheCommandLine')]
+    public function test_it_reads_the_project_the_audit_command_line_names_whatever_options_surround_it(string $commandLine, ?string $expected): void
+    {
+        $standaloneApplication = $this->applicationWithTheAuditOptions();
+        $standaloneApplication->doRun(new StringInput($commandLine), new BufferedOutput());
+
+        self::assertSame($expected, $standaloneApplication->projectPathGivenTo($this->auditCommandDescribed()));
+    }
+
+    /** @return iterable<string, array{string, ?string}> */
+    public static function projectsNamedOnTheCommandLine(): iterable
+    {
+        yield 'a bare project' => [\sprintf('%s /srv/app', AuditCommand::ALIAS), '/srv/app'];
+        yield 'a relative project' => [\sprintf('%s ../app', AuditCommand::ALIAS), '../app'];
+        yield 'the value of an option is not the project' => [\sprintf('%s --path src /srv/app', AuditCommand::ALIAS), '/srv/app'];
+        yield 'nor is the value of a shortcut' => [\sprintf('%s -p src /srv/app --format json', AuditCommand::ALIAS), '/srv/app'];
+        yield 'a project after the options' => [\sprintf('%s --dry-run --path src -- /srv/app', AuditCommand::ALIAS), '/srv/app'];
+        yield 'no project at all' => [AuditCommand::ALIAS, null];
+        yield 'options but no project' => [\sprintf('%s --path src --dry-run', AuditCommand::ALIAS), null];
+        yield 'a blank project' => [\sprintf('%s "  "', AuditCommand::ALIAS), null];
+    }
+
+    public function test_it_reads_no_project_before_any_command_line_was_run(): void
+    {
+        self::assertNull($this->applicationWithTheAuditOptions()->projectPathGivenTo($this->auditCommandDescribed()));
+    }
+
+    public function test_it_reads_no_project_from_a_command_line_the_audit_command_cannot_bind(): void
+    {
+        $standaloneApplication = $this->applicationWithTheAuditOptions();
+        $standaloneApplication->setAutoExit(false);
+        $standaloneApplication->run(new StringInput(\sprintf('%s --env-var KEY /srv/app', self::FAILING_COMMAND)), new BufferedOutput());
+
+        self::assertNull($standaloneApplication->projectPathGivenTo($this->auditCommandDescribed()));
+    }
+
+    /**
+     * @param list<string> $expected
+     */
+    #[DataProvider('pathsGivenOnTheCommandLine')]
+    public function test_it_reads_the_paths_the_audit_command_line_gives(string $commandLine, array $expected): void
+    {
+        $standaloneApplication = $this->applicationWithTheAuditOptions();
+        $standaloneApplication->doRun(new StringInput($commandLine), new BufferedOutput());
+
+        self::assertSame($expected, $standaloneApplication->scanPathsGivenTo($this->auditCommandDescribed()));
+    }
+
+    /** @return iterable<string, array{string, list<string>}> */
+    public static function pathsGivenOnTheCommandLine(): iterable
+    {
+        yield 'one path' => [\sprintf('%s /srv/app --path src', AuditCommand::ALIAS), ['src']];
+        yield 'several, with the shortcut' => [\sprintf('%s -p src/Command --path ../config /srv/app', AuditCommand::ALIAS), ['src/Command', '../config']];
+        yield 'none' => [\sprintf('%s /srv/app --dry-run', AuditCommand::ALIAS), []];
+        yield 'a project that merely looks like the option' => [\sprintf('%s -- --path', AuditCommand::ALIAS), []];
+    }
+
+    public function test_it_reads_no_path_before_any_command_line_was_run(): void
+    {
+        self::assertSame([], $this->applicationWithTheAuditOptions()->scanPathsGivenTo($this->auditCommandDescribed()));
+    }
+
+    public function test_it_reads_no_path_from_a_command_line_the_audit_command_cannot_bind(): void
+    {
+        $standaloneApplication = $this->applicationWithTheAuditOptions();
+        $standaloneApplication->setAutoExit(false);
+        $standaloneApplication->run(new StringInput(\sprintf('%s --path src --env-var KEY', self::FAILING_COMMAND)), new BufferedOutput());
+
+        self::assertSame([], $standaloneApplication->scanPathsGivenTo($this->auditCommandDescribed()));
+    }
+
+    private function auditCommandDescribed(): Command
+    {
+        return (new StandaloneConsoleCommandFactory())->describe(AuditCommand::class);
+    }
+
+    private function applicationWithTheAuditOptions(): StandaloneApplication
+    {
+        $standaloneApplication = $this->application();
+        $silentCommand = $standaloneApplication->find(AuditCommand::NAME);
+        $silentCommand->setDefinition($this->auditCommandDescribed()->getNativeDefinition());
+
+        return $standaloneApplication;
     }
 
     private function displayOfFailure(InputInterface $input): string

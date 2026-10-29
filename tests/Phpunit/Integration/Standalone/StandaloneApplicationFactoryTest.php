@@ -23,7 +23,9 @@ use Symfony\Component\Console\Command\LazyCommand;
 use Symfony\Component\Console\Input\StringInput;
 use Symfony\Component\Console\Output\BufferedOutput;
 use Symfony\Component\Console\Tester\ApplicationTester;
+use Symfony\Component\Console\Tester\CommandTester;
 use Symfony\Component\Filesystem\Filesystem;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Bridge\BridgeInstallerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Bridge\Exception\StaleBridgeTreeException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfigLoader;
@@ -137,6 +139,62 @@ final class StandaloneApplicationFactoryTest extends TestCase
         yield 'set' => ['auth:set'];
         yield 'status' => ['auth:status'];
         yield 'remove' => ['auth:remove'];
+    }
+
+    #[DataProvider('reportCommandNames')]
+    public function test_it_registers_the_report_commands(string $commandName): void
+    {
+        $standaloneApplication = StandaloneApplicationFactory::fromEnvironment([
+            'XDG_CONFIG_HOME' => sys_get_temp_dir().'/ssa-absent-'.bin2hex(random_bytes(6)),
+            'XDG_CACHE_HOME' => $this->cacheHome,
+        ])->create();
+
+        self::assertTrue($standaloneApplication->has($commandName));
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function reportCommandNames(): iterable
+    {
+        yield 'diff' => ['audit:diff'];
+        yield 'trend' => ['audit:trend'];
+        yield 'baseline' => ['audit:baseline'];
+    }
+
+    public function test_the_report_commands_run_without_any_configuration(): void
+    {
+        $filesystem = new Filesystem();
+        $reportsDir = $this->cacheHome.'/reports';
+        $finding = ['type' => 'sql_injection', 'file' => 'src/A.php', 'title' => 'SQL Injection', 'severity' => 'high', 'fingerprint' => Vulnerability::fingerprintOf('sql_injection', 'src/A.php', 'SQL Injection')];
+        $filesystem->dumpFile($reportsDir.'/before.json', json_encode(['vulnerabilities' => []], \JSON_THROW_ON_ERROR));
+        $filesystem->dumpFile($reportsDir.'/after.json', json_encode(['vulnerabilities' => [$finding]], \JSON_THROW_ON_ERROR));
+
+        $standaloneApplication = StandaloneApplicationFactory::fromEnvironment([
+            'XDG_CONFIG_HOME' => sys_get_temp_dir().'/ssa-absent-'.bin2hex(random_bytes(6)),
+            'XDG_CACHE_HOME' => $this->cacheHome,
+            'SSA_NO_UPDATE_CHECK' => '1',
+        ])->create();
+
+        $arguments = [
+            'audit:diff' => ['previous-report' => $reportsDir.'/before.json', 'current-report' => $reportsDir.'/after.json'],
+            'audit:trend' => ['reports' => [$reportsDir.'/before.json', $reportsDir.'/after.json']],
+            'audit:baseline' => ['report' => $reportsDir.'/after.json', 'baseline' => $reportsDir.'/baseline.json'],
+        ];
+
+        $exitCodes = [];
+        $outputs = [];
+        foreach ($arguments as $command => $commandArguments) {
+            $commandTester = new CommandTester($standaloneApplication->find($command));
+            $exitCodes[$command] = $commandTester->execute($commandArguments);
+            $outputs[$command] = $commandTester->getDisplay();
+        }
+
+        self::assertSame(['audit:diff' => Command::SUCCESS, 'audit:trend' => Command::SUCCESS, 'audit:baseline' => Command::SUCCESS], $exitCodes);
+        self::assertStringContainsString('Summary: 1 new, 0 fixed, 0 persisting.', $outputs['audit:diff']);
+        $baseline = json_decode((string) file_get_contents($reportsDir.'/baseline.json'), true, flags: \JSON_THROW_ON_ERROR);
+        self::assertIsArray($baseline);
+        self::assertSame([$finding['fingerprint']], array_column($baseline, 'fingerprint'));
     }
 
     public function test_it_registers_the_self_update_command(): void
@@ -276,6 +334,16 @@ final class StandaloneApplicationFactoryTest extends TestCase
         );
     }
 
+    public function test_pricing_catalog_refresher_is_null_when_offline_only_is_spelled_with_a_hyphen(): void
+    {
+        $xdgConfigPathResolver = $this->resolverForConfig("privacy:\n    offline-only: true\n");
+
+        self::assertInstanceOf(
+            NullPricingCatalogRefresher::class,
+            StandaloneApplicationFactory::pricingCatalogRefresher($xdgConfigPathResolver),
+        );
+    }
+
     public function test_pricing_catalog_refresher_downloads_when_offline_only_is_disabled(): void
     {
         $xdgConfigPathResolver = $this->resolverForConfig("platform:\n    openai:\n        api_key: 'sk-test'\n");
@@ -306,6 +374,29 @@ final class StandaloneApplicationFactoryTest extends TestCase
             NullPricingCatalogRefresher::class,
             StandaloneApplicationFactory::pricingCatalogRefresher($xdgConfigPathResolver),
         );
+    }
+
+    /**
+     * @return array{int, string} the exit code and the display without whitespace, so a wrapped path still matches
+     */
+    private function audit(string $projectDirectory, string ...$options): array
+    {
+        $standaloneApplication = StandaloneApplicationFactory::fromEnvironment([
+            'XDG_CONFIG_HOME' => $this->configHome,
+            'XDG_CACHE_HOME' => $this->cacheHome,
+            'SSA_NO_UPDATE_CHECK' => '1',
+        ])->create();
+        $standaloneApplication->setAutoExit(false);
+
+        $applicationTester = new ApplicationTester($standaloneApplication);
+        $statusCode = $applicationTester->run(['command' => AuditCommand::ALIAS, 'project-path' => $projectDirectory, ...array_fill_keys($options, true)]);
+
+        return [$statusCode, $this->withoutWhitespace($applicationTester->getDisplay())];
+    }
+
+    private function withoutWhitespace(string $text): string
+    {
+        return (string) preg_replace(['/^ ! ?/m', '/\s+/'], '', $text);
     }
 
     private function applicationTesterWithoutConfiguration(): ApplicationTester
@@ -378,6 +469,202 @@ final class StandaloneApplicationFactoryTest extends TestCase
             \sprintf('The provider bridge under "%s/symfony-security-auditor" cannot be loaded by this binary: Composer detected issues in your platform.', $dataHome),
             (string) StandaloneApplicationFactory::loadBridgeTree(['XDG_DATA_HOME' => $dataHome], self::BUNDLED_RELEASE),
         );
+    }
+
+    public function test_the_audit_command_skips_a_config_of_the_project_it_names_that_is_not_valid_yaml_and_goes_on(): void
+    {
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($projectDirectory.'/.symfony-security-auditor.yaml', "model: [unclosed\n");
+        (new Filesystem())->dumpFile($projectDirectory.'/src/Controller/HomeController.php', "<?php\nclass HomeController {}\n");
+
+        [$statusCode, $display] = $this->audit($projectDirectory, '--dry-run');
+
+        self::assertSame(Command::SUCCESS, $statusCode, $display);
+        self::assertStringContainsString($this->withoutWhitespace(\sprintf('Audited project config %s was skipped and the run goes on without it', $projectDirectory.'/.symfony-security-auditor.yaml')), $display);
+        self::assertStringContainsString('isnotvalidYAML', $display);
+    }
+
+    #[RunInSeparateProcess]
+    public function test_the_audit_command_reads_the_config_of_the_working_directory_when_the_project_it_names_ships_none(): void
+    {
+        $workingDirectory = $this->configHome.'/working';
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($workingDirectory.'/.symfony-security-auditor.yaml', "model: [unclosed\n");
+        (new Filesystem())->mkdir($projectDirectory);
+        chdir($workingDirectory);
+
+        [$statusCode, $display] = $this->audit($projectDirectory);
+
+        self::assertSame(Command::FAILURE, $statusCode, $display);
+        self::assertStringContainsString($workingDirectory.'/.symfony-security-auditor.yaml', $display);
+    }
+
+    public function test_the_audit_command_skips_a_config_of_the_project_it_names_that_the_configuration_rejects_and_goes_on(): void
+    {
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($projectDirectory.'/.symfony-security-auditor.yaml', "audit:\n    fail_on: banana\n");
+        (new Filesystem())->dumpFile($projectDirectory.'/src/Controller/HomeController.php', "<?php\nclass HomeController {}\n");
+
+        [$statusCode, $display] = $this->audit($projectDirectory, '--dry-run');
+
+        self::assertSame(Command::SUCCESS, $statusCode, $display);
+        self::assertStringContainsString(
+            $this->withoutWhitespace(\sprintf('Audited project config %s was skipped and the run goes on without it: The value "banana" is not allowed for path "symfony_security_auditor.audit.fail_on". Permissible values: "safe", "low", "medium", "high", "critical"', $projectDirectory.'/.symfony-security-auditor.yaml')),
+            $display,
+        );
+    }
+
+    #[DataProvider('projectConfigsPastTheNestingLimitsOnTheLineOfAParent')]
+    #[RunInSeparateProcess]
+    public function test_the_audit_command_skips_a_config_of_the_project_it_names_that_nests_past_the_limits_on_the_line_of_a_parent_and_goes_on(int $levels, int $pathLength, string $reason): void
+    {
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($projectDirectory.'/.symfony-security-auditor.yaml', "scan:\n    included_paths:\n        ".str_repeat('- ', $levels).str_repeat('s', $pathLength)."\n");
+        (new Filesystem())->dumpFile($projectDirectory.'/src/Controller/HomeController.php', "<?php\nclass HomeController {}\n");
+
+        [$statusCode, $display] = $this->audit($projectDirectory, '--dry-run');
+
+        self::assertSame(Command::SUCCESS, $statusCode, $display);
+        self::assertStringContainsString($this->withoutWhitespace(\sprintf('Audited project config %s was skipped and the run goes on without it: Config file "%s" %s', $projectDirectory.'/.symfony-security-auditor.yaml', $projectDirectory.'/.symfony-security-auditor.yaml', $reason)), $display);
+    }
+
+    /**
+     * @return iterable<string, array{int, int, string}>
+     */
+    public static function projectConfigsPastTheNestingLimitsOnTheLineOfAParent(): iterable
+    {
+        yield 'compact block sequences' => [40, 3, 'nests more than 32 levels deep'];
+        yield 'a long line under compact levels' => [28, 150_000, 'nests more of its content than any configuration needs'];
+    }
+
+    #[RunInSeparateProcess]
+    public function test_the_audit_command_layers_a_config_of_the_project_it_names_whose_path_holds_percent_signs(): void
+    {
+        $projectDirectory = $this->configHome.'/audited-%x%';
+        (new Filesystem())->dumpFile($projectDirectory.'/.symfony-security-auditor.yaml', "audit:\n    baseline: security-baseline.json\n");
+        (new Filesystem())->dumpFile($projectDirectory.'/src/Controller/HomeController.php', "<?php\nclass HomeController {}\n");
+
+        [$statusCode, $display] = $this->audit($projectDirectory, '--dry-run');
+
+        self::assertSame(Command::SUCCESS, $statusCode, $display);
+        self::assertStringContainsString($this->withoutWhitespace(\sprintf('Audited project config %s is layered over the configuration read before it', $projectDirectory.'/.symfony-security-auditor.yaml')), $display);
+        self::assertStringNotContainsString('wasskipped', $display);
+    }
+
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_the_audit_command_skips_a_config_of_the_project_it_names_whose_baseline_is_not_one_and_goes_on(): void
+    {
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($projectDirectory.'/.symfony-security-auditor.yaml', "audit:\n    fail_on: safe\n    baseline: security-baseline.json\n");
+        (new Filesystem())->dumpFile($projectDirectory.'/security-baseline.json', 'not a baseline');
+        (new Filesystem())->dumpFile($projectDirectory.'/src/Controller/HomeController.php', "<?php\nclass HomeController {}\n");
+
+        [$statusCode, $display] = $this->audit($projectDirectory);
+
+        self::assertSame(Command::SUCCESS, $statusCode, $display);
+        self::assertStringContainsString($this->withoutWhitespace(\sprintf('Audited project config %s was skipped and the run goes on without it: Baseline file "%s" is not valid JSON', $projectDirectory.'/.symfony-security-auditor.yaml', $projectDirectory.'/security-baseline.json')), $display);
+    }
+
+    public function test_the_audit_command_rebuilds_without_a_rejected_project_config_the_way_it_built_the_first_time(): void
+    {
+        $this->writeConfig("platform:\n    generic:\n        default:\n            base_url: 'http://localhost'\n            api_key: '%env(SSA_ABSENT_KEY_FOR_REBUILD)%'\n");
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($projectDirectory.'/.symfony-security-auditor.yaml', "audit:\n    fail_on: banana\n");
+        (new Filesystem())->dumpFile($projectDirectory.'/src/Controller/HomeController.php', "<?php\nclass HomeController {}\n");
+
+        [$statusCode, $display] = $this->audit($projectDirectory, '--dry-run');
+
+        self::assertSame(Command::SUCCESS, $statusCode, $display);
+        self::assertStringContainsString('wasskippedandtherungoesonwithoutit', $display);
+    }
+
+    #[RunInSeparateProcess]
+    public function test_a_malformed_config_of_the_working_directory_stops_the_run_before_the_one_of_the_project_it_names_is_read(): void
+    {
+        $workingDirectory = $this->configHome.'/working';
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($workingDirectory.'/.symfony-security-auditor.yaml', "model: [unclosed\n");
+        (new Filesystem())->dumpFile($projectDirectory.'/.symfony-security-auditor.yaml', "model: [unclosed\n");
+        chdir($workingDirectory);
+
+        [$statusCode, $display] = $this->audit($projectDirectory);
+
+        self::assertSame(Command::FAILURE, $statusCode, $display);
+        self::assertStringContainsString($workingDirectory.'/.symfony-security-auditor.yaml', $display);
+        self::assertStringNotContainsString($projectDirectory.'/.symfony-security-auditor.yaml', $display);
+        self::assertStringNotContainsString('wasskipped', $display);
+    }
+
+    #[RunInSeparateProcess]
+    public function test_the_audit_command_skips_a_project_config_that_is_a_dangling_symlink_and_keeps_the_one_of_the_working_directory(): void
+    {
+        $workingDirectory = $this->configHome.'/working';
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($workingDirectory.'/.symfony-security-auditor.yaml', "profile: fast\n");
+        (new Filesystem())->dumpFile($projectDirectory.'/src/Controller/HomeController.php', "<?php\nclass HomeController {}\n");
+        (new Filesystem())->symlink($this->configHome.'/missing.yaml', $projectDirectory.'/.symfony-security-auditor.yaml');
+        chdir($workingDirectory);
+
+        [$statusCode, $display] = $this->audit($projectDirectory, '--dry-run');
+
+        self::assertSame(Command::SUCCESS, $statusCode, $display);
+        self::assertStringContainsString($this->withoutWhitespace(\sprintf('Project config %s is layered over your user config', $workingDirectory.'/.symfony-security-auditor.yaml')), $display);
+        self::assertStringContainsString($this->withoutWhitespace(\sprintf('Audited project config %s was skipped and the run goes on without it', $projectDirectory.'/.symfony-security-auditor.yaml')), $display);
+        self::assertStringContainsString('isasymboliclink', $display);
+    }
+
+    public function test_a_failure_of_the_rest_of_the_configuration_is_not_blamed_on_the_project_config_it_names(): void
+    {
+        $this->writeConfig("platform:\n    generic:\n        default:\n            base_url: 'http://localhost'\nfrobnicate: 1\n");
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($projectDirectory.'/.symfony-security-auditor.yaml', "profile: fast\n");
+
+        [$statusCode, $display] = $this->audit($projectDirectory, '--dry-run');
+
+        self::assertSame(Command::FAILURE, $statusCode, $display);
+        self::assertStringContainsString('Unrecognizedoption"frobnicate"', $display);
+        self::assertStringNotContainsString('wasskipped', $display);
+    }
+
+    public function test_a_failure_of_the_configuration_is_shown_as_it_is_when_the_project_it_names_ships_no_config(): void
+    {
+        $this->writeConfig("platform:\n    generic:\n        default:\n            base_url: 'http://localhost'\nfrobnicate: 1\n");
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->mkdir($projectDirectory);
+
+        [$statusCode, $display] = $this->audit($projectDirectory, '--dry-run');
+
+        self::assertSame(Command::FAILURE, $statusCode, $display);
+        self::assertStringContainsString('Unrecognizedoption"frobnicate"', $display);
+    }
+
+    public function test_a_failure_of_the_configuration_is_shown_as_it_is_when_the_project_config_it_names_was_already_skipped(): void
+    {
+        $this->writeConfig("platform:\n    generic:\n        default:\n            base_url: 'http://localhost'\nfrobnicate: 1\n");
+        $projectDirectory = $this->configHome.'/audited';
+        (new Filesystem())->dumpFile($projectDirectory.'/.symfony-security-auditor.yaml', "model: [unclosed\n");
+
+        [$statusCode, $display] = $this->audit($projectDirectory, '--dry-run');
+
+        self::assertSame(Command::FAILURE, $statusCode, $display);
+        self::assertStringContainsString('Unrecognizedoption"frobnicate"', $display);
+        self::assertStringNotContainsString('isnotvalidYAML', $display);
+    }
+
+    #[RunInSeparateProcess]
+    public function test_a_relative_project_whose_working_directory_is_gone_is_reported_by_the_audit_command_itself(): void
+    {
+        $workingDirectory = $this->configHome.'/working';
+        (new Filesystem())->mkdir($workingDirectory);
+        chdir($workingDirectory);
+        rmdir($workingDirectory);
+
+        [$statusCode, $display] = $this->audit('audited', '--dry-run');
+
+        self::assertSame(Command::FAILURE, $statusCode, $display);
+        self::assertStringContainsString('Failedtodeterminecurrentworkingdirectory', $display);
+        self::assertStringContainsString('audit:run[-f|--formatFORMAT]', $display);
     }
 
     public function test_there_is_no_bridge_tree_to_load_without_a_data_directory(): void
@@ -546,6 +833,20 @@ final class StandaloneApplicationFactoryTest extends TestCase
         yield 'an abbreviated list in capitals' => [['command' => 'LI', '--format' => 'json'], '"name":"mcp:serve"'];
         yield 'the default command as json' => [['--format' => 'json'], '"name":"audit:run"'];
         yield 'shell completion of an audit option' => [['command' => '_complete', '--shell' => 'bash', '--api-version' => '1', '--current' => '2', '--input' => ['symfony-security-auditor', AuditCommand::ALIAS, '--dry']], '--dry-run'];
+    }
+
+    public function test_the_audit_help_names_the_standalone_configuration_and_no_fixed_format_default(): void
+    {
+        $applicationTester = $this->applicationTesterWithoutConfiguration();
+
+        $applicationTester->run(['command' => AuditCommand::ALIAS, '--help' => true]);
+
+        $display = (string) preg_replace('/\s+/', ' ', $applicationTester->getDisplay());
+        self::assertSame(
+            [true, false, false],
+            [str_contains($display, '.symfony-security-auditor.yaml in the folder you run from'), str_contains($display, 'config/packages/'), str_contains($display, '[default: "console"]')],
+            $display,
+        );
     }
 
     public function test_no_other_command_answers_to_an_abbreviation_of_help_or_list(): void

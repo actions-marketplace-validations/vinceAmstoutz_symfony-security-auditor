@@ -28,23 +28,21 @@ final readonly class AttackerContextPromptRenderer
 {
     private const int MAX_TITLE_LENGTH = 120;
 
+    private const int MAX_LISTED_MARKERS_PER_PATTERN = 20;
+
+    private const int MAX_LISTED_LOCATIONS = 100;
+
     /**
+     * Lists the markers of a file's pattern up to a cap and counts the rest:
+     * a file flagged on every line would otherwise get hints several times its
+     * own size, resent with every iteration.
+     *
      * @param list<RiskMarker> $markers
      */
     public function renderRiskMarkers(array $markers): string
     {
-        $byFile = [];
-        foreach ($markers as $marker) {
-            $byFile[$this->sanitizeLine($marker->filePath())][] = \sprintf(
-                'L%d %s — %s',
-                $marker->line(),
-                $this->sanitizeLine($marker->pattern()),
-                $this->sanitizeLine($marker->description()),
-            );
-        }
-
         $blocks = [];
-        foreach ($byFile as $filePath => $lines) {
+        foreach ($this->markerLinesByFile($markers) as $filePath => $lines) {
             $blocks[] = \sprintf("%s:\n%s", $filePath, $this->indent(implode("\n", $lines)));
         }
 
@@ -61,20 +59,7 @@ final readonly class AttackerContextPromptRenderer
      */
     public function renderPreviousFindings(array $previousFindings): string
     {
-        $byType = [];
-        foreach ($previousFindings as $previousFinding) {
-            $byType[$previousFinding->type()->value][] = \sprintf(
-                '%s:%d-%d',
-                $this->sanitizeLine($previousFinding->filePath()),
-                $previousFinding->lineStart(),
-                $previousFinding->lineEnd(),
-            );
-        }
-
-        $lines = [];
-        foreach ($byType as $type => $locations) {
-            $lines[] = \sprintf('- %s: %s', $type, implode(', ', $locations));
-        }
+        $lines = $this->locationLines($previousFindings);
 
         return <<<PROMPT
             ## Patterns Already Confirmed in Earlier Iterations
@@ -91,20 +76,7 @@ final readonly class AttackerContextPromptRenderer
      */
     public function renderRejectedFindings(array $rejectedFindings): string
     {
-        $byType = [];
-        foreach ($rejectedFindings as $rejectedFinding) {
-            $byType[$rejectedFinding->type()->value][] = \sprintf(
-                '%s:%d-%d',
-                $this->sanitizeLine($rejectedFinding->filePath()),
-                $rejectedFinding->lineStart(),
-                $rejectedFinding->lineEnd(),
-            );
-        }
-
-        $lines = [];
-        foreach ($byType as $type => $locations) {
-            $lines[] = \sprintf('- %s: %s', $type, implode(', ', $locations));
-        }
+        $lines = $this->locationLines($rejectedFindings);
 
         return <<<PROMPT
             ## Findings Already Rejected by the Reviewer
@@ -139,6 +111,84 @@ final readonly class AttackerContextPromptRenderer
 
             {$this->indent(implode("\n", $lines))}
             PROMPT;
+    }
+
+    /**
+     * @param list<RiskMarker> $markers
+     *
+     * @return array<string, list<string>>
+     */
+    private function markerLinesByFile(array $markers): array
+    {
+        $lines = [];
+        $countsByFileAndPattern = [];
+        foreach ($markers as $marker) {
+            $filePath = $this->sanitizeLine($marker->filePath());
+            $pattern = $this->sanitizeLine($marker->pattern());
+            $count = ($countsByFileAndPattern[$filePath][$pattern] ?? 0) + 1;
+            $countsByFileAndPattern[$filePath][$pattern] = $count;
+
+            if ($count <= self::MAX_LISTED_MARKERS_PER_PATTERN) {
+                $lines[$filePath][] = \sprintf('L%d %s — %s', $marker->line(), $pattern, $this->sanitizeLine($marker->description()));
+            }
+        }
+
+        return $this->withUnlistedCounts($lines, $countsByFileAndPattern);
+    }
+
+    /**
+     * @param array<string, list<string>>       $lines
+     * @param array<string, array<string, int>> $countsByFileAndPattern
+     *
+     * @return array<string, list<string>>
+     */
+    private function withUnlistedCounts(array $lines, array $countsByFileAndPattern): array
+    {
+        foreach ($countsByFileAndPattern as $filePath => $countsByPattern) {
+            foreach ($countsByPattern as $pattern => $count) {
+                if ($count > self::MAX_LISTED_MARKERS_PER_PATTERN) {
+                    $lines[$filePath][] = \sprintf('+%d more %s markers not listed', $count - self::MAX_LISTED_MARKERS_PER_PATTERN, $pattern);
+                }
+            }
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Each type with the locations of its findings, capped at
+     * {@see self::MAX_LISTED_LOCATIONS} findings since every chunk of a
+     * request carries the list.
+     *
+     * @param list<Vulnerability> $findings
+     *
+     * @return list<string>
+     */
+    private function locationLines(array $findings): array
+    {
+        $listed = \array_slice($findings, 0, self::MAX_LISTED_LOCATIONS);
+
+        $byType = [];
+        foreach ($listed as $finding) {
+            $byType[$finding->type()->value][] = \sprintf(
+                '%s:%d-%d',
+                $this->sanitizeLine($finding->filePath()),
+                $finding->lineStart(),
+                $finding->lineEnd(),
+            );
+        }
+
+        $lines = [];
+        foreach ($byType as $type => $locations) {
+            $lines[] = \sprintf('- %s: %s', $type, implode(', ', $locations));
+        }
+
+        $notListed = \count($findings) - \count($listed);
+        if ($notListed > 0) {
+            $lines[] = \sprintf('- … and %d more not listed', $notListed);
+        }
+
+        return $lines;
     }
 
     private function indent(string $content): string

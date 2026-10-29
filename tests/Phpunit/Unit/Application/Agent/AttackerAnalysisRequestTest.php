@@ -130,6 +130,70 @@ final class AttackerAnalysisRequestTest extends TestCase
         self::assertTrue($derived->bypassCache);
     }
 
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_the_tools_default_to_the_files_to_analyze(): void
+    {
+        $files = [ProjectFile::create('src/A.php', '/app/src/A.php', '<?php')];
+
+        $attackerAnalysisRequest = new AttackerAnalysisRequest($files, SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()));
+
+        self::assertSame($files, $attackerAnalysisRequest->filesForTools());
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_the_tools_read_the_files_the_request_names_for_them(): void
+    {
+        $files = [ProjectFile::create('src/A.php', '/app/src/A.php', '<?php')];
+        $toolFiles = [...$files, ProjectFile::create('src/B.php', '/app/src/B.php', '<?php')];
+
+        $attackerAnalysisRequest = new AttackerAnalysisRequest($files, SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()), toolFiles: $toolFiles);
+
+        self::assertSame($toolFiles, $attackerAnalysisRequest->filesForTools());
+        self::assertSame($files, $attackerAnalysisRequest->files);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_with_files_and_candidate_findings_keeps_the_scope_the_tools_were_given_and_leaves_an_unnamed_one_to_the_new_files(): void
+    {
+        $projectFile = ProjectFile::create('src/A.php', '/app/src/A.php', '<?php');
+        $b = ProjectFile::create('src/B.php', '/app/src/B.php', '<?php');
+        $c = ProjectFile::create('src/C.php', '/app/src/C.php', '<?php');
+        $symfonyMapping = SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap());
+
+        $attackerAnalysisRequest = (new AttackerAnalysisRequest([$projectFile, $b], $symfonyMapping, toolFiles: [$projectFile, $b, $c]))->withFilesAndCandidateFindings([$projectFile], []);
+        $derivedFromUnnamedToolFiles = (new AttackerAnalysisRequest([$projectFile, $b], $symfonyMapping))->withFilesAndCandidateFindings([$projectFile], []);
+
+        self::assertSame([$projectFile, $b, $c], $attackerAnalysisRequest->filesForTools());
+        self::assertSame([$projectFile], $derivedFromUnnamedToolFiles->filesForTools());
+        self::assertNull($derivedFromUnnamedToolFiles->toolFiles);
+        self::assertSame([$projectFile], $derivedFromUnnamedToolFiles->files);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_chunk_finding_is_named_by_the_chunk_files_then_by_the_files_the_tools_may_open(): void
+    {
+        $projectFile = ProjectFile::create('src/A.php', '/app/src/A.php', '<?php');
+        $file = ProjectFile::create('src/B.php', '/app/src/B.php', '<?php');
+        $toolFile = ProjectFile::create('src/C.php', '/app/src/C.php', '<?php');
+        $symfonyMapping = SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap());
+
+        $names = static fn (AttackerAnalysisRequest $attackerAnalysisRequest): array => array_map(
+            static fn (string $echoedPath): string => $attackerAnalysisRequest->knownFilesFor([$projectFile])->name($echoedPath),
+            ['./src/A.php', './src/B.php', './src/C.php'],
+        );
+
+        self::assertSame(['src/A.php', 'src/B.php', './src/C.php'], $names(new AttackerAnalysisRequest([$file], $symfonyMapping)));
+        self::assertSame(['src/A.php', 'src/B.php', 'src/C.php'], $names(new AttackerAnalysisRequest([$file], $symfonyMapping, toolFiles: [$file, $toolFile])));
+    }
+
     public function test_candidate_findings_default_to_empty(): void
     {
         $attackerAnalysisRequest = new AttackerAnalysisRequest([], SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()));

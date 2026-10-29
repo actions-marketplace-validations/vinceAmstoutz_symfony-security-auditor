@@ -15,7 +15,6 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM;
 
 use Override;
 use Psr\Log\LoggerInterface;
-use Symfony\AI\Platform\Exception\UnexpectedResultTypeException;
 use Symfony\AI\Platform\Message\Message;
 use Symfony\AI\Platform\Message\MessageBag;
 use Throwable;
@@ -45,7 +44,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\Tran
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
-final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInterface
+final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInterface, UsageBookingLLMClientInterface
 {
     public const ?float DEFAULT_TEMPERATURE = null;
 
@@ -92,7 +91,7 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
         $this->rateLimiter = $platformResilienceConfig->rateLimiter;
         $this->promptTokenEstimator = new PromptTokenEstimator($platformRequestConfig->tokenEstimator, $platformBinding->model);
         $this->platformResultExtractor = new PlatformResultExtractor($platformAccountingConfig->tokenUsageRecorder, $platformBinding->logger);
-        $platformOptionsFactory = new PlatformOptionsFactory($platformBinding->model, $platformRequestConfig->temperature, $platformRequestConfig->providerJsonMode, $platformBinding->maxOutputTokens);
+        $platformOptionsFactory = new PlatformOptionsFactory($platformBinding->model, $platformRequestConfig->temperature, $platformRequestConfig->providerJsonMode, $platformBinding->maxOutputTokens, $platformRequestConfig->servingPlatform);
         $this->platformOptionsFactory = $platformOptionsFactory;
 
         $conversionFailureExplainer = new ConversionFailureExplainer();
@@ -107,7 +106,7 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
         );
 
         $this->retryingPlatformInvoker = new RetryingPlatformInvoker(
-            $platformBinding->platform,
+            $platformBinding,
             $platformBinding->model,
             $platformBinding->logger,
             $this->rateLimiter,
@@ -120,6 +119,7 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
             $platformAccountingConfig->budgetTracker,
         );
         $this->emptyLLMResponseFactory = new EmptyLLMResponseFactory();
+        $toolIterationBooker = new ToolIterationBooker($platformBinding->model, $this->rateLimiter, $platformAccountingConfig->budgetTracker, $this->platformResultExtractor);
 
         $this->sequentialToolLoop = new SequentialToolLoop(
             $platformBinding->model,
@@ -131,12 +131,13 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
             $platformOptionsFactory,
             $this->promptTokenEstimator,
             $this->emptyLLMResponseFactory,
+            $toolIterationBooker,
         );
 
         $inFlightRequestCanceller = new InFlightRequestCanceller($platformBinding->model, $this->rateLimiter, $platformAccountingConfig->budgetTracker, $platformBinding->logger, $platformAccountingConfig->tokenUsageRecorder);
 
         $this->batchWindowResolver = new BatchWindowResolver(
-            $platformBinding->platform,
+            $platformBinding,
             $platformBinding->model,
             $this->rateLimiter,
             $platformAccountingConfig->budgetTracker,
@@ -152,7 +153,7 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
         );
 
         $this->toolConversationWavefront = new ToolConversationWavefront(
-            $platformBinding->platform,
+            $platformBinding,
             $platformBinding->model,
             $platformBinding->logger,
             $this->rateLimiter,
@@ -166,6 +167,7 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
             $inFlightRequestCanceller,
             $degradedAnswerBooker,
             $conversionFailureExplainer,
+            $toolIterationBooker,
         );
     }
 
@@ -178,7 +180,6 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
-     * @throws UnexpectedResultTypeException
      */
     #[Override]
     public function complete(string $systemPrompt, string $userMessage): LLMResponse
@@ -205,15 +206,16 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
         }
 
         try {
-            $content = $deferredResult->asText();
-            [$inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens] = $this->platformResultExtractor->extractTokens($deferredResult);
+            $content = $this->platformResultExtractor->extractText($deferredResult->getResult());
+            [$inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens] = $this->platformResultExtractor->extractTokens($deferredResult, $estimatedInputTokens);
         } catch (Throwable $throwable) {
             $this->rateLimiter->record(0, 0);
 
             throw $throwable;
         }
 
-        $this->rateLimiter->record($inputTokens, $outputTokens);
+        $tokenUsageSnapshot = TokenUsageSnapshot::of($inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens);
+        $this->rateLimiter->record($this->platformResultExtractor->rateLimitedInputTokens($deferredResult, $tokenUsageSnapshot), $outputTokens);
 
         $this->logger->debug('symfony/ai platform responded', [
             'content_length' => \strlen($content),
@@ -225,9 +227,9 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
             $content,
             $this->model,
             $this->platformResultExtractor->extractStopReason($deferredResult) ?? 'end_turn',
-            TokenUsageSnapshot::of($inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens),
+            $tokenUsageSnapshot,
         )->withReportedModel($this->platformResultExtractor->extractReportedModel($deferredResult));
-        $this->budgetTracker?->recordCall($llmResponse);
+        $this->budgetTracker?->recordCall($llmResponse, $this->platformResultExtractor->extractOneHourCacheCreationTokens($deferredResult, $cacheCreationTokens));
         $this->budgetTracker?->assertWithinBudget();
 
         return $llmResponse;

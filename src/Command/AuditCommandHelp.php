@@ -33,10 +33,12 @@ final readonly class AuditCommandHelp
           <info>markdown</info> Markdown report for a PR comment or GitHub step summary
           <info>junit</info>    JUnit XML — findings as failed test cases for CI test-report panels (e.g. GitLab free-tier MR widgets)
           <info>github</info>   GitHub Actions workflow-command annotations — inline findings on the PR's Files Changed view
+          <info>github-comment</info> pull-request comment body — grade, score and the most severe findings, with a marker a workflow can use to update its own comment
 
         Use <info>--output</info> (<info>-o</info>) to write the report to a file:
           <info>%command.full_name% --format=sarif --output=report.sarif</info>
           <info>%command.full_name% --format=html --output=report.html</info>
+        A report path set in <info>audit.output</info> is replaced by <info>--output</info>, or switched off for one run by <info>--no-output</info>, which prints the report.
 
         Baseline (suppress accepted findings):
           <info>%command.full_name% --generate-baseline=.security-baseline.json</info>  accept current findings
@@ -64,4 +66,20 @@ final readonly class AuditCommandHelp
           CI integration: <info>docs/ci.md</info>
           Versioning    : <info>docs/versioning.md</info>
         HELP;
+
+    private const string BUNDLE_CONFIGURATION = 'via <info>config/packages/symfony_security_auditor.yaml</info>.';
+
+    private const string STANDALONE_CONFIGURATION = <<<'TEXT'
+        via the <info>config.yaml</info> that <info>init</info> writes to your user configuration directory, and a
+        <info>.symfony-security-auditor.yaml</info> in the folder you run from or in the audited project.
+        TEXT;
+
+    /**
+     * The binary reads no `config/packages/` file, so its help names the
+     * files it reads instead.
+     */
+    public static function standalone(): string
+    {
+        return str_replace(self::BUNDLE_CONFIGURATION, self::STANDALONE_CONFIGURATION, self::HELP);
+    }
 }

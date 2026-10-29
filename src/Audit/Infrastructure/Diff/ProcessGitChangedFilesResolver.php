@@ -21,27 +21,28 @@ use Symfony\Component\Process\Exception\ProcessFailedException;
 use Symfony\Component\Process\Process;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\GitChangedFilesUnavailableException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\GitChangedFilesResolverInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\Utf8Normalizer;
 
 use function Symfony\Component\String\u;
 
 /**
  * @internal not part of the BC promise — see docs/versioning.md
  *
- * Resolves the set of changed files via three git invocations:
+ * Resolves the set of changed files via four git invocations:
  *
- *   1. `git diff --relative --name-only --diff-filter=ACMR <ref>...HEAD`
+ *   1. `git diff --relative --name-only --diff-filter=ACMRT <ref>...HEAD`
  *      — committed changes that diverge from the ref's merge base. The triple
  *      dot semantics handle topic branches diverged from the ref correctly:
  *      only changes ON the branch are returned, not changes the ref accrued
  *      since branch point. Pure tree-to-tree comparison — never touches the
  *      working tree, so it cannot invoke a `.gitattributes` content filter.
  *
- *   2. `git diff-index --relative --name-only --diff-filter=ACMR --cached HEAD`
+ *   2. `git diff-index --relative --name-only --diff-filter=ACMRT --cached HEAD`
  *      — staged changes against HEAD (including files already `git add`ed):
  *      index vs tree, both already-hashed objects, so no working-tree content
  *      filter runs either.
  *
- *   3. `git diff-files --relative --name-only --diff-filter=ACMR`
+ *   3. `git diff-files --relative --name-only --diff-filter=ACMRT`
  *      — unstaged edits to already-tracked files: working tree vs index.
  *      Deliberately the plumbing form rather than `git diff HEAD` — the
  *      porcelain form normalizes a working-tree file through its
@@ -50,24 +51,38 @@ use function Symfony\Component\String\u;
  *      command live in the audited (untrusted) repo's own `.gitattributes`/
  *      `.git/config`, making it as exploitable as the `core.fsmonitor` hook
  *      neutralized below. `diff-files` reports the same "did this tracked
- *      file change" answer without ever invoking a content filter.
+ *      file change" answer from the stat data alone, and re-hashes a file —
+ *      through that filter — only when its stat matches a racily clean index
+ *      entry: the stat check forced below makes a checkout shipped with its
+ *      own `.git` directory never match.
  *
- *      Together, invocations 2 and 3 never report genuinely untracked files
- *      (ones never staged at all) — those are invisible to this resolver.
- *      Merged into the result so a local dev running `audit:run --since=main`
- *      sees their staged and already-tracked in-flight work too.
+ *   4. `git ls-files --others --exclude-standard`
+ *      — new files never staged at all, minus what a `.gitignore` leaves out.
+ *      Plumbing again, so no content filter runs: it lists the working tree's
+ *      directory entries and reads no file content.
+ *
+ *      Together, invocations 2, 3 and 4 let a local dev running
+ *      `audit:run --since=main` see their staged, already-tracked and brand-new
+ *      in-flight work too.
+ *
+ * The `T` of each filter keeps a type change: a committed symlink replaced by
+ * a regular file holds code the scan never read.
  *
  * `--relative` rewrites paths relative to `$projectPath` instead of the git
  * root, and excludes changes outside it — required so the result lines up
  * with `ProjectFile::relativePath()` when the audited project is a
  * subdirectory of a larger repository (a monorepo layout).
  *
- * All three lists are merged, deduplicated, and returned in deterministic
+ * All four lists are merged, deduplicated, and returned in deterministic
  * order.
  */
 final readonly class ProcessGitChangedFilesResolver implements GitChangedFilesResolverInterface
 {
     public const int DEFAULT_TIMEOUT_SECONDS = 60;
+
+    private const int UNKNOWN_REF_EXIT_CODE = 1;
+
+    private const string NOT_A_REPOSITORY = 'not a git repository';
 
     /**
      * @param ?Closure(list<string>, string): Process $gitDiffProcessFactory defaults to a plain `new Process(...)`; tests inject a stub to make a `git diff` call deterministically slow
@@ -92,11 +107,12 @@ final readonly class ProcessGitChangedFilesResolver implements GitChangedFilesRe
             throw GitChangedFilesUnavailableException::forUnknownRef($ref, $projectPath);
         }
 
-        $committed = $this->runGit($projectPath, ['diff', '--relative', '--name-only', '--diff-filter=ACMR', \sprintf('%s...HEAD', $ref)]);
-        $staged = $this->runGit($projectPath, ['diff-index', '--relative', '--name-only', '--diff-filter=ACMR', '--cached', 'HEAD']);
-        $unstaged = $this->runGit($projectPath, ['diff-files', '--relative', '--name-only', '--diff-filter=ACMR']);
+        $committed = $this->runGit($projectPath, ['diff', '--relative', '--name-only', '--diff-filter=ACMRT', \sprintf('%s...HEAD', $ref)]);
+        $staged = $this->runGit($projectPath, ['diff-index', '--relative', '--name-only', '--diff-filter=ACMRT', '--cached', 'HEAD']);
+        $unstaged = $this->runGit($projectPath, ['diff-files', '--relative', '--name-only', '--diff-filter=ACMRT']);
+        $untracked = $this->runGit($projectPath, ['ls-files', '--others', '--exclude-standard']);
 
-        return $this->mergeAndNormalize([...$committed, ...$staged, ...$unstaged]);
+        return $this->mergeAndNormalize([...$committed, ...$staged, ...$unstaged, ...$untracked]);
     }
 
     /**
@@ -104,33 +120,61 @@ final readonly class ProcessGitChangedFilesResolver implements GitChangedFilesRe
      */
     private function isInsideGitTree(string $projectPath): bool
     {
-        $process = new Process(['git', 'rev-parse', '--is-inside-work-tree'], $projectPath);
+        $process = $this->revParse($projectPath, ['--is-inside-work-tree'], \sprintf('determine whether "%s" is a git working tree', $projectPath));
 
-        try {
-            $process->setTimeout($this->timeoutSeconds);
-            $process->run();
-        } catch (ExceptionInterface $exception) {
-            throw GitChangedFilesUnavailableException::forProcessFailure(\sprintf('determine whether "%s" is a git working tree', $projectPath), $exception);
-        }
-
-        return $process->isSuccessful() && 'true' === u($process->getOutput())->trim()->toString();
+        return $this->gitAnswered($process, $projectPath) && 'true' === u($process->getOutput())->trim()->toString();
     }
 
     /**
+     * `--verify --quiet` exits 1 for a ref that names no object; any other
+     * failure is git refusing the repository, not the ref.
+     *
      * @throws GitChangedFilesUnavailableException
      */
     private function refExists(string $projectPath, string $ref): bool
     {
-        $process = new Process(['git', 'rev-parse', '--verify', '--quiet', $ref], $projectPath);
+        $process = $this->revParse($projectPath, ['--verify', '--quiet', $ref], \sprintf('verify git ref "%s"', $ref));
+
+        return self::UNKNOWN_REF_EXIT_CODE !== $process->getExitCode() && $this->gitAnswered($process, $projectPath);
+    }
+
+    /**
+     * False when git found no repository at all; a failure for any other
+     * reason — a repository owned by another user, one it cannot read —
+     * carries git's own message.
+     *
+     * @throws GitChangedFilesUnavailableException
+     */
+    private function gitAnswered(Process $process, string $projectPath): bool
+    {
+        if ($process->isSuccessful()) {
+            return true;
+        }
+
+        if (str_contains($process->getErrorOutput(), self::NOT_A_REPOSITORY)) {
+            return false;
+        }
+
+        throw GitChangedFilesUnavailableException::forRefusedRepository($projectPath, $process->getErrorOutput());
+    }
+
+    /**
+     * @param list<string> $argv
+     *
+     * @throws GitChangedFilesUnavailableException
+     */
+    private function revParse(string $projectPath, array $argv, string $operation): Process
+    {
+        $process = new Process(['git', 'rev-parse', ...$argv], $projectPath);
 
         try {
             $process->setTimeout($this->timeoutSeconds);
             $process->run();
         } catch (ExceptionInterface $exception) {
-            throw GitChangedFilesUnavailableException::forProcessFailure(\sprintf('verify git ref "%s"', $ref), $exception);
+            throw GitChangedFilesUnavailableException::forProcessFailure($operation, $exception);
         }
 
-        return $process->isSuccessful();
+        return $process;
     }
 
     /**
@@ -147,13 +191,19 @@ final readonly class ProcessGitChangedFilesResolver implements GitChangedFilesRe
      * control characters alike — `core.quotepath=off` alone only covers the former.
      * `core.fsmonitor=` neutralizes the audited (untrusted) repo's own local config:
      * otherwise a hostile `core.fsmonitor` hook set in its `.git/config` runs as an
-     * arbitrary command on this working-tree comparison.
+     * arbitrary command on this working-tree comparison. `core.checkStat=default`
+     * and `core.trustctime=true` restore git's own stat check over that config:
+     * relaxed to what an extraction keeps, it lets an archived index entry match
+     * the extracted file, which git then re-hashes through the repo's
+     * `filter.<name>.clean` command. `--` ends the revisions: a
+     * file of the audited repo named `HEAD` or `main...HEAD` would otherwise make git
+     * refuse the argument as both a revision and a filename.
      *
      * @param list<string> $argv
      */
     private function buildDefaultGitDiffProcess(array $argv, string $projectPath): Process
     {
-        return new Process(['git', '-c', 'core.quotepath=off', '-c', 'core.fsmonitor=', ...$argv, '-z'], $projectPath);
+        return new Process(['git', '-c', 'core.quotepath=off', '-c', 'core.fsmonitor=', '-c', 'core.checkStat=default', '-c', 'core.trustctime=true', ...$argv, '-z', '--'], $projectPath);
     }
 
     /**
@@ -178,7 +228,7 @@ final readonly class ProcessGitChangedFilesResolver implements GitChangedFilesRe
         }
 
         return array_values(array_filter(
-            explode("\0", $process->getOutput()),
+            explode("\0", Utf8Normalizer::normalize($process->getOutput())),
             static fn (string $line): bool => !u($line)->trim()->isEmpty(),
         ));
     }

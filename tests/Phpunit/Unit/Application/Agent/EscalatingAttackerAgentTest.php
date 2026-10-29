@@ -17,6 +17,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 use Symfony\Component\ErrorHandler\BufferingLogger;
+use Throwable;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAgentInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAnalysisRequest;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\EscalatingAttackerAgent;
@@ -26,6 +27,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidCodeLocat
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidProjectFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidVulnerabilityClassificationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidVulnerabilityNarrativeException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\LLMProviderException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AccessControlMap;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditContext;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\CodeLocation;
@@ -39,6 +41,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilitySeverit
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityType;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\CoverageRecorderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\NullCoverageRecorder;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\Agent\Fixture\InconclusiveAttackerAgent;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\Agent\Fixture\RecordingAttackerAgent;
 
 final class EscalatingAttackerAgentTest extends TestCase
@@ -121,6 +124,52 @@ final class EscalatingAttackerAgentTest extends TestCase
         self::assertSame(1, $expensive->callCount);
         self::assertCount(1, $expensive->lastFiles);
         self::assertSame('src/Controller/A.php', $expensive->lastFiles[0]->relativePath());
+    }
+
+    /**
+     * @param ?list<string> $toolPaths
+     * @param list<string>  $expectedToolPaths
+     *
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidProjectFileException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    #[DataProvider('toolScopes')]
+    public function test_the_deep_pass_analyzes_the_flagged_files_and_its_tools_keep_the_reach_the_request_names_or_else_the_flagged_files(?array $toolPaths, array $expectedToolPaths): void
+    {
+        $files = [
+            $this->makeFile('src/Controller/A.php'),
+            $this->makeFile('src/Controller/B.php'),
+            $this->makeFile('src/Controller/C.php'),
+        ];
+        $toolFiles = null === $toolPaths ? null : array_map($this->makeFile(...), $toolPaths);
+        $recordingAttackerAgent = $this->makeRecordingAttacker([]);
+        $escalatingAttackerAgent = new EscalatingAttackerAgent(
+            $this->makeRecordingAttacker([$this->makeVulnerability('src/Controller/A.php')]),
+            $recordingAttackerAgent,
+            new NullLogger(),
+        );
+
+        $escalatingAttackerAgent->analyze(
+            new AttackerAnalysisRequest($files, SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()), toolFiles: $toolFiles),
+            new NullCoverageRecorder(),
+        );
+
+        self::assertSame(['src/Controller/A.php'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $recordingAttackerAgent->lastFiles));
+        self::assertSame($expectedToolPaths, array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $recordingAttackerAgent->lastToolFiles));
+    }
+
+    /**
+     * @return iterable<string, array{?list<string>, list<string>}>
+     */
+    public static function toolScopes(): iterable
+    {
+        yield 'wider than the files to analyze' => [
+            ['src/Controller/A.php', 'src/Controller/B.php', 'src/Controller/C.php', 'src/Service/Clean.php'],
+            ['src/Controller/A.php', 'src/Controller/B.php', 'src/Controller/C.php', 'src/Service/Clean.php'],
+        ];
+        yield 'not given, so the flagged files the deep pass analyzes' => [null, ['src/Controller/A.php']];
     }
 
     /**
@@ -412,6 +461,118 @@ final class EscalatingAttackerAgentTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidProjectFileException
      * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidAuditContextException
+     */
+    public function test_only_the_findings_it_did_not_discard_are_left_to_recover_after_the_pass(): void
+    {
+        $vulnerability = $this->makeVulnerability('src/Controller/A.php', title: 'cheap A');
+        $notJudged = $this->makeVulnerability('src/Controller/Other.php', title: 'cheap other');
+        $deepReturned = $this->makeVulnerability('src/Controller/A.php', VulnerabilitySeverity::CRITICAL, 'deep A');
+        $deepRecordedOnly = $this->makeVulnerability('src/Controller/A.php', VulnerabilitySeverity::LOW, 'deep partial');
+        $recordingAttackerAgent = new RecordingAttackerAgent([$deepReturned], null, [$deepRecordedOnly], 'analyzed');
+        $auditContext = AuditContext::forProject(sys_get_temp_dir());
+
+        $this->callAnalyze(
+            new EscalatingAttackerAgent($this->makeRecordingAttacker([$vulnerability, $notJudged]), $recordingAttackerAgent, new NullLogger()),
+            [$this->makeFile('src/Controller/A.php')],
+            SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()),
+            $auditContext,
+        );
+
+        self::assertSame([$notJudged, $deepReturned, $deepRecordedOnly], $auditContext->drainFoundVulnerabilities());
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidProjectFileException
+     * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidAuditContextException
+     */
+    #[DataProvider('deepPassAborts')]
+    public function test_a_cheap_finding_the_deep_pass_judged_before_it_aborted_is_not_left_to_recover(Throwable $throwable): void
+    {
+        $vulnerability = $this->makeVulnerability('src/Controller/A.php', title: 'cheap A');
+        $notJudged = $this->makeVulnerability('src/Controller/Other.php', title: 'cheap other');
+        $deepRecorded = $this->makeVulnerability('src/Controller/A.php', VulnerabilitySeverity::CRITICAL, 'deep A');
+        $auditContext = AuditContext::forProject(sys_get_temp_dir());
+
+        try {
+            $this->callAnalyze(
+                new EscalatingAttackerAgent($this->makeRecordingAttacker([$vulnerability, $notJudged]), new RecordingAttackerAgent([$deepRecorded], $throwable, coverageStatus: 'analyzed'), new NullLogger()),
+                [$this->makeFile('src/Controller/A.php')],
+                SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()),
+                $auditContext,
+            );
+            self::fail('expected the deep pass abort');
+        } catch (BudgetExceededException|LLMProviderException $exception) {
+            self::assertSame($throwable, $exception);
+        }
+
+        self::assertSame([$notJudged, $deepRecorded], $auditContext->drainFoundVulnerabilities());
+    }
+
+    /**
+     * @return iterable<string, array{Throwable}>
+     */
+    public static function deepPassAborts(): iterable
+    {
+        yield 'a budget cap' => [BudgetExceededException::forTokens(500, 100)];
+        yield 'a provider failure' => [new LLMProviderException('Provider overloaded')];
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidProjectFileException
+     * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidAuditContextException
+     */
+    public function test_a_finding_the_deep_pass_recorded_stays_recoverable_even_when_it_equals_a_discarded_one(): void
+    {
+        $vulnerability = $this->makeVulnerability('src/Controller/A.php', title: 'cheap A');
+        $twin = $vulnerability->withReviewerValidation(false);
+        $auditContext = AuditContext::forProject(sys_get_temp_dir());
+
+        $this->callAnalyze(
+            new EscalatingAttackerAgent($this->makeRecordingAttacker([$vulnerability]), new RecordingAttackerAgent([], null, [$twin], 'analyzed'), new NullLogger()),
+            [$this->makeFile('src/Controller/A.php')],
+            SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()),
+            $auditContext,
+        );
+
+        self::assertSame([$twin], $auditContext->drainFoundVulnerabilities());
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidProjectFileException
+     * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidAuditContextException
+     */
+    public function test_a_cheap_finding_is_judged_only_by_the_exact_file_the_deep_pass_analyzed(): void
+    {
+        $vulnerability = $this->makeVulnerability('1.0', title: 'judged');
+        $loosely = $this->makeVulnerability('1.00', title: 'loosely equal path');
+        $auditContext = AuditContext::forProject(sys_get_temp_dir());
+
+        $result = $this->callAnalyze(
+            new EscalatingAttackerAgent($this->makeRecordingAttacker([$vulnerability, $loosely]), new RecordingAttackerAgent([], coverageStatus: 'analyzed'), new NullLogger()),
+            [$this->makeFile('1.0')],
+            SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()),
+            $auditContext,
+        );
+
+        self::assertSame([$loosely], $result);
+        self::assertSame([$loosely], $auditContext->drainFoundVulnerabilities());
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidProjectFileException
+     * @throws InvalidVulnerabilityNarrativeException
      */
     public function test_a_cheap_finding_on_a_file_the_deep_pass_errored_on_is_kept(): void
     {
@@ -426,6 +587,29 @@ final class EscalatingAttackerAgentTest extends TestCase
         );
 
         self::assertSame([$vulnerability], $result);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidProjectFileException
+     * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidAuditContextException
+     */
+    public function test_a_cheap_finding_on_a_file_the_deep_pass_reached_its_last_tool_round_on_without_a_finding_is_kept(): void
+    {
+        $vulnerability = $this->makeVulnerability('src/Controller/A.php', title: 'cheap A');
+        $auditContext = AuditContext::forProject(sys_get_temp_dir());
+
+        $result = $this->callAnalyze(
+            new EscalatingAttackerAgent($this->makeRecordingAttacker([$vulnerability]), new InconclusiveAttackerAgent(), new NullLogger()),
+            [$this->makeFile('src/Controller/A.php')],
+            SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()),
+            $auditContext,
+        );
+
+        self::assertSame([$vulnerability], $result);
+        self::assertSame([$vulnerability], $auditContext->drainFoundVulnerabilities());
     }
 
     /**

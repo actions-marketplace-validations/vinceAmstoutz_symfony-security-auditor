@@ -26,8 +26,6 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\SymfonyMapping;
  */
 final readonly class SymfonyMappingContextRenderer
 {
-    private const string DELIMITER_CANDIDATES = '#~!%@';
-
     /**
      * `access_control` role tokens that grant access to everyone: the
      * `PUBLIC_ACCESS` attribute, its deprecated predecessor
@@ -41,20 +39,76 @@ final readonly class SymfonyMappingContextRenderer
      */
     private const array PUBLIC_ACCESS_PSEUDO_ROLES = ['PUBLIC_ACCESS', 'IS_AUTHENTICATED_ANONYMOUSLY', 'PUBLIC'];
 
+    private const int MAX_LISTED_VOTER_ITEMS = 100;
+
+    private const int MAX_LISTED_VOTER_BYTES = 2048;
+
+    private const int MAX_LISTED_ROUTE_GUARDS = 10;
+
+    private const int MAX_LISTED_ROUTE_GUARD_BYTES = 512;
+
+    private const int MAX_LISTED_RULE_REQUIREMENTS = 20;
+
+    private const int MAX_LISTED_RULE_REQUIREMENT_BYTES = 1024;
+
+    private const int MAX_LISTED_FIREWALL_RULES = 50;
+
+    private const int MAX_LISTED_FIREWALL_RULE_BYTES = 2048;
+
+    private const int MAX_LISTED_UNREADABLE_FILES = 10;
+
+    private const int MAX_LISTED_UNREADABLE_FILE_BYTES = 2048;
+
+    public static function renderUnreadableConfiguration(SymfonyMapping $symfonyMapping): string
+    {
+        $unreadableFiles = $symfonyMapping->unreadableConfigurationFiles();
+        if ([] === $unreadableFiles) {
+            return '';
+        }
+
+        $lines = ['## Unread Security Configuration'];
+        $lines[] = "The production application loads these configuration files, but the audit could not read them (too large, too deeply nested, not valid YAML, or beyond what the audit reads), so the firewalls and `access_control` rules they may hold are missing from this mapping: a route's access-control marker may be wrong.";
+        foreach (self::itemsWithOmissionNotice($unreadableFiles, self::MAX_LISTED_UNREADABLE_FILES, self::MAX_LISTED_UNREADABLE_FILE_BYTES) as $unreadableFile) {
+            $lines[] = \sprintf('- %s', $unreadableFile);
+        }
+
+        return \sprintf("%s\n\n", implode("\n", $lines));
+    }
+
     public static function renderFirewallRules(SymfonyMapping $symfonyMapping): string
     {
-        $firewallRules = $symfonyMapping->toApplicationSecurityMap()->perimeterRules();
+        $applicationFirewallRules = self::applicationFirewallRules($symfonyMapping);
+        $firewallRules = [...$symfonyMapping->toApplicationSecurityMap()->perimeterRules(), ...$applicationFirewallRules];
         if ([] === $firewallRules) {
             return '';
         }
 
         $lines = ['## Firewall Rules'];
         $lines[] = 'Each line names a `security.yaml` firewall and any notable flags. A `security: false` firewall enforces no authentication or access control at all on matching paths — treat every route behind it as unauthenticated regardless of voters or `#[IsGranted]`. A `stateless` firewall carries no session, so session-backed CSRF protection is ineffective there.';
-        foreach ($firewallRules as $firewallRule) {
-            $lines[] = \sprintf('- %s', self::sanitizeLine($firewallRule));
+        if ([] !== $applicationFirewallRules) {
+            $lines[] = 'A line ending with a folder names a firewall of the monorepo application in that folder; it applies to the routes of that application only.';
+        }
+
+        foreach (self::itemsWithOmissionNotice($firewallRules, self::MAX_LISTED_FIREWALL_RULES, self::MAX_LISTED_FIREWALL_RULE_BYTES) as $firewallRule) {
+            $lines[] = \sprintf('- %s', $firewallRule);
         }
 
         return \sprintf("%s\n\n", implode("\n", $lines));
+    }
+
+    /**
+     * @return list<string>
+     */
+    private static function applicationFirewallRules(SymfonyMapping $symfonyMapping): array
+    {
+        $applicationFirewallRules = [];
+        foreach ($symfonyMapping->applicationAccessControls() as $applicationFolder => $applicationAccessControl) {
+            foreach ($applicationAccessControl->firewallRules as $firewallRule) {
+                $applicationFirewallRules[] = \sprintf('%s — %s', $firewallRule, $applicationFolder);
+            }
+        }
+
+        return $applicationFirewallRules;
     }
 
     public static function renderVoterCoverage(SymfonyMapping $symfonyMapping): string
@@ -67,8 +121,8 @@ final readonly class SymfonyMappingContextRenderer
         $lines = ['## Voter Coverage'];
         $lines[] = 'Each line summarises a `Voter::supports()` body: the attributes it accepts and the subject types it gates. Use this to spot `#[IsGranted(\'ATTR\', $subject)]` calls referencing an attribute or subject type that no voter actually covers — that is a `missing_voter` finding.';
         foreach ($voterCapabilities as $voterCapability) {
-            $attributes = [] === $voterCapability->supportedAttributes() ? '(none)' : implode(',', array_map(self::sanitizeLine(...), $voterCapability->supportedAttributes()));
-            $subjects = [] === $voterCapability->supportedSubjects() ? '(none)' : implode(',', array_map(self::sanitizeLine(...), $voterCapability->supportedSubjects()));
+            $attributes = self::cappedList($voterCapability->supportedAttributes(), self::MAX_LISTED_VOTER_ITEMS, self::MAX_LISTED_VOTER_BYTES);
+            $subjects = self::cappedList($voterCapability->supportedSubjects(), self::MAX_LISTED_VOTER_ITEMS, self::MAX_LISTED_VOTER_BYTES);
             $lines[] = \sprintf('- %s — attributes: [%s] — subjects: [%s] — %s', self::sanitizeLine($voterCapability->className()), $attributes, $subjects, self::sanitizeLine($voterCapability->filePath()));
         }
 
@@ -98,20 +152,43 @@ final readonly class SymfonyMappingContextRenderer
             return '';
         }
 
-        $routeAccessMap = $symfonyMapping->routeAccessMap();
-
         $lines = ['## Route Access-Control Map'];
-        $lines[] = 'Each line describes a controller action: HTTP method(s), route path, source location, and the access-control surface (class- and method-level `#[IsGranted]`, `denyAccessUnlessGranted()` body calls). A line whose surface is empty is tagged at the end: routes with no enforcement at all carry the LACKS marker — treat those as primary candidates for `broken_access_control` and `missing_voter`. Routes with no attribute or body check whose path matches an `access_control` rule of the production `security.yaml` carry a firewall-covered marker listing the gating roles. That coverage is read from the repository\'s YAML, not verified against the running application, so it lowers the priority of `broken_access_control` there without ruling it out: still report it when the rule may not apply to the action or the gating role is too permissive for it.';
+        $lines[] = "Each line describes a controller action: HTTP method(s), route path, source location, and the access-control surface (class- and method-level `#[IsGranted]`, `denyAccessUnlessGranted()` body calls). A line whose surface is empty is tagged at the end: routes with no enforcement at all carry the LACKS marker — treat those as primary candidates for `broken_access_control` and `missing_voter`. Routes with no attribute or body check whose path matches an `access_control` rule of the production `security.yaml` carry a firewall-covered marker listing the gating roles. That coverage is read from the repository's YAML, not verified against the running application, so it lowers the priority of `broken_access_control` there without ruling it out: still report it when the rule may not apply to the action or the gating role is too permissive for it.";
 
-        foreach ($routeAccessControls as $routeAccessControl) {
+        $firewallRoles = self::firewallRolesOf($symfonyMapping, $routeAccessControls);
+        foreach ($routeAccessControls as $index => $routeAccessControl) {
             $methods = [] === $routeAccessControl->routeMethods() ? 'ANY' : implode(',', array_map(self::sanitizeLine(...), $routeAccessControl->routeMethods()));
             $path = self::sanitizeLine($routeAccessControl->routePath() ?? '(unresolved)');
             $checks = self::accessCheckLabelsFor($routeAccessControl);
-            $checkLabel = self::checkLabelFor($checks, $routeAccessControl, $routeAccessMap);
+            $checkLabel = self::checkLabelFor($checks, $firewallRoles[$index]);
             $lines[] = \sprintf('- %s %s — %s::%s — %s', $methods, $path, self::sanitizeLine($routeAccessControl->filePath()), $routeAccessControl->methodName(), $checkLabel);
         }
 
         return \sprintf("%s\n\n", implode("\n", $lines));
+    }
+
+    /**
+     * The roles of the `access_control` rule that governs each route, the
+     * routes of one application matched against its rules together.
+     *
+     * @param list<RouteAccessControl> $routeAccessControls
+     *
+     * @return array<int, list<string>|false|null> by the index of each route
+     */
+    private static function firewallRolesOf(SymfonyMapping $symfonyMapping, array $routeAccessControls): array
+    {
+        $routesByApplication = [];
+        foreach ($routeAccessControls as $index => $routeAccessControl) {
+            $routesByApplication[$symfonyMapping->applicationFolderFor($routeAccessControl->filePath()) ?? ''][$index] = $routeAccessControl;
+        }
+
+        $firewallRoles = [];
+        foreach ($routesByApplication as $routes) {
+            $controllerFilePath = $routes[array_key_first($routes)]->filePath();
+            $firewallRoles += AccessControlRuleMatcher::rolesForEach($routes, $symfonyMapping->routeAccessMapFor($controllerFilePath), $symfonyMapping->accessControlRulesFor($controllerFilePath));
+        }
+
+        return $firewallRoles;
     }
 
     /**
@@ -125,7 +202,7 @@ final readonly class SymfonyMappingContextRenderer
         }
 
         if ([] !== $routeAccessControl->methodLevelIsGranted()) {
-            $checks[] = \sprintf('method:#[IsGranted(%s)]', implode(',', array_map(self::sanitizeLine(...), $routeAccessControl->methodLevelIsGranted())));
+            $checks[] = \sprintf('method:#[IsGranted(%s)]', self::cappedList(array_values(array_unique($routeAccessControl->methodLevelIsGranted())), self::MAX_LISTED_ROUTE_GUARDS, self::MAX_LISTED_ROUTE_GUARD_BYTES));
         }
 
         if ([] === $routeAccessControl->methodLevelIsGranted() && $routeAccessControl->methodHasIsGrantedAttribute()) {
@@ -160,17 +237,69 @@ final readonly class SymfonyMappingContextRenderer
     }
 
     /**
-     * @param list<string>                $checks
-     * @param array<string, list<string>> $routeAccessMap
+     * @param list<string> $values
      */
-    private static function checkLabelFor(array $checks, RouteAccessControl $routeAccessControl, array $routeAccessMap): string
+    private static function cappedList(array $values, int $maxItems, int $maxBytes): string
+    {
+        if ([] === $values) {
+            return '(none)';
+        }
+
+        return implode(',', self::itemsWithOmissionNotice($values, $maxItems, $maxBytes));
+    }
+
+    /**
+     * Every list rendered from the audited repository is repeated in each
+     * chunk prompt, so it is cut at a number of items and of bytes, and a cut
+     * list ends with `… and N more`.
+     *
+     * @param list<string> $values
+     *
+     * @return list<string>
+     */
+    private static function itemsWithOmissionNotice(array $values, int $maxItems, int $maxBytes): array
+    {
+        $listed = self::itemsWithinCaps($values, $maxItems, $maxBytes);
+        $omitted = \count($values) - \count($listed);
+        if (0 < $omitted) {
+            $listed[] = \sprintf('… and %d more', $omitted);
+        }
+
+        return $listed;
+    }
+
+    /**
+     * @param list<string> $values
+     *
+     * @return list<string>
+     */
+    private static function itemsWithinCaps(array $values, int $maxItems, int $maxBytes): array
+    {
+        $listed = [];
+        $bytes = 0;
+        foreach ($values as $value) {
+            $item = self::sanitizeLine($value);
+            $itemBytes = \strlen($item) + ([] === $listed ? 0 : 1);
+            if ($maxItems === \count($listed) || $maxBytes < $bytes + $itemBytes) {
+                break;
+            }
+
+            $listed[] = $item;
+            $bytes += $itemBytes;
+        }
+
+        return $listed;
+    }
+
+    /**
+     * @param list<string>            $checks
+     * @param list<string>|false|null $firewallRoles
+     */
+    private static function checkLabelFor(array $checks, array|false|null $firewallRoles): string
     {
         if ([] !== $checks) {
             return implode(' + ', $checks);
         }
-
-        $firewallRoles = self::firewallRolesForPath($routeAccessControl->routePath(), $routeAccessControl->routeMethods(), $routeAccessMap)
-            ?? self::firewallRolesForRouteName($routeAccessControl->routeName(), $routeAccessControl->routeMethods(), $routeAccessMap);
 
         return self::firewallCoverageLabel($firewallRoles);
     }
@@ -180,17 +309,22 @@ final readonly class SymfonyMappingContextRenderer
      * restricts access. When no rule matches, or the matching one grants
      * {@see self::PUBLIC_ACCESS_PSEUDO_ROLES public access}, the route is
      * reachable by anyone, so it is tagged `LACKS_ACCESS_CHECK` rather than
-     * suppressed as `COVERED_BY`.
+     * suppressed as `COVERED_BY`. When the matcher cannot tell which rule
+     * governs the route, it is tagged as unknown, never as covered.
      *
-     * @param list<string>|null $firewallRoles
+     * @param list<string>|false|null $firewallRoles
      */
-    private static function firewallCoverageLabel(?array $firewallRoles): string
+    private static function firewallCoverageLabel(array|false|null $firewallRoles): string
     {
+        if (false === $firewallRoles) {
+            return 'UNKNOWN_ACCESS_CONTROL (an access_control path pattern was too costly to evaluate against this route)';
+        }
+
         if (null === $firewallRoles || self::grantsPublicAccess($firewallRoles)) {
             return 'LACKS_ACCESS_CHECK';
         }
 
-        return \sprintf('COVERED_BY access_control[%s]', implode(',', array_map(self::sanitizeLine(...), $firewallRoles)));
+        return \sprintf('COVERED_BY access_control[%s]', implode(',', self::itemsWithOmissionNotice($firewallRoles, self::MAX_LISTED_RULE_REQUIREMENTS, self::MAX_LISTED_RULE_REQUIREMENT_BYTES)));
     }
 
     /**
@@ -201,162 +335,6 @@ final readonly class SymfonyMappingContextRenderer
         $tokens = explode(', ', str_replace('or: ', '', implode(', ', $firewallRoles)));
 
         return [] !== array_intersect($tokens, self::PUBLIC_ACCESS_PSEUDO_ROLES);
-    }
-
-    /**
-     * Returns the roles of the first `security.yaml` `access_control` rule whose
-     * path pattern matches the route, or null when none matches. Symfony treats
-     * the `access_control` `path` as a regular expression, so it is matched as
-     * one; a malformed pattern, or one containing every delimiter candidate,
-     * simply fails to match rather than throwing.
-     *
-     * @param list<string>                $routeMethods
-     * @param array<string, list<string>> $routeAccessMap
-     *
-     * @return list<string>|null
-     */
-    private static function firewallRolesForPath(?string $routePath, array $routeMethods, array $routeAccessMap): ?array
-    {
-        if (null === $routePath) {
-            return null;
-        }
-
-        foreach ($routeAccessMap as $pattern => $roles) {
-            if (!self::methodsAreCovered($roles, $routeMethods)) {
-                continue;
-            }
-
-            $delimiter = self::delimiterAvoiding($pattern);
-            if (null !== $delimiter && 1 === preg_match($delimiter.$pattern.$delimiter, $routePath)) {
-                return $roles;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * A rule's `methods: GET|POST`-style requirement (recorded verbatim by
-     * {@see SymfonyYamlSecurityConfigParser}) only actually governs a route
-     * whose own declared methods are a subset of it — Symfony evaluates
-     * `access_control` rules in order and skips to the next one on a method
-     * mismatch, it does not treat a path-only match as sufficient. A route
-     * with no declared methods answers to every HTTP verb, so a
-     * method-restricted rule can never fully cover it. A second (or third, …)
-     * `access_control` rule for the same path is recorded as one `or: ...`
-     * entry per rule ({@see SymfonyYamlSecurityConfigParser::recordAccessControlEntry()}),
-     * each its own independent alternative Symfony tries in turn — the path
-     * is covered for a route if ANY alternative covers it, not just the
-     * first.
-     *
-     * @param list<string> $roles
-     * @param list<string> $routeMethods
-     */
-    private static function methodsAreCovered(array $roles, array $routeMethods): bool
-    {
-        foreach (self::alternativesOf($roles) as $alternative) {
-            if (self::alternativeCoversMethods($alternative, $routeMethods)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Splits the flat, possibly-`or:`-joined roles list into one string per
-     * alternative rule: the base rule's own list items joined into a single
-     * string, then each `or:` entry on its own. The leading `or: ` marker is
-     * left on those entries — {@see self::alternativeCoversMethods()} locates
-     * the `methods:` requirement anywhere in the string, so the marker never
-     * affects the check.
-     *
-     * @param list<string> $roles
-     *
-     * @return list<string>
-     */
-    private static function alternativesOf(array $roles): array
-    {
-        $base = [];
-        $orAlternatives = [];
-        foreach ($roles as $role) {
-            if (str_starts_with($role, 'or: ')) {
-                $orAlternatives[] = $role;
-
-                continue;
-            }
-
-            $base[] = $role;
-        }
-
-        return [implode(', ', $base), ...$orAlternatives];
-    }
-
-    /**
-     * Extracts the alternative's own `methods: GET|POST` requirement via a
-     * targeted regex rather than splitting the comma-joined alternative
-     * string apart — `listedRequirements()` already uses `, ` as the
-     * separator *within* an `ips: ...` requirement, so a generic split
-     * would misparse an alternative combining `ips:` and `methods:`. HTTP
-     * method names are always uppercase ASCII letters, which no other
-     * requirement value can contain, so the match is unambiguous regardless
-     * of what precedes or follows it.
-     *
-     * @param list<string> $routeMethods
-     */
-    private static function alternativeCoversMethods(string $alternative, array $routeMethods): bool
-    {
-        if (1 !== preg_match('/methods:\s*([A-Z|]+)/', $alternative, $matches)) {
-            return true;
-        }
-
-        if ([] === $routeMethods) {
-            return false;
-        }
-
-        $ruleMethods = explode('|', $matches[1]);
-        $upperRouteMethods = array_map(strtoupper(...), $routeMethods);
-
-        return [] === array_diff($upperRouteMethods, $ruleMethods);
-    }
-
-    /**
-     * Picks a PCRE delimiter guaranteed absent from the pattern, so the pattern
-     * can never prematurely close or corrupt the delimited expression — unlike
-     * a fixed delimiter (`#`, `{}`, …), which a sufficiently adversarial pattern
-     * can always collide with.
-     */
-    private static function delimiterAvoiding(string $pattern): ?string
-    {
-        foreach (str_split(self::DELIMITER_CANDIDATES) as $candidate) {
-            if (!str_contains($pattern, $candidate)) {
-                return $candidate;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Returns the roles of the `security.yaml` `access_control` rule keyed by
-     * `route: <name>` — {@see SymfonyYamlSecurityConfigParser::targetOf()} —
-     * matching this route's name, or null when the route has no name or no
-     * such rule exists.
-     *
-     * @param list<string>                $routeMethods
-     * @param array<string, list<string>> $routeAccessMap
-     *
-     * @return list<string>|null
-     */
-    private static function firewallRolesForRouteName(?string $routeName, array $routeMethods, array $routeAccessMap): ?array
-    {
-        if (null === $routeName) {
-            return null;
-        }
-
-        $roles = $routeAccessMap[\sprintf('route: %s', $routeName)] ?? null;
-
-        return null !== $roles && self::methodsAreCovered($roles, $routeMethods) ? $roles : null;
     }
 
     /**

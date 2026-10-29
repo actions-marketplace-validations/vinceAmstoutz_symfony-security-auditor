@@ -28,13 +28,13 @@ Each key a profile sets is documented in [Configuration → `audit.*`](configura
 - **Concurrency** — `audit.attacker_max_concurrent` and `audit.reviewer_max_concurrent` resolve several LLM calls at once on platforms with an async transport; `4`–`8` (within your rate limits) cuts each phase's wall-clock roughly proportionally. Cache hits short-circuit, so only the misses are dispatched.
 - **Caching** — content-hash caching skips identical attacker chunks and reviewer verdicts across runs, and Anthropic prompt caching (`cache_retention` in `ai.yaml`) gives a ~90% input-token discount on cache hits. Both are on by default; see [Configuration → `cache.*`](configuration.md#cache--caching-layers).
 - **Lean pre-scan & code slicing** — `audit.static_prescan.lean_mode` drops marker-free files and `audit.code_slicing.enabled` trims large files to security-relevant lines; both cut tokens and are on under the `fast` profile.
-- **Budget guards** — cap a run with `audit.budget.max_tokens` / `audit.budget.max_cost_usd`, and preview spend with `audit:run --dry-run` before committing to a full run. The preview's token counts are a heuristic projection from file size, not the real per-call usage a completed run reports. The standalone binary runs it without a provider credential, so you can price a project before signing up for one.
+- **Budget guards** — cap a run with `audit.budget.max_tokens` / `audit.budget.max_cost_usd`, and preview spend with `audit:run --dry-run` before committing to a full run. The preview's token counts are a heuristic projection, not the real per-call usage a completed run reports: the file contents plus, for each chunk, the system prompt and the project mapping (routes, firewalls, voters, forms) that every chunk's request carries, so a project with many routes is priced for them. The standalone binary runs it without a provider credential, so you can price a project before signing up for one.
 
 ## Avoiding rate limits (`429`)
 
 Two layers keep you inside provider quotas:
 
-- **Reactive (always on)** — transient `429`/`5xx` responses are retried with jittered exponential backoff (`audit.retry.*`), honoring server `Retry-After` headers.
+- **Reactive (always on)** — transient `429`/`5xx` responses are retried with jittered exponential backoff (`audit.retry.*`), honoring server `Retry-After` headers and, on a `429`, any longer wait the provider names: the one its message asks for (`Please try again in 8.064s.`) or OpenAI's token-window reset (`x-ratelimit-reset-tokens`).
 - **Proactive (opt-in)** — set `audit.rate_limit.requests_per_minute`, `audit.rate_limit.input_tokens_per_minute`, and/or `audit.rate_limit.output_tokens_per_minute` to your provider tier so a token-bucket limiter keeps the steady state inside quota. See [Configuration → `audit.rate_limit.*`](configuration.md#auditrate_limit--proactive-throttling).
 
 Still throttled? Lower `audit.max_iterations`, raise `audit.reviewer_batch_size` (fewer reviewer calls), keep `*_max_concurrent` within your tier, switch the reviewer to a cheaper model with higher limits, and run nightly instead of on every PR.

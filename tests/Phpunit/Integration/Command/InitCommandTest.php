@@ -16,6 +16,7 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Command;
 use Override;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\NullLogger;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
 use Symfony\Component\Filesystem\Filesystem;
@@ -27,7 +28,15 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\FilesystemC
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfigFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\XdgConfigPathResolver;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\YamlStandaloneConfigWriter;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Pricing\ModelsDevPricedModelList;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Pricing\ModelsDevPricingProvider;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Pricing\PricedModelListInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\ComposerAvailabilityCheckerInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\ComposerPreflight;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\ComposerProbe;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\ComposerSetupAdvice;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\InitCommand;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\InitProviderChoices;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Command\Fixture\FailingBridgeInstaller;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Command\Fixture\RecordingBridgeInstaller;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Command\Fixture\UnhideableCredentialPrompt;
@@ -64,6 +73,56 @@ final class InitCommandTest extends TestCase
 
         self::assertSame(
             ['provider' => 'openai', 'platform' => ['openai' => ['api_key' => '%env(OPENAI_API_KEY)%']], 'model' => 'gpt-5.4'],
+            Yaml::parseFile($this->configFile()),
+        );
+    }
+
+    public function test_it_lets_you_pick_a_priced_provider_by_its_number(): void
+    {
+        $commandTester = $this->commandTester();
+        $commandTester->setInputs([(string) array_search('openai', InitProviderChoices::names(), true), 'gpt-5.4', '', '']);
+
+        $commandTester->execute([]);
+
+        self::assertSame(
+            ['provider' => 'openai', 'platform' => ['openai' => ['api_key' => '%env(OPENAI_API_KEY)%']], 'model' => 'gpt-5.4'],
+            Yaml::parseFile($this->configFile()),
+        );
+    }
+
+    public function test_it_lets_you_pick_the_newest_priced_model_that_calls_tools_by_its_number(): void
+    {
+        $commandTester = $this->commandTester(new ModelsDevPricedModelList(new ModelsDevPricingProvider(new NullLogger(), __DIR__.'/Fixture/init-catalog.json')));
+        $commandTester->setInputs(['openai', '0', '', '']);
+
+        $commandTester->execute([]);
+
+        self::assertSame(
+            ['provider' => 'openai', 'platform' => ['openai' => ['api_key' => '%env(OPENAI_API_KEY)%']], 'model' => 'gpt-new'],
+            Yaml::parseFile($this->configFile()),
+        );
+    }
+
+    public function test_it_offers_only_the_ten_newest_priced_models(): void
+    {
+        $commandTester = $this->commandTester(new ModelsDevPricedModelList(new ModelsDevPricingProvider(new NullLogger(), __DIR__.'/Fixture/init-catalog.json')));
+        $commandTester->setInputs(['mistral', '0', '', '']);
+
+        $commandTester->execute([]);
+
+        self::assertStringNotContainsString('old-model', $this->unwrappedDisplay($commandTester));
+    }
+
+    public function test_it_offers_claude_opus_5_5_as_the_default_model(): void
+    {
+        $commandTester = $this->commandTester();
+        $commandTester->setInputs(['anthropic', '', '', '']);
+
+        $commandTester->execute([]);
+
+        self::assertStringContainsString('Which model should the auditor use? [claude-opus-5-5]:', $this->unwrappedDisplay($commandTester));
+        self::assertSame(
+            ['provider' => 'anthropic', 'platform' => ['anthropic' => ['api_key' => '%env(ANTHROPIC_API_KEY)%']], 'model' => 'claude-opus-5-5'],
             Yaml::parseFile($this->configFile()),
         );
     }
@@ -199,6 +258,47 @@ final class InitCommandTest extends TestCase
             ['provider' => 'openai', 'platform' => ['openai' => ['api_key' => '%env(OPENAI_API_KEY)%']], 'model' => 'gpt-5.4'],
             Yaml::parseFile($this->configFile()),
         );
+    }
+
+    #[DataProvider('providersOverAnExistingConfiguration')]
+    public function test_it_rewrites_an_existing_configuration_from_scratch_when_forced(string $provider, string $model, string $envVar): void
+    {
+        (new Filesystem())->dumpFile($this->configFile(), $this->anthropicConfigurationWithEverythingInitDoesNotWrite());
+
+        $this->commandTester()->execute(
+            ['--provider' => $provider, '--model' => $model, '--force' => true],
+            ['interactive' => false],
+        );
+
+        self::assertSame(
+            ['provider' => $provider, 'platform' => [$provider => ['api_key' => \sprintf('%%env(%s)%%', $envVar)]], 'model' => $model],
+            Yaml::parseFile($this->configFile()),
+        );
+    }
+
+    #[DataProvider('providersOverAnExistingConfiguration')]
+    public function test_it_rewrites_an_existing_configuration_from_scratch_when_the_overwrite_is_confirmed(string $provider, string $model, string $envVar): void
+    {
+        (new Filesystem())->dumpFile($this->configFile(), $this->anthropicConfigurationWithEverythingInitDoesNotWrite());
+
+        $commandTester = $this->commandTester();
+        $commandTester->setInputs([$provider, $model, $envVar, 'yes', '']);
+
+        $commandTester->execute([]);
+
+        self::assertSame(
+            ['provider' => $provider, 'platform' => [$provider => ['api_key' => \sprintf('%%env(%s)%%', $envVar)]], 'model' => $model],
+            Yaml::parseFile($this->configFile()),
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string, string}>
+     */
+    public static function providersOverAnExistingConfiguration(): iterable
+    {
+        yield 'the same provider' => ['anthropic', 'claude-haiku-4-5', 'ANTHROPIC_API_KEY'];
+        yield 'another provider' => ['openai', 'gpt-5.4', 'OPENAI_API_KEY'];
     }
 
     public function test_it_rebuilds_the_bridge_of_a_configured_machine_under_no_interaction_when_forced(): void
@@ -405,6 +505,7 @@ final class InitCommandTest extends TestCase
             new StandaloneConfigFactory(),
             new YamlStandaloneConfigWriter(),
             new FailingBridgeInstaller(),
+            new ComposerPreflight($this->availableComposer()),
             new FilesystemCredentialStore($xdgConfigPathResolver),
         );
         $commandTester = new CommandTester($initCommand);
@@ -1073,7 +1174,7 @@ final class InitCommandTest extends TestCase
         $commandTester = $this->commandTester();
 
         $exitCode = $commandTester->execute(
-            ['--provider' => 'generic..inf', '--model' => 'our-model', '--env-var' => 'TOKEN', '--base-url' => 'https://gw.example'],
+            ['--provider' => 'generic.0', '--model' => 'our-model', '--env-var' => 'TOKEN', '--base-url' => 'https://gw.example'],
             ['interactive' => false],
         );
 
@@ -1082,6 +1183,40 @@ final class InitCommandTest extends TestCase
             'cannot be read back with',
             $this->unwrappedDisplay($commandTester),
         );
+    }
+
+    #[DataProvider('instanceNamesTheYamlLibraryDecides')]
+    public function test_it_never_writes_an_instance_name_the_config_cannot_be_read_back_with(string $instance): void
+    {
+        $commandTester = $this->commandTester();
+
+        $exitCode = $commandTester->execute(
+            ['--provider' => 'generic.'.$instance, '--model' => 'our-model', '--env-var' => 'TOKEN', '--base-url' => 'https://gw.example'],
+            ['interactive' => false],
+        );
+
+        if (Command::INVALID === $exitCode) {
+            self::assertStringContainsString('cannot be read back with', $this->unwrappedDisplay($commandTester));
+
+            return;
+        }
+
+        self::assertSame(Command::SUCCESS, $exitCode);
+        self::assertSame(
+            ['provider' => 'generic.'.$instance, 'platform' => ['generic' => [$instance => ['base_url' => 'https://gw.example', 'api_key' => '%env(TOKEN)%']]], 'model' => 'our-model'],
+            Yaml::parseFile($this->configFile()),
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function instanceNamesTheYamlLibraryDecides(): iterable
+    {
+        yield 'infinity' => ['.inf'];
+        yield 'not-a-number' => ['.nan'];
+        yield 'infinity in capitals' => ['.INF'];
+        yield 'the merge key' => ['<<'];
     }
 
     public function test_it_names_the_stray_instance_before_the_base_url_rule(): void
@@ -1112,6 +1247,27 @@ final class InitCommandTest extends TestCase
         self::assertStringContainsString(
             'would be read as a container parameter',
             $this->unwrappedDisplay($commandTester),
+        );
+    }
+
+    public function test_it_refuses_an_instance_named_by_an_environment_placeholder_without_writing_anything(): void
+    {
+        $commandTester = $this->commandTester();
+
+        $exitCode = $commandTester->execute(
+            ['--provider' => 'generic.%env(GATEWAY)%', '--model' => 'our-model', '--env-var' => 'TOKEN', '--base-url' => 'https://gw.example'],
+            ['interactive' => false],
+        );
+
+        self::assertSame(
+            [Command::INVALID, true, [], false],
+            [
+                $exitCode,
+                str_contains($this->unwrappedDisplay($commandTester), 'uses an instance name holding "%...%"'),
+                $this->recordingBridgeInstaller->installations,
+                file_exists($this->configFile()),
+            ],
+            $commandTester->getDisplay(),
         );
     }
 
@@ -1708,7 +1864,107 @@ final class InitCommandTest extends TestCase
         self::assertSame([['azure.prod', $this->dataHome.'/symfony-security-auditor']], $this->recordingBridgeInstaller->installations);
     }
 
-    private function commandTester(): CommandTester
+    public function test_it_stops_before_asking_anything_when_composer_cannot_run(): void
+    {
+        $commandTester = $this->commandTesterWithoutComposer('php: not found');
+
+        $exitCode = $commandTester->execute([], ['interactive' => true]);
+
+        self::assertSame(Command::FAILURE, $exitCode);
+        self::assertStringNotContainsString('Which AI provider', $commandTester->getDisplay());
+    }
+
+    public function test_it_says_why_composer_cannot_run(): void
+    {
+        $commandTester = $this->commandTesterWithoutComposer('/mnt/c/ProgramData/ComposerSetup/bin/composer: 14: php: not found');
+
+        $commandTester->execute(['--provider' => 'openai', '--model' => 'gpt-5.4'], ['interactive' => false]);
+
+        self::assertStringContainsString('/mnt/c/ProgramData/ComposerSetup/bin/composer: 14: php: not found', $this->unwrappedDisplay($commandTester));
+    }
+
+    public function test_it_tells_how_to_install_composer_on_the_operating_system_it_runs_on(): void
+    {
+        $commandTester = $this->commandTesterWithoutComposer('not found', new ComposerSetupAdvice('Windows'));
+
+        $commandTester->execute(['--provider' => 'openai', '--model' => 'gpt-5.4'], ['interactive' => false]);
+
+        self::assertStringContainsString('https://windows.php.net/download/', $commandTester->getDisplay());
+    }
+
+    public function test_it_installs_and_writes_nothing_when_composer_cannot_run(): void
+    {
+        $commandTester = $this->commandTesterWithoutComposer('php: not found');
+
+        $commandTester->execute(['--provider' => 'openai', '--model' => 'gpt-5.4'], ['interactive' => false]);
+
+        self::assertSame([], $this->recordingBridgeInstaller->installations);
+        self::assertFileDoesNotExist($this->configFile());
+    }
+
+    public function test_a_run_that_cannot_ask_leaves_an_existing_configuration_untouched_without_composer(): void
+    {
+        (new Filesystem())->dumpFile($this->configFile(), "model: keep-me\n");
+        $commandTester = $this->commandTesterWithoutComposer('sh: 1: exec: composer: not found');
+
+        $exitCode = $commandTester->execute([], ['interactive' => false]);
+
+        self::assertSame(Command::SUCCESS, $exitCode);
+        self::assertStringContainsString('Aborted; the existing configuration was left untouched (use --force to overwrite).', $this->unwrappedDisplay($commandTester));
+        self::assertStringNotContainsString('init cannot continue', $this->unwrappedDisplay($commandTester));
+        self::assertSame(['model' => 'keep-me'], Yaml::parseFile($this->configFile()));
+        self::assertSame([], $this->recordingBridgeInstaller->installations);
+    }
+
+    public function test_a_forced_run_over_an_existing_configuration_stops_when_composer_cannot_run(): void
+    {
+        (new Filesystem())->dumpFile($this->configFile(), "model: keep-me\n");
+        $commandTester = $this->commandTesterWithoutComposer('sh: 1: exec: composer: not found');
+
+        $exitCode = $commandTester->execute(['--provider' => 'openai', '--model' => 'gpt-5.4', '--force' => true], ['interactive' => false]);
+
+        self::assertSame(Command::FAILURE, $exitCode);
+        self::assertStringContainsString('init cannot continue', $this->unwrappedDisplay($commandTester));
+        self::assertSame(['model' => 'keep-me'], Yaml::parseFile($this->configFile()));
+        self::assertSame([], $this->recordingBridgeInstaller->installations);
+    }
+
+    public function test_a_run_that_can_ask_about_an_existing_configuration_stops_before_asking_when_composer_cannot_run(): void
+    {
+        (new Filesystem())->dumpFile($this->configFile(), "model: keep-me\n");
+        $commandTester = $this->commandTesterWithoutComposer('sh: 1: exec: composer: not found');
+
+        $exitCode = $commandTester->execute([], ['interactive' => true]);
+
+        self::assertSame(Command::FAILURE, $exitCode);
+        self::assertStringNotContainsString('Which AI provider', $commandTester->getDisplay());
+    }
+
+    private function commandTesterWithoutComposer(string $failure, ComposerSetupAdvice $composerSetupAdvice = new ComposerSetupAdvice()): CommandTester
+    {
+        $composerAvailabilityChecker = self::createStub(ComposerAvailabilityCheckerInterface::class);
+        $composerAvailabilityChecker->method('probe')->willReturn(ComposerProbe::unavailable($failure));
+        $xdgConfigPathResolver = new XdgConfigPathResolver($this->configHome, null, null, $this->dataHome);
+
+        return new CommandTester(new InitCommand(
+            $xdgConfigPathResolver,
+            new StandaloneConfigFactory(),
+            new YamlStandaloneConfigWriter(),
+            $this->recordingBridgeInstaller,
+            new ComposerPreflight($composerAvailabilityChecker, $composerSetupAdvice),
+            new FilesystemCredentialStore($xdgConfigPathResolver),
+        ));
+    }
+
+    private function availableComposer(): ComposerAvailabilityCheckerInterface
+    {
+        $composerAvailabilityChecker = self::createStub(ComposerAvailabilityCheckerInterface::class);
+        $composerAvailabilityChecker->method('probe')->willReturn(ComposerProbe::available());
+
+        return $composerAvailabilityChecker;
+    }
+
+    private function commandTester(?PricedModelListInterface $pricedModelList = null): CommandTester
     {
         $xdgConfigPathResolver = new XdgConfigPathResolver($this->configHome, null, null, $this->dataHome);
         $initCommand = new InitCommand(
@@ -1716,10 +1972,17 @@ final class InitCommandTest extends TestCase
             new StandaloneConfigFactory(),
             new YamlStandaloneConfigWriter(),
             $this->recordingBridgeInstaller,
+            new ComposerPreflight($this->availableComposer()),
             new FilesystemCredentialStore($xdgConfigPathResolver),
+            pricedModelList: $pricedModelList,
         );
 
         return new CommandTester($initCommand);
+    }
+
+    private function anthropicConfigurationWithEverythingInitDoesNotWrite(): string
+    {
+        return "provider: anthropic\nplatform:\n    anthropic: { api_key: '%env(ANTHROPIC_API_KEY)%' }\nmodel: claude-opus-4-8\nattacker_model: claude-opus-4-8\nreviewer_model: claude-haiku-4-5\naudit:\n    escalation:\n        enabled: true\n        cheap_model: claude-haiku-4-5\n    budget:\n        max_cost_usd: 5.0\nprivacy:\n    offline_only: true\nhttp_timeout: 900\n";
     }
 
     private function unwrappedDisplay(CommandTester $commandTester): string
@@ -1780,6 +2043,7 @@ final class InitCommandTest extends TestCase
             new StandaloneConfigFactory(),
             new YamlStandaloneConfigWriter(),
             $this->recordingBridgeInstaller,
+            new ComposerPreflight($this->availableComposer()),
             new FilesystemCredentialStore($xdgConfigPathResolver),
             credentialPrompt: new UnhideableCredentialPrompt(),
         ));

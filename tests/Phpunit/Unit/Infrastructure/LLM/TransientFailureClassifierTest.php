@@ -16,15 +16,19 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\LLM;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Symfony\AI\Platform\Exception\AuthenticationException;
 use Symfony\AI\Platform\Exception\BadRequestException;
 use Symfony\AI\Platform\Exception\ContentFilterException;
 use Symfony\AI\Platform\Exception\ExceedContextSizeException;
+use Symfony\AI\Platform\Exception\InvalidArgumentException as PlatformInvalidArgumentException;
 use Symfony\AI\Platform\Exception\MalformedToolCallException;
 use Symfony\AI\Platform\Exception\MaxOutputTokensException;
+use Symfony\AI\Platform\Exception\RateLimitExceededException;
 use Symfony\AI\Platform\Exception\RuntimeException as PlatformRuntimeException;
 use Symfony\AI\Platform\Exception\ServerException;
 use Symfony\Component\HttpClient\Exception\TransportException;
 use Throwable;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\TransientHttpStatusException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\UnconvertedAnswerException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TransientFailureClassifier;
 
@@ -50,6 +54,9 @@ final class TransientFailureClassifierTest extends TestCase
         yield 'http_529_overloaded' => [new RuntimeException('HTTP 529: Overloaded')];
         yield 'overloaded_phrasing' => [new RuntimeException('The Anthropic API is currently overloaded, please retry')];
         yield 'rate_limit_phrasing' => [new RuntimeException('Rate limit exceeded')];
+        yield 'quota_exceeded_per_minute_with_a_suggested_wait' => [new RateLimitExceededException(null, 'You exceeded your current quota, please check your plan and billing details. * Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 15. Please retry in 41.8s.')];
+        yield 'quota_exceeded_with_a_retry_after_wait' => [new RateLimitExceededException(null, 'You exceeded your current quota. Retry after 30 seconds.')];
+        yield 'quota_exceeded_with_a_try_again_wait' => [new RateLimitExceededException(null, 'You exceeded your current quota, try again in 20s.')];
         yield 'timeout_phrasing' => [new RuntimeException('Request timed out after 30s')];
         yield 'temporarily_unavailable' => [new RuntimeException('Provider temporarily unavailable')];
         yield 'connection_reset' => [new RuntimeException('Connection reset by peer')];
@@ -90,6 +97,10 @@ final class TransientFailureClassifierTest extends TestCase
         yield 'symfony_failed_sending_data' => [self::transportFailure('Failed sending data to the peer')];
         yield 'symfony_empty_reply_from_server' => [self::transportFailure('Empty reply from server')];
         yield 'symfony_send_failure_broken_pipe' => [self::transportFailure('Send failure: Broken pipe')];
+        yield 'request_refused_with_a_client_error_whose_bridge_message_reads_as_transient' => [UnconvertedAnswerException::refusedWithStatus(new RuntimeException('Gateway temporarily unavailable'), 403)];
+        yield 'status_that_clears_on_its_own_whose_body_the_bridge_read_as_empty' => [TransientHttpStatusException::from(new PlatformRuntimeException('Response does not contain message.'), 503)];
+        yield 'status_that_clears_on_its_own_whose_page_the_bridge_could_not_decode' => [TransientHttpStatusException::from(new RuntimeException('Syntax error for "http://127.0.0.1:11434/api/chat".'), 502)];
+        yield 'status_that_clears_on_its_own_beneath_a_wrapper' => [new RuntimeException('call failed', previous: TransientHttpStatusException::from(new PlatformRuntimeException('Response does not contain message.'), 408))];
     }
 
     #[DataProvider('connectionCutCarryingAStatusLikeTokenCases')]
@@ -150,6 +161,7 @@ final class TransientFailureClassifierTest extends TestCase
                 previous: new RuntimeException('underlying: 429 rate limit hit'),
             ),
         ];
+        yield 'rate_limit_status_whose_body_the_bridge_read_as_empty' => [TransientHttpStatusException::from(new PlatformRuntimeException('Response does not contain message.'), 429)];
     }
 
     #[DataProvider('nonRateLimitCases')]
@@ -168,6 +180,7 @@ final class TransientFailureClassifierTest extends TestCase
         yield 'unknown_error' => [new RuntimeException('Something went wrong')];
         yield 'thousands_separated_figure_is_not_a_status_code' => [new RuntimeException('elapsed 1,429 ms')];
         yield 'decimal_figure_is_not_a_status_code' => [new RuntimeException('429.5 units consumed')];
+        yield 'server_error_status_whose_body_the_bridge_read_as_empty' => [TransientHttpStatusException::from(new PlatformRuntimeException('Response does not contain message.'), 503)];
     }
 
     /** @return iterable<string, array{Throwable}> */
@@ -181,6 +194,9 @@ final class TransientFailureClassifierTest extends TestCase
         yield 'http_400_at_sentence_end' => [new RuntimeException('The provider rejected the request with HTTP 400.')];
         yield 'non_transient_code_with_embedded_transient_digits' => [new RuntimeException('HTTP 401 Unauthorized (client waited 5001 ms)')];
         yield 'invalid_api_key' => [new RuntimeException('Invalid API key provided')];
+        yield 'openai_billing_quota_exhausted' => [new RateLimitExceededException(null, 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.')];
+        yield 'insufficient_quota_code_in_the_message' => [new RuntimeException('HTTP 429: {"error":{"type":"insufficient_quota","code":"insufficient_quota"}}')];
+        yield 'insufficient_quota_beneath_a_wrapper' => [new RuntimeException('call failed', previous: new RateLimitExceededException(null, 'insufficient_quota'))];
         yield 'authentication_failed' => [new RuntimeException('authentication failed')];
         yield 'unknown_error_phrasing' => [new RuntimeException('Something went wrong without identifiable signal')];
         yield 'non_transient_wins_over_transient_in_chain' => [
@@ -190,6 +206,8 @@ final class TransientFailureClassifierTest extends TestCase
         yield 'symfony_client_error_status' => [new RuntimeException('HTTP 401 returned for "https://gw.example.com/v1/chat/completions".')];
         yield 'symfony_untrusted_certificate' => [self::transportFailure('SSL certificate problem: unable to get local issuer certificate')];
         yield 'symfony_tls_alert_while_reading' => [self::transportFailure('OpenSSL SSL_read: error:0A000412:SSL routines::sslv3 alert bad certificate, errno 0')];
+        yield 'request_refused_with_a_client_error_the_bridge_named_as_a_failure' => [UnconvertedAnswerException::refusedWithStatus(new AuthenticationException('Unauthorized'), 401)];
+        yield 'request_refused_with_a_client_error_whose_bridge_message_names_no_cause' => [UnconvertedAnswerException::refusedWithStatus(new RuntimeException('Response does not contain choices.'), 409)];
     }
 
     #[DataProvider('degradedStopReasonCases')]
@@ -220,6 +238,12 @@ final class TransientFailureClassifierTest extends TestCase
         yield 'request_its_raw_answer_shows_refused_as_too_large' => [UnconvertedAnswerException::refusedAsTooLarge(new RuntimeException('Syntax error')), null];
         yield 'request_refused_as_too_large_whose_body_the_bridge_read_as_empty' => [UnconvertedAnswerException::refusedAsTooLarge(new PlatformRuntimeException('Response does not contain choices.')), null];
         yield 'request_refused_as_too_large_beneath_a_wrapper' => [new RuntimeException('call failed', previous: UnconvertedAnswerException::refusedAsTooLarge(new PlatformRuntimeException('Response does not contain any content.'))), null];
+        yield 'request_refused_with_a_client_error_whose_body_the_bridge_read_as_empty' => [UnconvertedAnswerException::refusedWithStatus(new PlatformRuntimeException('Response does not contain choices.'), 404), 'empty_content'];
+        yield 'request_refused_with_a_client_error_whose_body_the_bridge_read_as_empty_beneath_a_wrapper' => [new RuntimeException('call failed', previous: UnconvertedAnswerException::refusedWithStatus(new PlatformRuntimeException('Response does not contain choices.'), 422)), 'empty_content'];
+        yield 'request_refused_with_a_client_error_the_bridge_named_as_a_failure' => [UnconvertedAnswerException::refusedWithStatus(new AuthenticationException('Unauthorized'), 401), null];
+        yield 'request_refused_with_a_client_error_the_bridge_worded_as_a_content_filter' => [UnconvertedAnswerException::refusedWithStatus(new PlatformRuntimeException('Unsupported finish reason "content_filter".'), 400), 'content-filter'];
+        yield 'status_that_clears_on_its_own_whose_body_the_bridge_read_as_empty' => [TransientHttpStatusException::from(new PlatformRuntimeException('Response does not contain message.'), 503), null];
+        yield 'status_that_clears_on_its_own_whose_body_the_bridge_read_as_empty_beneath_a_wrapper' => [new RuntimeException('call failed', previous: TransientHttpStatusException::from(new PlatformRuntimeException('Response does not contain message.'), 500)), null];
     }
 
     #[DataProvider('billedStopReasonCases')]
@@ -238,6 +262,10 @@ final class TransientFailureClassifierTest extends TestCase
         yield 'tool_call_its_raw_answer_shows_cut_off' => [UnconvertedAnswerException::cutShort(new MalformedToolCallException('bad arguments'), 'length'), 'length'];
         yield 'failure_the_provider_never_answered' => [new RuntimeException('HTTP 503 Service Unavailable'), null];
         yield 'request_refused_as_too_large_whose_body_the_bridge_read_as_empty' => [UnconvertedAnswerException::refusedAsTooLarge(new PlatformRuntimeException('Response does not contain choices.')), null];
+        yield 'request_refused_with_a_client_error_whose_body_the_bridge_read_as_empty' => [UnconvertedAnswerException::refusedWithStatus(new PlatformRuntimeException('Response does not contain choices.'), 404), null];
+        yield 'request_refused_with_a_client_error_beneath_a_wrapper' => [new RuntimeException('call failed', previous: UnconvertedAnswerException::refusedWithStatus(new PlatformRuntimeException('Response does not contain choices.'), 403)), null];
+        yield 'request_refused_with_a_client_error_the_bridge_worded_as_a_content_filter' => [UnconvertedAnswerException::refusedWithStatus(new PlatformRuntimeException('Unsupported finish reason "content_filter".'), 400), null];
+        yield 'status_that_clears_on_its_own_whose_body_the_bridge_read_as_empty' => [TransientHttpStatusException::from(new PlatformRuntimeException('Response does not contain message.'), 429), null];
     }
 
     #[DataProvider('emptyContentCases')]
@@ -253,6 +281,7 @@ final class TransientFailureClassifierTest extends TestCase
         yield 'response_does_not_contain_variant' => [new RuntimeException('Response does not contain text blocks')];
         yield 'no_content_blocks_variant' => [new RuntimeException('Anthropic returned no content blocks')];
         yield 'case_insensitive_match' => [new RuntimeException('RESPONSE DOES NOT CONTAIN ANY CONTENT.')];
+        yield 'venice_completion_with_empty_text' => [new PlatformInvalidArgumentException('No completions found in the response.')];
         yield 'wrapped_empty_content' => [
             new RuntimeException(
                 'platform invoke failed',

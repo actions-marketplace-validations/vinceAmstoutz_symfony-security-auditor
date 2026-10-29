@@ -13,14 +13,18 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Command;
 
+use Closure;
 use Psr\Clock\ClockInterface;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Attribute\Option;
 use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Helper\Helper;
+use Symfony\Component\Console\Helper\ProgressBar;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\Exception\SelfUpdateFailedException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\Exception\UnsupportedSelfUpdatePlatformException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\PricingCatalogRefreshOutcome;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ReleaseChannel;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\SelfUpdateResult;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\SelfUpdaterInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\SelfUpdateStatus;
@@ -50,23 +54,61 @@ final readonly class SelfUpdateCommand
         SymfonyStyle $symfonyStyle,
         #[Option(description: 'Only report whether a newer version is available; do not modify the binary.')]
         bool $check = false,
+        #[Option(description: 'Use the latest snapshot, built from every push to the development branch, instead of the latest release.')]
+        bool $snapshot = false,
     ): int {
-        $selfUpdateResult = $this->selfUpdater->run($this->currentVersion, $check);
-        $this->refreshUpdateCheckCache($selfUpdateResult);
+        $releaseChannel = $snapshot ? ReleaseChannel::Snapshot : ReleaseChannel::Stable;
+        $progressBar = $symfonyStyle->createProgressBar();
+        $progressBar->setFormat(' Downloading the new binary: %message% received (%elapsed%)');
 
-        return $this->report($symfonyStyle, $selfUpdateResult);
+        $selfUpdateResult = $this->selfUpdater->run($this->currentVersion, $check, $releaseChannel, $symfonyStyle->isDecorated() ? $this->downloadProgress($progressBar) : $this->downloadAnnouncement($symfonyStyle));
+
+        $this->refreshUpdateCheckCache($selfUpdateResult, $releaseChannel);
+
+        return $this->report($symfonyStyle, $selfUpdateResult, $releaseChannel);
+    }
+
+    /**
+     * @return Closure(int): void
+     */
+    private function downloadAnnouncement(SymfonyStyle $symfonyStyle): Closure
+    {
+        $announced = false;
+
+        return static function () use ($symfonyStyle, &$announced): void {
+            if (!$announced) {
+                $symfonyStyle->writeln(' Downloading the new binary…');
+                $announced = true;
+            }
+        };
+    }
+
+    /**
+     * @return Closure(int): void
+     */
+    private function downloadProgress(ProgressBar $progressBar): Closure
+    {
+        return static function (int $bytes) use ($progressBar): void {
+            $progressBar->setMessage(Helper::formatMemory($bytes));
+            $progressBar->display();
+        };
     }
 
     /**
      * This command always reaches the release feed, so its answer supersedes
      * whatever the throttled passive notice last cached — otherwise the notice
-     * keeps contradicting a version the user has just been shown.
+     * keeps contradicting a version the user has just been shown. The notice
+     * only ever announces a release, so a snapshot answer is never cached.
      */
-    private function refreshUpdateCheckCache(SelfUpdateResult $selfUpdateResult): void
+    private function refreshUpdateCheckCache(SelfUpdateResult $selfUpdateResult, ReleaseChannel $releaseChannel): void
     {
         if (SelfUpdateStatus::Updated === $selfUpdateResult->status) {
             $this->updateCheckStore->clear();
 
+            return;
+        }
+
+        if (ReleaseChannel::Snapshot === $releaseChannel) {
             return;
         }
 
@@ -79,11 +121,11 @@ final readonly class SelfUpdateCommand
      * so the message says what has happened so far and the entry point
      * reports a swap that then fails.
      */
-    private function report(SymfonyStyle $symfonyStyle, SelfUpdateResult $selfUpdateResult): int
+    private function report(SymfonyStyle $symfonyStyle, SelfUpdateResult $selfUpdateResult, ReleaseChannel $releaseChannel): int
     {
         match ($selfUpdateResult->status) {
             SelfUpdateStatus::AlreadyUpToDate => $symfonyStyle->success(\sprintf('Already up to date (%s).', $selfUpdateResult->currentVersion)),
-            SelfUpdateStatus::UpdateAvailable => $symfonyStyle->warning(\sprintf('A newer version is available: %s (currently %s). Run "self-update" without --check to install it.', $selfUpdateResult->latestVersion, $selfUpdateResult->currentVersion)),
+            SelfUpdateStatus::UpdateAvailable => $symfonyStyle->warning(\sprintf('A newer version is available: %s (currently %s). Run "%s" without --check to install it.', $selfUpdateResult->latestVersion, $selfUpdateResult->currentVersion, ReleaseChannel::Snapshot === $releaseChannel ? 'self-update --snapshot' : 'self-update')),
             SelfUpdateStatus::Updated => $symfonyStyle->success(\sprintf('Downloaded and verified %s; it replaces %s as this command exits.', $selfUpdateResult->latestVersion, $selfUpdateResult->currentVersion)),
         };
 

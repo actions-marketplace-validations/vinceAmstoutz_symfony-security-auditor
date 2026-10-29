@@ -24,6 +24,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\Exception\Budg
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\NegativeTokenCountException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidTokenUsageException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\LLMRequestTooLargeException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\ProviderMessageRedactor;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\TokenUsageSnapshot;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMClientInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMRequest;
@@ -50,7 +51,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\Tran
 final readonly class BatchWindowResolver
 {
     public function __construct(
-        private ?PlatformInterface $platform,
+        private PlatformBinding $platformBinding,
         private string $model,
         private RateLimiterInterface $rateLimiter,
         private ?BudgetTracker $budgetTracker,
@@ -77,7 +78,7 @@ final readonly class BatchWindowResolver
      */
     public function resolveWindow(array $window): array
     {
-        $platform = $this->platform ?? throw MissingAiPlatformException::create();
+        $platform = $this->platformBinding->platform();
         $this->budgetTracker?->assertWithinBudget();
 
         return $this->resolveDispatched($window, $this->dispatch($platform, $window));
@@ -215,18 +216,18 @@ final readonly class BatchWindowResolver
         $reconciled = false;
 
         try {
-            $content = $deferredResult->asText();
-            [$inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens] = $this->platformResultExtractor->extractTokens($deferredResult);
-            $this->rateLimiter->record($inputTokens, $outputTokens);
+            $content = $this->platformResultExtractor->extractText($deferredResult->getResult());
+            $tokenUsageSnapshot = TokenUsageSnapshot::of(...$this->platformResultExtractor->extractTokens($deferredResult, $dispatchedRequest->estimatedInputTokens));
+            $this->rateLimiter->record($this->platformResultExtractor->rateLimitedInputTokens($deferredResult, $tokenUsageSnapshot), $tokenUsageSnapshot->outputTokens());
             $reconciled = true;
 
             $llmResponse = LLMResponse::of(
                 $content,
                 $this->model,
                 $this->platformResultExtractor->extractStopReason($deferredResult) ?? 'end_turn',
-                TokenUsageSnapshot::of($inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens),
+                $tokenUsageSnapshot,
             )->withReportedModel($this->platformResultExtractor->extractReportedModel($deferredResult));
-            $this->budgetTracker?->recordCall($llmResponse);
+            $this->budgetTracker?->recordCall($llmResponse, $this->platformResultExtractor->extractOneHourCacheCreationTokens($deferredResult, $tokenUsageSnapshot->cacheCreationTokens()));
 
             return $llmResponse;
         } catch (Throwable $throwable) {
@@ -289,10 +290,11 @@ final readonly class BatchWindowResolver
      */
     private function tooLargeResponse(Throwable $throwable): LLMResponse
     {
+        $refusal = ProviderMessageRedactor::redact($throwable->getMessage());
         $this->logger->debug('Batch request refused as too large for the model; it is answered as request_too_large so the caller can act on that request alone', [
-            'error' => $throwable->getMessage(),
+            'error' => $refusal,
         ]);
 
-        return LLMResponse::of($throwable->getMessage(), $this->model, 'request_too_large', TokenUsageSnapshot::of(0, 0));
+        return LLMResponse::of($refusal, $this->model, 'request_too_large', TokenUsageSnapshot::of(0, 0));
     }
 }

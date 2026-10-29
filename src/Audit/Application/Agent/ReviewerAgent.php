@@ -88,6 +88,7 @@ final readonly class ReviewerAgent implements ReviewerAgentInterface
         $verdictApplier = new VerdictApplier($reviewerAgentCollaborators->logger);
         $reviewerVerdictCache = new ReviewerVerdictCache($reviewerAgentCollaborators->reviewerCache, $reviewerAgentCollaborators->logger);
         $reviewOutcomeRecorder = new ReviewOutcomeRecorder($verdictApplier, $reviewerVerdictCache, $reviewerAgentCollaborators->logger, $reviewerAgentCollaborators->progressReporter, $reviewerAgentCollaborators->triageMemoryRecorder);
+        $recordingToolClients = RecordingToolClients::forReviewer($reviewerAgentCollaborators->logger);
 
         $this->sequentialReviewAnalyzer = new SequentialReviewAnalyzer(
             $reviewerAgentCollaborators->llmClient,
@@ -106,6 +107,7 @@ final readonly class ReviewerAgent implements ReviewerAgentInterface
                 $reviewerAgentCollaborators->recordReviewToolFactory,
                 $reviewerAgentCollaborators->logger,
                 $reviewerModeConfiguration->maxToolIterations,
+                $recordingToolClients,
             )
             : null;
 
@@ -129,6 +131,7 @@ final readonly class ReviewerAgent implements ReviewerAgentInterface
                 $reviewerAgentCollaborators->logger,
                 $reviewerModeConfiguration->maxConcurrent,
                 $reviewerModeConfiguration->maxToolIterations,
+                $recordingToolClients,
             )
             : null;
 
@@ -141,12 +144,14 @@ final readonly class ReviewerAgent implements ReviewerAgentInterface
             $reviewerAgentCollaborators->logger,
             $reviewerModeConfiguration->maxToolIterations,
             $reviewerAgentCollaborators->recordReviewToolFactory,
+            $recordingToolClients,
         );
     }
 
     /**
      * @param list<Vulnerability> $vulnerabilities
      * @param list<ProjectFile>   $projectFiles
+     * @param ?list<ProjectFile>  $toolFiles
      *
      * @return list<Vulnerability>
      *
@@ -155,14 +160,15 @@ final readonly class ReviewerAgent implements ReviewerAgentInterface
      * @throws InvalidToolRegistryException
      */
     #[Override]
-    public function review(array $vulnerabilities, array $projectFiles, CoverageRecorderInterface $coverageRecorder, bool $bypassCache = false): array
+    public function review(array $vulnerabilities, array $projectFiles, CoverageRecorderInterface $coverageRecorder, bool $bypassCache = false, ?array $toolFiles = null): array
     {
         if ([] === $vulnerabilities) {
             return [];
         }
 
         $useTools = $this->toolsEnabled && $this->toolRegistryFactory instanceof ToolRegistryFactoryInterface;
-        $toolRegistry = $useTools ? $this->toolRegistryFactory->forProjectFiles($projectFiles) : null;
+        $codeContextFiles = [...$projectFiles, ...($toolFiles ?? [])];
+        $toolRegistry = $useTools ? $this->toolRegistryFactory->forProjectFiles($toolFiles ?? $projectFiles) : null;
         $structuredEligible = $this->isStructuredEligible($useTools);
         $structuredConcurrent = $this->structuredConcurrentAnalyzer($structuredEligible);
         $useStructuredCollection = $this->shouldUseStructuredCollection($structuredEligible, $structuredConcurrent instanceof ConcurrentStructuredReviewAnalyzer);
@@ -177,11 +183,11 @@ final readonly class ReviewerAgent implements ReviewerAgentInterface
         ]);
 
         $reviewed = match (true) {
-            $this->batchSize > 1 => $this->batchReviewAnalyzer->analyze($vulnerabilities, $projectFiles, new ReviewBatchSettings($this->batchSize, $useStructuredCollection, $bypassCache, $coverageRecorder, $toolRegistry)),
-            $structuredConcurrent instanceof ConcurrentStructuredReviewAnalyzer => $structuredConcurrent->analyze($vulnerabilities, $projectFiles, $coverageRecorder, $bypassCache),
-            $structured instanceof StructuredReviewAnalyzer => $structured->analyze($vulnerabilities, $projectFiles, $coverageRecorder, $bypassCache),
-            $concurrent instanceof ConcurrentReviewAnalyzer => $concurrent->analyze($vulnerabilities, $projectFiles, $coverageRecorder, $bypassCache),
-            default => $this->sequentialReviewAnalyzer->analyze($vulnerabilities, $projectFiles, $coverageRecorder, $toolRegistry, $bypassCache),
+            $this->batchSize > 1 => $this->batchReviewAnalyzer->analyze($vulnerabilities, $codeContextFiles, new ReviewBatchSettings($this->batchSize, $useStructuredCollection, $bypassCache, $coverageRecorder, $toolRegistry)),
+            $structuredConcurrent instanceof ConcurrentStructuredReviewAnalyzer => $structuredConcurrent->analyze($vulnerabilities, $codeContextFiles, $coverageRecorder, $bypassCache),
+            $structured instanceof StructuredReviewAnalyzer => $structured->analyze($vulnerabilities, $codeContextFiles, $coverageRecorder, $bypassCache),
+            $concurrent instanceof ConcurrentReviewAnalyzer => $concurrent->analyze($vulnerabilities, $codeContextFiles, $coverageRecorder, $bypassCache),
+            default => $this->sequentialReviewAnalyzer->analyze($vulnerabilities, $codeContextFiles, $coverageRecorder, $toolRegistry, $bypassCache),
         };
 
         $accepted = array_filter($reviewed, static fn (Vulnerability $vulnerability): bool => $vulnerability->isReviewerValidated());

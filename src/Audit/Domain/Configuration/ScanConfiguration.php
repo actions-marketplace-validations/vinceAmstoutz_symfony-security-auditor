@@ -29,5 +29,7 @@ final readonly class ScanConfiguration
         public array $additionalScrubberPatterns,
         public array $customRiskPatterns = [],
         public array $importSarifPaths = [],
+        public bool $includeTrackedIgnored = false,
+        public bool $includeDotfiles = false,
     ) {}
 }

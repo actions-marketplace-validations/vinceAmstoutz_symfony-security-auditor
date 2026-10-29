@@ -15,13 +15,23 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Command\Mcp;
 
 use Mcp\Exception\ToolCallException;
 use Override;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+use RuntimeException;
 use Symfony\Component\Filesystem\Filesystem;
+use Symfony\Component\Finder\SplFileInfo;
+use Throwable;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\Exception\BudgetExceededException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\AuditAbortedByBudgetException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\AuditAbortedByProviderException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\ListScannedFilesUseCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\RunAuditUseCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidCodeLocationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidVulnerabilityClassificationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidVulnerabilityNarrativeException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\LLMProviderException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AcceptedFindingFeedback;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\CodeLocation;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
@@ -30,21 +40,30 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityNarrati
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilitySeverity;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityType;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\PipelineInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\PricingProviderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\AuditedProjectPathHolder;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\ProjectFileScanner;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\Reviewer\ReviewerFeedbackHolder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\JsonReportRenderer;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportRendererInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Baseline;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineFilePathsHolder;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineProcessor;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\AuditWithoutVerdictException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\InvalidProjectPathException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\FindingTypeFilter;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Mcp\AuditTool;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\UnpricedModelBudgetGuard;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\UnpricedModelBudgetGuardInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Command\Fixture\PartlyFailedPipeline;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Command\Mcp\Fixture\AbortedAuditPipeline;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Command\Mcp\Fixture\SingleFileAuditPipeline;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\Agent\Fixture\WarningCollectingLogger;
 
 final class AuditToolTest extends TestCase
 {
+    private const string PARTIAL_REPORT_LEAD_IN = "\n\nPartial report of the run that stopped early:\n";
+
     private string $projectPath;
 
     #[Override]
@@ -149,6 +168,145 @@ final class AuditToolTest extends TestCase
         $auditTool->audit($this->projectPath.'/nested/..');
 
         self::assertSame($this->projectPath, $auditedProjectPathHolder->path());
+    }
+
+    /**
+     * @throws ToolCallException
+     */
+    public function test_it_audits_the_project_a_folder_lies_in_narrowed_to_that_folder(): void
+    {
+        (new Filesystem())->dumpFile($this->projectPath.'/composer.json', '{}');
+        (new Filesystem())->mkdir($this->projectPath.'/src/Controller');
+        $auditedProjectPathHolder = $this->auditedProjectPathHolder();
+
+        $report = $this->decodedReport($this->auditTool(auditedProjectPathHolder: $auditedProjectPathHolder)->audit($this->projectPath.'/src/Controller'));
+
+        self::assertSame($this->projectPath, $report['project']);
+        self::assertSame(['since' => null, 'paths' => ['src/Controller']], $report['scope']);
+        self::assertSame($this->projectPath, $auditedProjectPathHolder->path());
+    }
+
+    /**
+     * @throws ToolCallException
+     */
+    public function test_a_folder_the_configured_scan_finds_files_in_stays_the_project_as_in_1_21(): void
+    {
+        (new Filesystem())->dumpFile($this->projectPath.'/composer.json', '{}');
+        (new Filesystem())->dumpFile($this->projectPath.'/packages/legacy/lib/Legacy.php', '<?php final class Legacy {}');
+        $auditTool = new AuditTool(
+            new RunAuditUseCase(new SingleFileAuditPipeline(), new NullLogger()),
+            new JsonReportRenderer(),
+            $this->auditedProjectPathHolder(),
+            new BaselineProcessor(new Baseline()),
+            new FindingTypeFilter(),
+            new ReviewerFeedbackHolder(),
+            $this->budgetGuard(),
+            listScannedFilesUseCase: new ListScannedFilesUseCase(new ProjectFileScanner(new NullLogger(), ['lib'])),
+        );
+
+        $report = $this->decodedReport($auditTool->audit($this->projectPath.'/packages/legacy'));
+
+        self::assertSame($this->projectPath.'/packages/legacy', $report['project']);
+        self::assertSame(['since' => null, 'paths' => []], $report['scope']);
+    }
+
+    /**
+     * @throws ToolCallException
+     */
+    public function test_telling_a_folder_the_configured_scan_finds_files_in_for_the_project_reads_none_of_them(): void
+    {
+        (new Filesystem())->dumpFile($this->projectPath.'/composer.json', '{}');
+        (new Filesystem())->dumpFile($this->projectPath.'/packages/legacy/lib/Legacy.php', '<?php final class Legacy {}');
+        $reads = [];
+        $projectFileScanner = new ProjectFileScanner(new NullLogger(), ['lib'], fileReader: static function (SplFileInfo $splFile) use (&$reads): string {
+            $reads[] = $splFile->getFilename();
+
+            return $splFile->getContents();
+        });
+        $auditTool = new AuditTool(
+            new RunAuditUseCase(new SingleFileAuditPipeline(), new NullLogger()),
+            new JsonReportRenderer(),
+            $this->auditedProjectPathHolder(),
+            new BaselineProcessor(new Baseline()),
+            new FindingTypeFilter(),
+            new ReviewerFeedbackHolder(),
+            $this->budgetGuard(),
+            listScannedFilesUseCase: new ListScannedFilesUseCase($projectFileScanner),
+        );
+
+        $report = $this->decodedReport($auditTool->audit($this->projectPath.'/packages/legacy'));
+
+        self::assertSame([$this->projectPath.'/packages/legacy', []], [$report['project'], $reads]);
+    }
+
+    /**
+     * @throws ToolCallException
+     */
+    public function test_it_runs_a_budgeted_audit_on_an_unpriced_model_as_1_21_did(): void
+    {
+        $auditTool = $this->budgetedAuditTool($this->budgetGuard(10.0, ['priced-model', 'mystery-model']));
+
+        $report = $auditTool->audit($this->projectPath);
+
+        self::assertSame($this->projectPath, $this->decodedReport($report)['project'] ?? null);
+    }
+
+    /**
+     * @throws ToolCallException
+     */
+    public function test_it_warns_in_the_log_that_the_budget_of_a_run_on_an_unpriced_model_cannot_be_enforced(): void
+    {
+        $warningCollectingLogger = new WarningCollectingLogger();
+        $auditTool = $this->budgetedAuditTool($this->budgetGuard(10.0, ['priced-model', 'mystery-model']), logger: $warningCollectingLogger);
+
+        $auditTool->audit($this->projectPath);
+
+        self::assertSame(
+            [[
+                'The cost budget audit.budget.max_cost_usd = 10 cannot be enforced for the unpriced model(s) mystery-model: the audit runs, and its real spend may exceed it.',
+                ['models' => ['mystery-model'], 'max_cost_usd' => 10.0],
+            ]],
+            $warningCollectingLogger->warnings,
+        );
+    }
+
+    /**
+     * @throws ToolCallException
+     */
+    public function test_it_does_not_warn_about_the_budget_when_there_is_none_to_enforce_or_every_model_is_priced(): void
+    {
+        $warningCollectingLogger = new WarningCollectingLogger();
+
+        $this->budgetedAuditTool($this->budgetGuard(null, ['mystery-model']), logger: $warningCollectingLogger)->audit($this->projectPath);
+        $this->budgetedAuditTool($this->budgetGuard(10.0, ['priced-model']), logger: $warningCollectingLogger)->audit($this->projectPath);
+
+        self::assertSame([], $warningCollectingLogger->warnings);
+    }
+
+    /**
+     * @throws ToolCallException
+     */
+    public function test_it_runs_a_budgeted_audit_when_every_model_is_priced(): void
+    {
+        $auditTool = $this->budgetedAuditTool($this->budgetGuard(10.0, ['priced-model']));
+
+        $report = json_decode($auditTool->audit($this->projectPath), true, flags: \JSON_THROW_ON_ERROR);
+
+        self::assertIsArray($report);
+        self::assertSame($this->projectPath, $report['project']);
+    }
+
+    /**
+     * @throws ToolCallException
+     */
+    public function test_it_runs_an_unbudgeted_audit_on_an_unpriced_model(): void
+    {
+        $auditTool = $this->budgetedAuditTool($this->budgetGuard(null, ['mystery-model']));
+
+        $report = json_decode($auditTool->audit($this->projectPath), true, flags: \JSON_THROW_ON_ERROR);
+
+        self::assertIsArray($report);
+        self::assertSame($this->projectPath, $report['project']);
     }
 
     /**
@@ -285,6 +443,7 @@ final class AuditToolTest extends TestCase
             new BaselineProcessor(new Baseline(), $this->baselineAccepting($vulnerability, 'The id is cast to int upstream.')),
             new FindingTypeFilter(),
             $reviewerFeedbackHolder,
+            $this->budgetGuard(),
         );
 
         $auditTool->audit($this->projectPath);
@@ -293,6 +452,171 @@ final class AuditToolTest extends TestCase
             ['The id is cast to int upstream.'],
             array_map(static fn (AcceptedFindingFeedback $acceptedFindingFeedback): string => $acceptedFindingFeedback->reason, $reviewerFeedbackHolder->feedback()->entries),
         );
+    }
+
+    /**
+     * @throws ToolCallException
+     */
+    public function test_it_hands_the_run_the_paths_the_configured_baseline_names_files_by(): void
+    {
+        $baselineFilePathsHolder = new BaselineFilePathsHolder();
+        $baselineFile = $this->projectPath.'/.security-baseline.json';
+        (new Filesystem())->dumpFile($baselineFile, json_encode([
+            ['fingerprint' => 'SSA-AAAAAAAAAAAA', 'file' => './src/A.php'],
+            ['fingerprint' => 'SSA-BBBBBBBBBBBB', 'file' => \sprintf('%s/src/A.php', $this->projectPath)],
+        ], \JSON_THROW_ON_ERROR));
+
+        $auditTool = new AuditTool(
+            new RunAuditUseCase(new SingleFileAuditPipeline(), new NullLogger()),
+            new JsonReportRenderer(),
+            $this->auditedProjectPathHolder(),
+            new BaselineProcessor(new Baseline(), $baselineFile),
+            new FindingTypeFilter(),
+            new ReviewerFeedbackHolder(),
+            $this->budgetGuard(),
+            baselineFilePathsHolder: $baselineFilePathsHolder,
+        );
+
+        $auditTool->audit($this->projectPath);
+
+        self::assertSame(['./src/A.php', \sprintf('%s/src/A.php', $this->projectPath)], $baselineFilePathsHolder->naming('src/A.php'));
+    }
+
+    /**
+     * @param class-string<AuditAbortedByBudgetException|AuditAbortedByProviderException> $abortClass
+     *
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    #[DataProvider('abortingFailures')]
+    public function test_it_keeps_the_findings_of_a_run_that_stopped_with_the_reason_it_stopped(Throwable $throwable, string $abortClass): void
+    {
+        $vulnerability = $this->validatedFinding(VulnerabilityType::SQL_INJECTION);
+        $toolCallException = $this->failureOf($this->auditTool(pipeline: new AbortedAuditPipeline($throwable, new SingleFileAuditPipeline('aborted', $vulnerability))));
+
+        $report = $this->partialReportOf($toolCallException);
+
+        self::assertSame($throwable->getMessage(), explode(self::PARTIAL_REPORT_LEAD_IN, $toolCallException->getMessage(), 2)[0]);
+        self::assertInstanceOf($abortClass, $toolCallException->getPrevious());
+        self::assertFalse($report['complete']);
+        self::assertSame([$vulnerability->fingerprint()], array_column(\is_array($report['vulnerabilities']) ? $report['vulnerabilities'] : [], 'fingerprint'));
+    }
+
+    /**
+     * @return iterable<string, array{Throwable, class-string<AuditAbortedByBudgetException|AuditAbortedByProviderException>}>
+     */
+    public static function abortingFailures(): iterable
+    {
+        yield 'the budget cap' => [BudgetExceededException::forCost(1.5, 1.0), AuditAbortedByBudgetException::class];
+        yield 'a provider failure' => [new LLMProviderException('The provider refused the request.'), AuditAbortedByProviderException::class];
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_leaves_the_muted_finding_types_out_of_the_report_of_a_run_that_stopped(): void
+    {
+        $auditTool = $this->auditTool(
+            pipeline: new AbortedAuditPipeline(
+                BudgetExceededException::forCost(1.5, 1.0),
+                new SingleFileAuditPipeline('aborted', $this->validatedFinding(VulnerabilityType::SQL_INJECTION), $this->validatedFinding(VulnerabilityType::SSRF)),
+            ),
+            findingTypeFilter: new FindingTypeFilter([], [VulnerabilityType::SQL_INJECTION->value]),
+        );
+
+        $report = $this->partialReportOf($this->failureOf($auditTool));
+
+        self::assertSame(['ssrf'], array_column(\is_array($report['vulnerabilities']) ? $report['vulnerabilities'] : [], 'type'));
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_leaves_the_baselined_findings_out_of_the_report_of_a_run_that_stopped(): void
+    {
+        $vulnerability = $this->validatedFinding(VulnerabilityType::SQL_INJECTION);
+        $auditTool = $this->auditTool(
+            pipeline: new AbortedAuditPipeline(
+                BudgetExceededException::forCost(1.5, 1.0),
+                new SingleFileAuditPipeline('aborted', $vulnerability, $this->validatedFinding(VulnerabilityType::SSRF)),
+            ),
+            configuredBaseline: $this->baselineAccepting($vulnerability, 'The id is cast to int upstream.'),
+        );
+
+        $report = $this->partialReportOf($this->failureOf($auditTool));
+
+        self::assertSame(['ssrf'], array_column(\is_array($report['vulnerabilities']) ? $report['vulnerabilities'] : [], 'type'));
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_words_the_failure_of_a_run_that_stopped_as_its_reason_then_the_rendered_partial_report(): void
+    {
+        $reportRenderer = self::createStub(ReportRendererInterface::class);
+        $reportRenderer->method('render')->willReturn('RENDERED-PARTIAL-REPORT');
+        $budgetExceededException = BudgetExceededException::forCost(1.5, 1.0);
+        $auditTool = $this->auditTool(
+            pipeline: new AbortedAuditPipeline($budgetExceededException, new SingleFileAuditPipeline('aborted', $this->validatedFinding(VulnerabilityType::SQL_INJECTION))),
+            reportRenderer: $reportRenderer,
+        );
+
+        self::assertSame(
+            \sprintf("%s\n\nPartial report of the run that stopped early:\nRENDERED-PARTIAL-REPORT", $budgetExceededException->getMessage()),
+            $this->failureOf($auditTool)->getMessage(),
+        );
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_a_run_that_stopped_still_says_why_when_its_partial_report_cannot_be_rendered(): void
+    {
+        $reportRenderer = self::createStub(ReportRendererInterface::class);
+        $reportRenderer->method('render')->willThrowException(new RuntimeException('Cannot render.'));
+        $budgetExceededException = BudgetExceededException::forCost(1.5, 1.0);
+        $auditTool = $this->auditTool(
+            pipeline: new AbortedAuditPipeline($budgetExceededException, new SingleFileAuditPipeline('aborted', $this->validatedFinding(VulnerabilityType::SQL_INJECTION))),
+            reportRenderer: $reportRenderer,
+        );
+
+        $toolCallException = $this->failureOf($auditTool);
+
+        self::assertSame($budgetExceededException->getMessage(), $toolCallException->getMessage());
+        self::assertInstanceOf(AuditAbortedByBudgetException::class, $toolCallException->getPrevious());
+    }
+
+    private function failureOf(AuditTool $auditTool): ToolCallException
+    {
+        try {
+            $auditTool->audit($this->projectPath);
+        } catch (ToolCallException $toolCallException) {
+            return $toolCallException;
+        }
+
+        self::fail('A run that stopped must be reported as a failure.');
+    }
+
+    /**
+     * @return array<mixed>
+     */
+    private function partialReportOf(ToolCallException $toolCallException): array
+    {
+        self::assertStringContainsString(self::PARTIAL_REPORT_LEAD_IN, $toolCallException->getMessage());
+
+        $report = json_decode(explode(self::PARTIAL_REPORT_LEAD_IN, $toolCallException->getMessage(), 2)[1], true, flags: \JSON_THROW_ON_ERROR);
+        self::assertIsArray($report);
+
+        return $report;
     }
 
     private function auditTool(
@@ -309,7 +633,42 @@ final class AuditToolTest extends TestCase
             new BaselineProcessor(new Baseline(), $configuredBaseline),
             $findingTypeFilter ?? new FindingTypeFilter(),
             new ReviewerFeedbackHolder(),
+            $this->budgetGuard(),
         );
+    }
+
+    private function budgetedAuditTool(UnpricedModelBudgetGuardInterface $unpricedModelBudgetGuard, ?PipelineInterface $pipeline = null, ?LoggerInterface $logger = null): AuditTool
+    {
+        return new AuditTool(
+            new RunAuditUseCase($pipeline ?? new SingleFileAuditPipeline(), new NullLogger()),
+            new JsonReportRenderer(),
+            $this->auditedProjectPathHolder(),
+            new BaselineProcessor(new Baseline()),
+            new FindingTypeFilter(),
+            new ReviewerFeedbackHolder(),
+            $unpricedModelBudgetGuard,
+            $logger ?? new NullLogger(),
+        );
+    }
+
+    /**
+     * @return array<array-key, mixed>
+     */
+    private function decodedReport(string $report): array
+    {
+        $decoded = json_decode($report, true, flags: \JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+
+        return $decoded;
+    }
+
+    /** @param list<string> $models */
+    private function budgetGuard(?float $maxCostUsd = null, array $models = []): UnpricedModelBudgetGuard
+    {
+        $pricing = self::createStub(PricingProviderInterface::class);
+        $pricing->method('hasModel')->willReturnCallback(static fn (string $model): bool => 'priced-model' === $model);
+
+        return new UnpricedModelBudgetGuard($pricing, $models, $maxCostUsd);
     }
 
     private function auditedProjectPathHolder(): AuditedProjectPathHolder

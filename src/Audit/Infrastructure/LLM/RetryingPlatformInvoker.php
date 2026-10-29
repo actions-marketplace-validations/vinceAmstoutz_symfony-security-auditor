@@ -16,7 +16,6 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM;
 use DateTimeImmutable;
 use Psr\Log\LoggerInterface;
 use Symfony\AI\Platform\Message\MessageBag;
-use Symfony\AI\Platform\PlatformInterface;
 use Symfony\AI\Platform\Result\DeferredResult;
 use Throwable;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\BudgetTracker;
@@ -24,14 +23,17 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\Exception\Budg
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\NegativeTokenCountException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidTokenUsageException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\LLMRequestTooLargeException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\ProviderMessageRedactor;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\RateLimiterInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Delay\SleeperInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\EmptyLLMResponseException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\InvalidRetryConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\MissingAiPlatformException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\NonTransientLLMFailureException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\TransientHttpStatusException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\TransientLLMFailureException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\RateLimit\RetryAfterHeaderParser;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\RateLimit\SuggestedWaitParser;
 
 /**
  * Invokes the platform behind the rate limiter with transient-failure retry:
@@ -48,7 +50,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\RateLimit\Retr
 final readonly class RetryingPlatformInvoker
 {
     public function __construct(
-        private ?PlatformInterface $platform,
+        private PlatformBinding $platformBinding,
         private string $model,
         private LoggerInterface $logger,
         private RateLimiterInterface $rateLimiter,
@@ -59,6 +61,7 @@ final readonly class RetryingPlatformInvoker
         private ConversionFailureExplainer $conversionFailureExplainer,
         private DegradedAnswerBooker $degradedAnswerBooker,
         private ?BudgetTracker $budgetTracker,
+        private SuggestedWaitParser $suggestedWaitParser = new SuggestedWaitParser(),
     ) {}
 
     /**
@@ -76,7 +79,7 @@ final readonly class RetryingPlatformInvoker
      */
     public function invoke(MessageBag $messageBag, array $options, int $estimatedInputTokens): DeferredResult
     {
-        $platform = $this->platform ?? throw MissingAiPlatformException::create();
+        $platform = $this->platformBinding->platform();
 
         \assert('' !== $this->model, 'Model must be a non-empty string');
 
@@ -92,7 +95,7 @@ final readonly class RetryingPlatformInvoker
 
                 return $deferredResult;
             } catch (Throwable $throwable) {
-                $failure = $this->conversionFailureExplainer->explain($throwable, $deferredResult);
+                $failure = $this->explainedFailure($throwable, $deferredResult, $attempt >= $maxAttempts);
                 $this->degradedAnswerBooker->bookFailedCall($failure, $deferredResult, $estimatedInputTokens);
                 $this->rethrowWhenNonTransient($failure);
 
@@ -101,10 +104,22 @@ final readonly class RetryingPlatformInvoker
                 }
 
                 $this->budgetTracker?->assertWithinBudget();
-                $this->backOffBeforeNextAttempt($failure, $attempt, $maxAttempts);
+                $this->backOffBeforeNextAttempt($failure, $deferredResult, $attempt, $maxAttempts);
                 ++$attempt;
             }
         }
+    }
+
+    /**
+     * A status that clears on its own is retried; once the retries are spent,
+     * the failure is read as it reads without the status, as it was before
+     * the status was retried.
+     */
+    private function explainedFailure(Throwable $throwable, ?DeferredResult $deferredResult, bool $retriesSpent): Throwable
+    {
+        $failure = $this->conversionFailureExplainer->explain($throwable, $deferredResult);
+
+        return $retriesSpent && $failure instanceof TransientHttpStatusException ? $failure->statusFreeFailure : $failure;
     }
 
     /**
@@ -131,13 +146,13 @@ final readonly class RetryingPlatformInvoker
     /**
      * @throws InvalidRetryConfigurationException
      */
-    private function backOffBeforeNextAttempt(Throwable $throwable, int $attempt, int $maxAttempts): void
+    private function backOffBeforeNextAttempt(Throwable $throwable, ?DeferredResult $deferredResult, int $attempt, int $maxAttempts): void
     {
         $isRateLimit = $this->transientFailureClassifier->isRateLimit($throwable);
         $serverHintSeconds = $isRateLimit ? $this->retryAfterHeaderParser->parse($throwable) : null;
 
         $delay = $isRateLimit
-            ? $this->retryPolicy->rateLimitDelayMs($attempt, $serverHintSeconds)
+            ? $this->retryPolicy->rateLimitDelayAtLeastMs($attempt, $serverHintSeconds, $this->suggestedWaitParser->milliseconds($throwable, $deferredResult))
             : $this->retryPolicy->delayMs($attempt);
 
         if (null !== $serverHintSeconds) {
@@ -150,7 +165,7 @@ final readonly class RetryingPlatformInvoker
             'attempt' => $attempt,
             'max_attempts' => $maxAttempts,
             'delay_ms' => $delay,
-            'error' => $throwable->getMessage(),
+            'error' => ProviderMessageRedactor::redact($throwable->getMessage()),
         ]);
         $this->sleeper->sleep($delay);
     }

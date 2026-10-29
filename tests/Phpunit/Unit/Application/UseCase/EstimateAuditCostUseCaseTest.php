@@ -14,6 +14,7 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\UseCase;
 
 use Override;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -22,6 +23,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunking\Chunki
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunking\FileChunker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\CostCalculator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\EstimateAuditCostUseCase;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\SinceClosurePreview;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditContextException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditCostException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidProjectFileException;
@@ -32,7 +34,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\GitChangedFilesResolv
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\PricingProviderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ProjectFileScannerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\TokenEstimatorInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\Scan\Fixture\RecordingScopedScanner;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\UseCase\Fixture\MeasuringTokenEstimator;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\UseCase\Fixture\SinceClosureFixture;
 
 final class EstimateAuditCostUseCaseTest extends TestCase
 {
@@ -110,6 +114,75 @@ final class EstimateAuditCostUseCaseTest extends TestCase
         $auditReport = $estimateAuditCostUseCase->execute($this->tmpDir);
 
         self::assertSame(50, $auditReport->cost()->byRole()['attacker']['input_tokens']);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_an_iteration_count_too_large_to_count_holds_the_estimate_at_the_largest_token_count(): void
+    {
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [$this->makeProjectFile('a.php', 'aaa')],
+            'tokenEstimator' => $this->fixedEstimator(perRoundTokens: 10),
+            'maxIterations' => \PHP_INT_MAX,
+        ]);
+
+        $auditCost = $estimateAuditCostUseCase->execute($this->tmpDir)->cost();
+
+        self::assertSame(\PHP_INT_MAX, $auditCost->byRole()['attacker']['input_tokens']);
+        self::assertSame(\PHP_INT_MAX, $auditCost->byRole()['reviewer']['input_tokens']);
+        self::assertSame(\PHP_INT_MAX, $auditCost->inputTokens());
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    #[DataProvider('toolRoundLimitsNearTheLargestTokenCount')]
+    public function test_a_tool_round_limit_is_counted_exactly_below_the_largest_token_count_and_held_there_past_it(int $perRoundTokens, int $maxToolIterations, int $attackerInputTokens, int $reviewerInputTokens, int $inputTokens): void
+    {
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [$this->makeProjectFile('a.php', 'aaa')],
+            'tokenEstimator' => $this->fixedEstimator($perRoundTokens),
+            'maxIterations' => 1,
+            'toolsEnabled' => true,
+            'toolRoundTripRatio' => 1.0,
+            'maxToolIterations' => $maxToolIterations,
+        ]);
+
+        $auditCost = $estimateAuditCostUseCase->execute($this->tmpDir)->cost();
+
+        self::assertSame($attackerInputTokens, $auditCost->byRole()['attacker']['input_tokens']);
+        self::assertSame($reviewerInputTokens, $auditCost->byRole()['reviewer']['input_tokens']);
+        self::assertSame($inputTokens, $auditCost->inputTokens());
+    }
+
+    /**
+     * @return iterable<string, array{int, int, int, int, int}>
+     */
+    public static function toolRoundLimitsNearTheLargestTokenCount(): iterable
+    {
+        yield 'a count of two to the sixty-third' => [8, \PHP_INT_MAX, \PHP_INT_MAX, 2, \PHP_INT_MAX];
+        yield 'the largest count a float holds below it' => [1024, 72_057_594_037_927_920, 9_223_372_036_854_774_784, 205, 9_223_372_036_854_774_989];
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_a_count_too_large_for_a_float_to_hold_exactly_stays_exact(): void
+    {
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [$this->makeProjectFile('a.php', 'aaa')],
+            'tokenEstimator' => $this->fixedEstimator(perRoundTokens: 1),
+            'maxIterations' => 9_007_199_254_740_993,
+        ]);
+
+        self::assertSame(9_007_199_254_740_993, $estimateAuditCostUseCase->execute($this->tmpDir)->cost()->byRole()['attacker']['input_tokens']);
     }
 
     /**
@@ -453,6 +526,44 @@ final class EstimateAuditCostUseCaseTest extends TestCase
      * @throws InvalidAuditContextException
      * @throws InvalidAuditCostException
      */
+    public function test_a_scan_path_the_configured_scan_does_not_reach_is_estimated_from_a_scanner_that_can_take_it(): void
+    {
+        $recordingScopedScanner = new RecordingScopedScanner(
+            [$this->makeProjectFile('src/Configured.php', 'cccccccc')],
+            [$this->makeProjectFile('apps/api/src/Outside.php', 'ooo')],
+        );
+        $estimateAuditCostUseCase = $this->makeUseCase(['scanner' => $recordingScopedScanner, 'tokenEstimator' => $this->lengthEchoingEstimator(), 'maxIterations' => 1]);
+
+        $auditReport = $estimateAuditCostUseCase->execute($this->tmpDir, ['apps/api']);
+
+        self::assertSame(3, $auditReport->cost()->byRole()['attacker']['input_tokens']);
+        self::assertSame([['scan', null], ['scanWithin', ['apps/api']]], $recordingScopedScanner->calls);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_a_scan_path_the_configured_scan_reaches_is_estimated_from_every_file_under_it(): void
+    {
+        $recordingScopedScanner = new RecordingScopedScanner(
+            [$this->makeProjectFile('src/Configured.php', 'cccccccc'), $this->makeProjectFile('config/services.yaml', 'yy')],
+            [$this->makeProjectFile('src/Configured.php', 'cccccccc'), $this->makeProjectFile('src/Unconfigured.php', 'uuuuuuuuuuuu')],
+        );
+        $estimateAuditCostUseCase = $this->makeUseCase(['scanner' => $recordingScopedScanner, 'tokenEstimator' => $this->lengthEchoingEstimator(), 'maxIterations' => 1]);
+
+        $auditReport = $estimateAuditCostUseCase->execute($this->tmpDir, ['src']);
+
+        self::assertSame(20, $auditReport->cost()->byRole()['attacker']['input_tokens']);
+        self::assertSame([['scan', null], ['scanWithin', ['src']]], $recordingScopedScanner->calls);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
     public function test_diff_since_ref_narrows_the_estimate_to_changed_files(): void
     {
         $gitChangedFilesResolver = self::createStub(GitChangedFilesResolverInterface::class);
@@ -472,6 +583,56 @@ final class EstimateAuditCostUseCaseTest extends TestCase
 
         self::assertSame(2, $auditReport->cost()->byRole()['attacker']['input_tokens'], 'the estimate must reflect only the changed file, not the whole project');
         self::assertSame(1, $auditReport->filesScanned());
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_since_closure_prices_the_controllers_a_changed_voter_guards(): void
+    {
+        $gitChangedFilesResolver = self::createStub(GitChangedFilesResolverInterface::class);
+        $gitChangedFilesResolver->method('changedSince')->willReturn(['src/Security/PostVoter.php']);
+
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => SinceClosureFixture::files(),
+            'tokenEstimator' => $this->lengthEchoingEstimator(),
+            'maxIterations' => 1,
+            'gitChangedFilesResolver' => $gitChangedFilesResolver,
+            'sinceClosurePreview' => SinceClosureFixture::preview('direct'),
+        ]);
+
+        $auditReport = $estimateAuditCostUseCase->execute($this->tmpDir, [], 'main');
+
+        self::assertSame(2, $auditReport->filesScanned());
+        self::assertSame(mb_strlen(SinceClosureFixture::VOTER) + mb_strlen(SinceClosureFixture::GUARDED_CONTROLLER), $auditReport->cost()->byRole()['attacker']['input_tokens']);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     */
+    public function test_a_diff_that_leaves_no_file_still_counts_the_files_the_scan_found(): void
+    {
+        $gitChangedFilesResolver = self::createStub(GitChangedFilesResolverInterface::class);
+        $gitChangedFilesResolver->method('changedSince')->willReturn([]);
+
+        $estimateAuditCostUseCase = $this->makeUseCase([
+            'files' => [
+                $this->makeProjectFile('src/A.php', 'a'),
+                $this->makeProjectFile('src/B.php', 'b'),
+                $this->makeProjectFile('src/C.php', 'c'),
+            ],
+            'gitChangedFilesResolver' => $gitChangedFilesResolver,
+        ]);
+
+        $auditReport = $estimateAuditCostUseCase->execute($this->tmpDir, [], 'main');
+
+        self::assertSame(3, $auditReport->filesDiscovered());
+        self::assertSame(0, $auditReport->filesScanned());
+        self::assertFalse($auditReport->hasNoVerdict());
     }
 
     /**
@@ -982,6 +1143,8 @@ final class EstimateAuditCostUseCaseTest extends TestCase
      *     toolsEnabled?: bool,
      *     toolRoundTripRatio?: float,
      *     maxToolIterations?: int,
+     *     scanner?: ProjectFileScannerInterface,
+     *     sinceClosurePreview?: SinceClosurePreview,
      * } $overrides
      */
     private function makeUseCase(array $overrides = []): EstimateAuditCostUseCase
@@ -1004,7 +1167,7 @@ final class EstimateAuditCostUseCaseTest extends TestCase
         $maxToolIterations = $overrides['maxToolIterations'] ?? AttackerAgent::DEFAULT_MAX_TOOL_ITERATIONS;
 
         return new EstimateAuditCostUseCase(
-            $this->fixedScanner($files),
+            $overrides['scanner'] ?? $this->fixedScanner($files),
             $tokenEstimator,
             new CostCalculator($pricingProvider),
             $logger,
@@ -1020,6 +1183,7 @@ final class EstimateAuditCostUseCaseTest extends TestCase
             $toolsEnabled,
             $toolRoundTripRatio,
             $maxToolIterations,
+            sinceClosurePreview: $overrides['sinceClosurePreview'] ?? null,
         );
     }
 

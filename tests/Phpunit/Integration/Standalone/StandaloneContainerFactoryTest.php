@@ -21,12 +21,22 @@ use PHPUnit\Framework\TestCase;
 use Symfony\AI\Platform\Bridge\Ollama\Factory as OllamaFactory;
 use Symfony\AI\Platform\PlatformInterface;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
+use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\EventDispatcher\EventDispatcher;
 use Symfony\Component\Filesystem\Filesystem;
+use Symfony\Component\HttpClient\HttpClient;
+use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\AuditedProjectConfig;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\MissingEnvironmentVariableException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\MissingPlatformException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\NonLocalPlatformEndpointException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\UnreadableCredentialFileException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\UnreadableCredentialStoreException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\UnsupportedEnvPlaceholderException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\PricingPlatformPass;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfig;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandalonePlatformConfig;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandalonePlatformConfigResolver;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommand;
 use VinceAmstoutz\SymfonySecurityAuditor\Standalone\Exception\AmbiguousPlatformException;
 use VinceAmstoutz\SymfonySecurityAuditor\Standalone\Exception\MissingBundleExtensionException;
@@ -63,6 +73,33 @@ final class StandaloneContainerFactoryTest extends TestCase
     {
         $containerBuilder = (new StandaloneContainerFactory())->create(
             new StandaloneConfig([], new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]])),
+            $this->cacheDir,
+        );
+
+        self::assertInstanceOf(AuditCommand::class, $containerBuilder->get(AuditCommand::class));
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     * @throws MissingEnvironmentVariableException
+     * @throws MissingPlatformException
+     * @throws UnreadableCredentialFileException
+     * @throws UnreadableCredentialStoreException
+     * @throws UnsupportedEnvPlaceholderException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_offline_only_lets_a_dry_run_boot_against_an_endpoint_whose_variable_is_unset(): void
+    {
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig(
+                ['privacy' => ['offline_only' => true]],
+                (new StandalonePlatformConfigResolver())->resolve(['platform' => ['generic' => ['default' => ['base_url' => '%env(SSA_UNSET_GATEWAY_URL)%']]]], credentialsRequired: false),
+            ),
             $this->cacheDir,
         );
 
@@ -140,6 +177,213 @@ final class StandaloneContainerFactoryTest extends TestCase
      * @throws NonLocalPlatformEndpointException
      * @throws ProviderBridgeException
      */
+    #[DataProvider('cacheDirectoriesHoldingPercentSigns')]
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_takes_a_cache_directory_holding_percent_signs_literally(string $cacheDir): void
+    {
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig([], new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]])),
+            $cacheDir,
+        );
+
+        self::assertSame(
+            [$cacheDir, $cacheDir],
+            [$containerBuilder->getParameter('kernel.cache_dir'), $containerBuilder->getParameter('kernel.build_dir')],
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function cacheDirectoriesHoldingPercentSigns(): iterable
+    {
+        yield 'a pair naming no parameter' => ['/tmp/%x%/cache'];
+        yield 'a doubled percent sign' => ['/tmp/a%%b/cache'];
+        yield 'an environment placeholder' => ['/tmp/%env(HOME)%/cache'];
+    }
+
+    /**
+     * @param array<array-key, mixed> $auditConfig
+     * @param non-empty-list<string>  $path
+     *
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[DataProvider('freeTextHoldingPercentSigns')]
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_takes_free_text_holding_an_unresolvable_percent_pair_literally(array $auditConfig, string $parameter, array $path, string $expected): void
+    {
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig($auditConfig, new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]])),
+            $this->cacheDir,
+        );
+
+        $value = $containerBuilder->getParameter($parameter);
+        foreach ($path as $key) {
+            self::assertIsArray($value);
+            $value = $value[$key];
+        }
+
+        self::assertSame($expected, $value);
+    }
+
+    /**
+     * @return iterable<string, array{array<array-key, mixed>, string, non-empty-list<string>, string}>
+     */
+    public static function freeTextHoldingPercentSigns(): iterable
+    {
+        $pattern = static fn (string $regex, string $description): array => ['scan' => ['custom_risk_patterns' => ['php' => ['sprintf_sql' => ['regex' => $regex, 'description' => $description]]]]];
+
+        yield 'a risk pattern matching printf placeholders' => [$pattern('/sprintf\(.*%s.*%d/', 'sql built with sprintf'), 'symfony_security_auditor.scan.custom_risk_patterns', ['php', 'sprintf_sql', 'regex'], '/sprintf\(.*%s.*%d/'];
+        yield 'a risk pattern description' => [$pattern('/x/', 'a discount between 50%-60% is fine'), 'symfony_security_auditor.scan.custom_risk_patterns', ['php', 'sprintf_sql', 'description'], 'a discount between 50%-60% is fine'];
+        yield 'an additional scrubbing pattern' => [['scan' => ['secret_scrubbing' => ['additional_patterns' => ['/key=%secret%/']]]], 'symfony_security_auditor.scan.secret_scrubbing.additional_patterns', ['0'], '/key=%secret%/'];
+        yield 'a doubled percent sign, which the container still reads as one' => [$pattern('/100%%/', 'd'), 'symfony_security_auditor.scan.custom_risk_patterns', ['php', 'sprintf_sql', 'regex'], '/100%/'];
+        yield 'a reference to a parameter the container has' => [$pattern('/x/', 'in %kernel.project_dir%'), 'symfony_security_auditor.scan.custom_risk_patterns', ['php', 'sprintf_sql', 'description'], 'in '.getcwd()];
+        yield 'the label of a risk pattern, whose pair the container keeps doubled as it never unescapes a key' => [['scan' => ['custom_risk_patterns' => ['php' => ['rate%limit%check' => ['regex' => '/x/', 'description' => 'd']]]]], 'symfony_security_auditor.scan.custom_risk_patterns', ['php', 'rate%%limit%%check', 'regex'], '/x/'];
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_takes_a_custom_skill_name_holding_an_unresolvable_percent_pair_literally(): void
+    {
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig(
+                ['audit' => ['custom_skills' => ['my%skill%' => ['file_type' => 'controller', 'instructions' => 'i']]]],
+                new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]]),
+            ),
+            $this->cacheDir,
+        );
+
+        $configuredAttackerSkill = $containerBuilder->getDefinition('security_auditor.custom_skill.0')->getArgument(0);
+        self::assertInstanceOf(Definition::class, $configuredAttackerSkill);
+        self::assertSame('my%skill%', $containerBuilder->getParameterBag()->unescapeValue($configuredAttackerSkill->getArgument(0)));
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_still_reads_an_environment_placeholder_in_free_text(): void
+    {
+        putenv('SSA_FREE_TEXT_TEAM=platform');
+
+        try {
+            $containerBuilder = (new StandaloneContainerFactory())->create(
+                new StandaloneConfig(
+                    ['scan' => ['secret_scrubbing' => ['additional_patterns' => ['/%env(SSA_FREE_TEXT_TEAM)%-%x%/']]]],
+                    new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]]),
+                ),
+                $this->cacheDir,
+            );
+
+            self::assertSame(['/platform-%x%/'], $containerBuilder->getParameter('symfony_security_auditor.scan.secret_scrubbing.additional_patterns'));
+        } finally {
+            putenv('SSA_FREE_TEXT_TEAM');
+        }
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_takes_custom_skill_instructions_holding_an_unresolvable_percent_pair_literally(): void
+    {
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig(
+                ['audit' => ['custom_skills' => ['pricing' => ['file_type' => 'controller', 'instructions' => 'A discount between 50%-60% is fine.']]]],
+                new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]]),
+            ),
+            $this->cacheDir,
+        );
+
+        $configuredAttackerSkill = $containerBuilder->getDefinition('security_auditor.custom_skill.0')->getArgument(0);
+        self::assertInstanceOf(Definition::class, $configuredAttackerSkill);
+        self::assertSame('A discount between 50%-60% is fine.', $containerBuilder->getParameterBag()->unescapeValue($configuredAttackerSkill->getArgument(2)));
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_reads_back_the_baseline_of_an_audited_project_whose_path_holds_percent_signs_as_the_file_it_names(): void
+    {
+        $auditedProjectConfig = AuditedProjectConfig::layered('/repo-%x%/.symfony-security-auditor.yaml', ['audit' => ['baseline' => '/repo-%x%/base%line.json']], null);
+
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig(
+                $auditedProjectConfig->configForContainer(),
+                new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]]),
+                auditedProjectConfig: $auditedProjectConfig,
+            ),
+            $this->cacheDir,
+        );
+
+        self::assertSame('/repo-%x%/base%line.json', $containerBuilder->getParameter('symfony_security_auditor.audit.baseline'));
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_takes_a_working_directory_holding_percent_signs_literally(): void
+    {
+        $workingDirectory = sys_get_temp_dir().'/ssa-%x%-'.bin2hex(random_bytes(6));
+        (new Filesystem())->mkdir($workingDirectory);
+
+        try {
+            chdir($workingDirectory);
+
+            $containerBuilder = (new StandaloneContainerFactory())->create(
+                new StandaloneConfig([], new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]])),
+                $this->cacheDir,
+            );
+
+            self::assertSame(getcwd(), $containerBuilder->getParameter('kernel.project_dir'));
+        } finally {
+            chdir(sys_get_temp_dir());
+            (new Filesystem())->remove($workingDirectory);
+        }
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
     #[RunInSeparateProcess]
     #[MaximumDuration(4000)]
     public function test_it_provides_every_service_the_ollama_platform_demands_outright(): void
@@ -156,32 +400,165 @@ final class StandaloneContainerFactoryTest extends TestCase
     }
 
     /**
+     * @param array<array-key, mixed>         $auditConfig
+     * @param array<string, float|int|string> $expectedOptions
+     *
      * @throws AmbiguousPlatformException
      * @throws MissingBundleExtensionException
      * @throws UnknownPlatformProviderException
      * @throws NonLocalPlatformEndpointException
      * @throws ProviderBridgeException
      */
-    #[DataProvider('httpTimeouts')]
+    #[DataProvider('httpClientOptionCases')]
     #[RunInSeparateProcess]
     #[MaximumDuration(4000)]
-    public function test_the_platform_reaches_the_provider_through_a_client_that_waits_as_long_as_configured(?float $configured, float $expected): void
+    public function test_the_platform_reaches_the_provider_through_a_client_that_waits_as_long_as_configured(?float $configured, array $auditConfig, array $expectedOptions): void
     {
         $standalonePlatformConfig = new StandalonePlatformConfig(['ollama' => ['endpoint' => 'http://localhost:11434']], 'ollama');
-        $standaloneConfig = null === $configured ? new StandaloneConfig([], $standalonePlatformConfig) : new StandaloneConfig([], $standalonePlatformConfig, httpTimeout: $configured);
+        $standaloneConfig = null === $configured ? new StandaloneConfig($auditConfig, $standalonePlatformConfig) : new StandaloneConfig($auditConfig, $standalonePlatformConfig, httpTimeout: $configured);
 
         $containerBuilder = (new StandaloneContainerFactory())->create($standaloneConfig, $this->cacheDir);
 
-        self::assertSame([['timeout' => $expected, 'max_duration' => 0]], $containerBuilder->getDefinition('http_client')->getArguments());
+        self::assertSame([$expectedOptions], $containerBuilder->getDefinition('http_client')->getArguments());
     }
 
     /**
-     * @return iterable<string, array{?float, float}>
+     * @return iterable<string, array{?float, array<array-key, mixed>, array<string, float|int|string>}>
      */
-    public static function httpTimeouts(): iterable
+    public static function httpClientOptionCases(): iterable
     {
-        yield 'ten minutes when none is configured' => [null, 600.0];
-        yield 'what the configuration sets' => [1800.0, 1800.0];
+        yield 'ten minutes when none is configured' => [null, [], ['timeout' => 600.0, 'max_duration' => 0]];
+        yield 'what the configuration sets' => [1800.0, [], ['timeout' => 1800.0, 'max_duration' => 0]];
+        yield 'no proxy when offline only' => [null, ['privacy' => ['offline_only' => true]], ['timeout' => 600.0, 'max_duration' => 0, 'no_proxy' => '*']];
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_offline_only_keeps_the_provider_client_away_from_a_proxy_in_the_environment(): void
+    {
+        $proxy = stream_socket_server('tcp://127.0.0.1:0');
+        self::assertIsResource($proxy);
+        $proxyAddress = stream_socket_get_name($proxy, false);
+        self::assertIsString($proxyAddress);
+        $_SERVER['http_proxy'] = \sprintf('http://%s', $proxyAddress);
+        $_SERVER['no_proxy'] = '';
+        $_SERVER['NO_PROXY'] = '';
+
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig(
+                ['privacy' => ['offline_only' => true]],
+                new StandalonePlatformConfig(['ollama' => ['endpoint' => 'http://localhost:11434']], 'ollama'),
+            ),
+            $this->cacheDir,
+        );
+        $options = $containerBuilder->getDefinition('http_client')->getArguments()[0];
+        self::assertIsArray($options);
+
+        $failure = null;
+
+        try {
+            HttpClient::create($options)->request('GET', 'http://127.0.0.1:1/', ['timeout' => 0.5])->getStatusCode();
+        } catch (TransportExceptionInterface $transportException) {
+            $failure = $transportException;
+        }
+
+        $readable = [$proxy];
+        $write = null;
+        $except = null;
+
+        self::assertInstanceOf(TransportExceptionInterface::class, $failure);
+        self::assertSame(0, stream_select($readable, $write, $except, 0), 'the request reached the proxy');
+    }
+
+    /**
+     * @param array<string, mixed>            $platform
+     * @param array<string, float|int|string> $expectedOptions
+     *
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[DataProvider('offlineOnlyPlatformCases')]
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_offline_only_leaves_the_proxy_of_the_environment_to_an_endpoint_that_is_not_on_the_loopback_interface(array $platform, array $expectedOptions): void
+    {
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig(['privacy' => ['offline_only' => true]], new StandalonePlatformConfig($platform, 'ollama')),
+            $this->cacheDir,
+        );
+
+        self::assertSame([$expectedOptions], $containerBuilder->getDefinition('http_client')->getArguments());
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>, array<string, float|int|string>}>
+     */
+    public static function offlineOnlyPlatformCases(): iterable
+    {
+        $withoutBypass = ['timeout' => 600.0, 'max_duration' => 0];
+        $withBypass = ['timeout' => 600.0, 'max_duration' => 0, 'no_proxy' => '*'];
+
+        yield 'a loopback name' => [['ollama' => ['endpoint' => 'http://localhost:11434']], $withBypass];
+        yield 'a loopback ipv4 address' => [['ollama' => ['endpoint' => 'http://127.0.0.1:11434']], $withBypass];
+        yield 'a loopback ipv6 address' => [['ollama' => ['endpoint' => 'http://[::1]:11434']], $withBypass];
+        yield 'two loopback endpoints' => [['ollama' => ['endpoint' => 'http://localhost:11434'], 'generic' => ['gw' => ['base_url' => 'http://127.0.0.1:8080']]], $withBypass];
+        yield 'a private-range address' => [['ollama' => ['endpoint' => 'http://192.168.1.50:11434']], $withoutBypass];
+        yield 'a private network name' => [['ollama' => ['endpoint' => 'http://workstation.local:11434']], $withoutBypass];
+        yield 'a private-range address beside a loopback endpoint' => [['ollama' => ['endpoint' => 'http://localhost:11434'], 'generic' => ['gw' => ['base_url' => 'http://10.0.0.2:8080']]], $withoutBypass];
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_offline_only_still_reaches_a_private_range_endpoint_through_the_proxy_of_the_environment(): void
+    {
+        $proxy = stream_socket_server('tcp://127.0.0.1:0');
+        self::assertIsResource($proxy);
+        $proxyAddress = stream_socket_get_name($proxy, false);
+        self::assertIsString($proxyAddress);
+        $_SERVER['http_proxy'] = \sprintf('http://%s', $proxyAddress);
+        $_SERVER['no_proxy'] = '';
+        $_SERVER['NO_PROXY'] = '';
+
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig(
+                ['privacy' => ['offline_only' => true]],
+                new StandalonePlatformConfig(['ollama' => ['endpoint' => 'http://192.168.1.50:11434']], 'ollama'),
+            ),
+            $this->cacheDir,
+        );
+        $options = $containerBuilder->getDefinition('http_client')->getArguments()[0];
+        self::assertIsArray($options);
+
+        try {
+            HttpClient::create($options)->request('GET', 'http://192.168.1.50:11434/', ['timeout' => 0.5])->getStatusCode();
+        } catch (TransportExceptionInterface) {
+            $readable = [$proxy];
+            $write = null;
+            $except = null;
+
+            self::assertSame(1, stream_select($readable, $write, $except, 0), 'the request did not reach the proxy');
+
+            return;
+        }
+
+        self::fail('the proxy never answered, so the request cannot have succeeded');
     }
 
     /**
@@ -449,9 +826,51 @@ final class StandaloneContainerFactoryTest extends TestCase
             [
                 'audit.reviewer_max_concurrent > 1 has no effect while audit.reviewer_tools_enabled is true: tool-using reviews run sequentially. Drop reviewer_tools_enabled to review concurrently, or set reviewer_max_concurrent: 1 to silence this.',
                 'audit.attacker_max_concurrent > 1 has no effect while audit.structured_collection is false: the JSON-parsing attacker analyses chunks sequentially. Re-enable structured_collection to analyse concurrently, or set attacker_max_concurrent: 1 to silence this.',
-                'Project config /repo/.symfony-security-auditor.yaml is layered over your user config: the audited repository may tune the audit through it (paths, profile, models, a tighter budget), never the platform and its credentials, the cache, privacy, custom skills, secret scrubbing, custom risk patterns or imported SARIF.',
+                'Project config /repo/.symfony-security-auditor.yaml is layered over your user config: the audited repository may tune the audit through it (paths, profile, models, a tighter budget), never the platform and its credentials, the cache, privacy, custom skills, the report path, the scope of the file tools, secret scrubbing, custom risk patterns or imported SARIF.',
             ],
             $containerBuilder->getParameter('symfony_security_auditor.config_notices'),
+        );
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_announces_the_audited_project_config_it_layered_in_and_the_one_it_skipped(): void
+    {
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig(
+                [],
+                new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]]),
+                '/work/.symfony-security-auditor.yaml',
+                auditedProjectConfig: AuditedProjectConfig::layered('/repo/.symfony-security-auditor.yaml', [], null),
+            ),
+            $this->cacheDir,
+        );
+        $skipped = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig(
+                [],
+                new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]]),
+                auditedProjectConfig: AuditedProjectConfig::skipped('/repo/.symfony-security-auditor.yaml', 'It sets "100%".'),
+            ),
+            $this->cacheDir,
+        );
+
+        self::assertSame(
+            [
+                'Project config /work/.symfony-security-auditor.yaml is layered over your user config: the audited repository may tune the audit through it (paths, profile, models, a tighter budget), never the platform and its credentials, the cache, privacy, custom skills, the report path, the scope of the file tools, secret scrubbing, custom risk patterns or imported SARIF.',
+                'Audited project config /repo/.symfony-security-auditor.yaml is layered over the configuration read before it: the audited repository may tune the audit through it (paths, profile, models, a tighter budget), never the platform and its credentials, the cache, privacy, custom skills, the report path, the scope of the file tools, secret scrubbing, custom risk patterns or imported SARIF.',
+            ],
+            $containerBuilder->getParameter('symfony_security_auditor.config_notices'),
+        );
+        self::assertSame(
+            ['Audited project config /repo/.symfony-security-auditor.yaml was skipped and the run goes on without it: It sets "100%".'],
+            $skipped->getParameter('symfony_security_auditor.config_notices'),
         );
     }
 
@@ -495,7 +914,7 @@ final class StandaloneContainerFactoryTest extends TestCase
         );
 
         self::assertSame(
-            ['Project config /repo/%weird%/.symfony-security-auditor.yaml is layered over your user config: the audited repository may tune the audit through it (paths, profile, models, a tighter budget), never the platform and its credentials, the cache, privacy, custom skills, secret scrubbing, custom risk patterns or imported SARIF.'],
+            ['Project config /repo/%weird%/.symfony-security-auditor.yaml is layered over your user config: the audited repository may tune the audit through it (paths, profile, models, a tighter budget), never the platform and its credentials, the cache, privacy, custom skills, the report path, the scope of the file tools, secret scrubbing, custom risk patterns or imported SARIF.'],
             $containerBuilder->getParameter('symfony_security_auditor.config_notices'),
         );
     }

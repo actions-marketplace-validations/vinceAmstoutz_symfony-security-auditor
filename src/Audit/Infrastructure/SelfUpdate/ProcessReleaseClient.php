@@ -23,9 +23,11 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\Excepti
  * Fetches release metadata and assets with `curl` through Symfony `Process` —
  * the same subprocess-only convention `ComposerBridgeInstaller` uses — so the
  * binary needs no bundled HTTP client. Metadata lookups (`get()`) run behind
- * the after-command update notice, so they are bounded tightly; only binary
- * downloads (`download()`) keep a transfer window sized for a large asset on
- * a slow link.
+ * the after-command update notice, so they are bounded tightly — 20 seconds and
+ * 1 MiB, ample for release JSON and a checksum line; only downloads
+ * (`download()`) keep a transfer window of 10 minutes and a 256 MiB body cap,
+ * sized for a large binary on a slow link. Every request is pinned to HTTPS
+ * with TLS 1.2 or newer, redirects included, so a redirect cannot leave HTTPS.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -39,7 +41,13 @@ final readonly class ProcessReleaseClient implements ReleaseClientInterface
 
     private const string DOWNLOAD_MAX_TRANSFER_SECONDS = '600';
 
+    private const string METADATA_MAX_FILESIZE_BYTES = '1048576';
+
+    private const string DOWNLOAD_MAX_FILESIZE_BYTES = '268435456';
+
     private const float PROCESS_TIMEOUT_SECONDS = 660.0;
+
+    private const int PROGRESS_INTERVAL_MICROSECONDS = 200_000;
 
     /**
      * @param Closure(list<string>): Process $processBuilder the curl command builder (use self::defaultProcessBuilder() in production); tests inject a stub
@@ -60,6 +68,9 @@ final readonly class ProcessReleaseClient implements ReleaseClientInterface
                 $command = [
                     'curl',
                     '-fsSL',
+                    '--proto',
+                    '=https',
+                    '--tlsv1.2',
                     '--connect-timeout',
                     self::CONNECT_TIMEOUT_SECONDS,
                     '-H',
@@ -79,37 +90,67 @@ final readonly class ProcessReleaseClient implements ReleaseClientInterface
     #[Override]
     public function get(string $url): string
     {
-        return $this->run(['--max-time', self::METADATA_MAX_TRANSFER_SECONDS, $url], $url)->getOutput();
+        return $this->run(['--max-time', self::METADATA_MAX_TRANSFER_SECONDS, '--max-filesize', self::METADATA_MAX_FILESIZE_BYTES, $url], $url)->getOutput();
     }
 
     /**
      * @throws SelfUpdateFailedException
      */
     #[Override]
-    public function download(string $url, string $destination): void
+    public function download(string $url, string $destination, ?Closure $onProgress = null): void
     {
-        $this->run(['--max-time', self::DOWNLOAD_MAX_TRANSFER_SECONDS, '--output', $destination, $url], $url);
+        $this->run(
+            ['--max-time', self::DOWNLOAD_MAX_TRANSFER_SECONDS, '--output', $destination, '--max-filesize', self::DOWNLOAD_MAX_FILESIZE_BYTES, $url],
+            $url,
+            $onProgress instanceof Closure ? static fn () => $onProgress(self::receivedBytes($destination)) : null,
+        );
     }
 
     /**
-     * @param list<string> $arguments
+     * @param list<string>           $arguments
+     * @param (Closure(): void)|null $whileRunning
      *
      * @throws SelfUpdateFailedException
      */
-    private function run(array $arguments, string $url): Process
+    private function run(array $arguments, string $url, ?Closure $whileRunning = null): Process
     {
         $process = ($this->processBuilder)($arguments);
 
         try {
-            $process->run();
+            $process->start();
+            while ($process->isRunning()) {
+                $process->checkTimeout();
+                $this->report($whileRunning);
+                usleep(self::PROGRESS_INTERVAL_MICROSECONDS);
+            }
         } catch (ExceptionInterface $exception) {
             throw SelfUpdateFailedException::forFailedDownload($url, $exception);
         }
 
+        $this->report($whileRunning);
+
         if (!$process->isSuccessful()) {
-            throw SelfUpdateFailedException::forFailedDownload($url);
+            throw SelfUpdateFailedException::forFailedDownload($url, reason: trim($process->getErrorOutput()));
         }
 
         return $process;
+    }
+
+    private static function receivedBytes(string $destination): int
+    {
+        $handle = is_file($destination) ? fopen($destination, 'r') : false;
+        $stat = false === $handle ? false : fstat($handle);
+
+        return false === $stat ? 0 : $stat['size'];
+    }
+
+    /**
+     * @param (Closure(): void)|null $whileRunning
+     */
+    private function report(?Closure $whileRunning): void
+    {
+        if ($whileRunning instanceof Closure) {
+            $whileRunning();
+        }
     }
 }

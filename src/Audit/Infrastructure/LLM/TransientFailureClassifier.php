@@ -19,6 +19,7 @@ use Symfony\AI\Platform\Exception\MalformedToolCallException;
 use Symfony\AI\Platform\Exception\MaxOutputTokensException;
 use Symfony\AI\Platform\Exception\ServerException;
 use Throwable;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\TransientHttpStatusException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\UnconvertedAnswerException;
 
 use function Symfony\Component\String\u;
@@ -85,7 +86,22 @@ final readonly class TransientFailureClassifier
     ];
 
     /** @var list<string> */
+    private const array QUOTA_EXHAUSTED_HINTS = [
+        'insufficient_quota',
+        'exceeded your current quota',
+    ];
+
+    /** @var list<string> */
+    private const array SUGGESTED_WAIT_HINTS = [
+        'retry in',
+        'retry after',
+        'try again in',
+    ];
+
+    /** @var list<string> */
     private const array RATE_LIMIT_STATUS_CODES = ['429'];
+
+    private const int RATE_LIMIT_STATUS = 429;
 
     /** @var list<string> */
     private const array REQUEST_TOO_LARGE_STATUS_CODES = ['413'];
@@ -132,15 +148,37 @@ final readonly class TransientFailureClassifier
         'does not contain any content',
         'response does not contain',
         'no content blocks',
+        'no completions found',
     ];
 
     /**
      * A tool call whose arguments are not valid JSON is a sampling glitch, not
-     * a rejected request: asking again usually gets a well-formed call.
+     * a rejected request: asking again usually gets a well-formed call. A 429
+     * that says the billing quota is used up is the opposite: it repeats until
+     * funds are added, however long the run waits.
      */
     public function isTransient(Throwable $throwable): bool
     {
-        if ($throwable instanceof ServerException || $this->hasInChain($throwable, MalformedToolCallException::class)) {
+        return !$this->isQuotaExhausted($throwable) && $this->readsAsTransient($throwable);
+    }
+
+    /**
+     * OpenAI answers an exhausted billing quota with a 429 (`insufficient_quota`,
+     * `You exceeded your current quota, please check your plan and billing
+     * details.`), which reads as a rate limit. Gemini words a per-minute rate
+     * limit the same way but adds the wait (`Please retry in 41.8s.`), and
+     * that one clears, so a message that suggests a wait is a rate limit.
+     */
+    private function isQuotaExhausted(Throwable $throwable): bool
+    {
+        $joined = u($this->joinMessages($throwable));
+
+        return $joined->containsAny(self::QUOTA_EXHAUSTED_HINTS) && !$joined->containsAny(self::SUGGESTED_WAIT_HINTS);
+    }
+
+    private function readsAsTransient(Throwable $throwable): bool
+    {
+        if ($throwable instanceof ServerException || $this->hasInChain($throwable, MalformedToolCallException::class) || $this->hasInChain($throwable, TransientHttpStatusException::class)) {
             return true;
         }
 
@@ -173,16 +211,29 @@ final readonly class TransientFailureClassifier
      * show it in its raw answer (`UnconvertedAnswerException`). That raw
      * answer has the last word: a request it shows refused as too large was
      * never answered, whatever the bridge made of the body that came with the
-     * refusal (`Response does not contain choices.`). Null for any other
-     * failure.
+     * refusal (`Response does not contain choices.`), and so is one failed
+     * with a status that clears on its own (`TransientHttpStatusException`).
+     * A request refused with any other client error is read by the bridge's
+     * message alone, as the same failure without a status: an empty answer
+     * there, a failure that aborts the run where the bridge named one. Null
+     * for any other failure.
      */
     public function degradedStopReason(Throwable $throwable): ?string
     {
+        if ($this->hasInChain($throwable, TransientHttpStatusException::class)) {
+            return null;
+        }
+
         $unconvertedAnswerException = $this->firstInChain($throwable, UnconvertedAnswerException::class);
-        if ($unconvertedAnswerException instanceof UnconvertedAnswerException) {
+        if ($unconvertedAnswerException instanceof UnconvertedAnswerException && !$unconvertedAnswerException->refusedWithClientError) {
             return $unconvertedAnswerException->stopReason;
         }
 
+        return $this->degradedStopReasonTheBridgeNamed($throwable);
+    }
+
+    private function degradedStopReasonTheBridgeNamed(Throwable $throwable): ?string
+    {
         $joined = $this->joinMessages($throwable);
 
         if ($this->hasInChain($throwable, MaxOutputTokensException::class) || u($joined)->containsAny(self::OUTPUT_LIMIT_HINTS)) {
@@ -201,10 +252,15 @@ final readonly class TransientFailureClassifier
      * in and answered it, with nothing usable (the degraded stop reason) or
      * with a tool call whose arguments are not valid JSON
      * (`malformed_tool_call`). Null for a failure it never answered, which
-     * spent nothing the budget or the rate window has to hold.
+     * spent nothing the budget or the rate window has to hold, and neither
+     * does a request it refused with a client error: nothing was served.
      */
     public function billedStopReason(Throwable $throwable): ?string
     {
+        if (true === $this->firstInChain($throwable, UnconvertedAnswerException::class)?->refusedWithClientError) {
+            return null;
+        }
+
         return $this->degradedStopReason($throwable)
             ?? ($this->hasInChain($throwable, MalformedToolCallException::class) ? self::MALFORMED_TOOL_CALL_STOP_REASON : null);
     }
@@ -257,7 +313,7 @@ final readonly class TransientFailureClassifier
     {
         $joined = $this->joinMessages($throwable);
 
-        if (u($joined)->containsAny(self::RATE_LIMIT_HINTS)) {
+        if (u($joined)->containsAny(self::RATE_LIMIT_HINTS) || self::RATE_LIMIT_STATUS === $this->firstInChain($throwable, TransientHttpStatusException::class)?->status) {
             return true;
         }
 
@@ -305,12 +361,19 @@ final readonly class TransientFailureClassifier
         return null;
     }
 
+    /**
+     * An `UnconvertedAnswerException` only restates the message of the bridge
+     * failure it wraps, so the classification reads that one.
+     */
     private function joinMessages(Throwable $throwable): string
     {
         $messages = [];
         $current = $throwable;
         while ($current instanceof Throwable) {
-            $messages[] = u($current->getMessage())->lower()->toString();
+            if (!$current instanceof UnconvertedAnswerException) {
+                $messages[] = u($current->getMessage())->lower()->toString();
+            }
+
             $current = $current->getPrevious();
         }
 

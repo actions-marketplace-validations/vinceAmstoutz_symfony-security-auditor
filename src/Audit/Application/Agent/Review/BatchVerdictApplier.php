@@ -23,8 +23,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\TriageMemoryRecorderI
 
 /**
  * Turns a batch review outcome into the reviewed findings plus their reviewer
- * coverage entries: matches verdicts to findings by id (an unmatched finding
- * is rejected), and degrades a whole failed batch to rejected/errored.
+ * coverage entries: matches verdicts to findings by id (a finding with no
+ * verdict is recorded as errored, never as rejected), and degrades a whole
+ * failed batch to errored.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -41,7 +42,8 @@ final readonly class BatchVerdictApplier
     /**
      * A finding whose id appears in `$codeContexts` has its matched verdict
      * persisted to the reviewer cache, so a subsequent batched run reuses it
-     * instead of calling the LLM again. Bypassed runs pass no contexts.
+     * instead of calling the LLM again. Bypassed runs pass no contexts. A
+     * rejection given at the tool-call limit is left out of triage memory.
      *
      * @param list<Vulnerability>      $batch
      * @param array<int|string, mixed> $rawData
@@ -49,7 +51,7 @@ final readonly class BatchVerdictApplier
      *
      * @return list<Vulnerability>
      */
-    public function applyBatchReview(array $batch, array $rawData, CoverageRecorderInterface $coverageRecorder, array $codeContexts = []): array
+    public function applyBatchReview(array $batch, array $rawData, CoverageRecorderInterface $coverageRecorder, array $codeContexts = [], bool $atToolCap = false): array
     {
         $reviewsById = $this->indexReviewsById($rawData);
 
@@ -60,6 +62,7 @@ final readonly class BatchVerdictApplier
                 $reviewsById[$vulnerability->id()] ?? null,
                 $coverageRecorder,
                 $codeContexts,
+                $atToolCap,
             );
         }
 
@@ -70,8 +73,8 @@ final readonly class BatchVerdictApplier
      * The set of finding ids a review conversation actually produced a
      * verdict for. Lets a caller recovering from a mid-conversation abort
      * distinguish a batch member the model genuinely reviewed from one it
-     * never reached, instead of {@see self::applyBatchReview()} treating
-     * every id absent from `$rawData` as an implicit rejection.
+     * never reached, instead of {@see self::applyBatchReview()} warning about
+     * every id absent from `$rawData` as a verdict the model left out.
      *
      * @param array<int|string, mixed> $rawData
      *
@@ -137,18 +140,10 @@ final readonly class BatchVerdictApplier
      * @param array<string, mixed>|null $review
      * @param array<string, string>     $codeContexts
      */
-    private function reviewVulnerability(Vulnerability $vulnerability, ?array $review, CoverageRecorderInterface $coverageRecorder, array $codeContexts): Vulnerability
+    private function reviewVulnerability(Vulnerability $vulnerability, ?array $review, CoverageRecorderInterface $coverageRecorder, array $codeContexts, bool $atToolCap): Vulnerability
     {
-        if (null === $review) {
-            if (\array_key_exists($vulnerability->id(), $codeContexts)) {
-                $this->reviewerVerdictCache->store($vulnerability, $codeContexts[$vulnerability->id()], ['accepted' => false]);
-            }
-
-            ReviewerCoverageRecorder::record($vulnerability, 'rejected', $coverageRecorder, $this->progressReporter);
-            $rejected = $vulnerability->withReviewerValidation(false);
-            $coverageRecorder->recordReviewedFinding($rejected);
-
-            return $rejected;
+        if (null === $review || !$this->verdictApplier->hasVerdict($review)) {
+            return $this->recordUnjudged($vulnerability, $coverageRecorder);
         }
 
         if (\array_key_exists($vulnerability->id(), $codeContexts)) {
@@ -164,27 +159,46 @@ final readonly class BatchVerdictApplier
         );
         $coverageRecorder->recordReviewedFinding($applied);
 
-        RejectionTriageRecorder::record($this->verdictApplier, $this->triageMemoryRecorder, $applied, $review);
+        if (!$atToolCap) {
+            RejectionTriageRecorder::record($this->verdictApplier, $this->triageMemoryRecorder, $applied, $review);
+        }
 
         return $applied;
     }
 
+    private function recordUnjudged(Vulnerability $vulnerability, CoverageRecorderInterface $coverageRecorder): Vulnerability
+    {
+        $this->logger->warning('Reviewer batch answer held no verdict for the finding; it is recorded as errored and left out of the cache', [
+            'vulnerability_id' => $vulnerability->id(),
+        ]);
+
+        return $this->recordErrored($vulnerability, $coverageRecorder);
+    }
+
+    private function recordErrored(Vulnerability $vulnerability, CoverageRecorderInterface $coverageRecorder): Vulnerability
+    {
+        $errored = $vulnerability->withReviewerValidation(false);
+        ReviewerCoverageRecorder::record($vulnerability, 'errored', $coverageRecorder, $this->progressReporter);
+        $coverageRecorder->recordReviewedFinding($errored);
+
+        return $errored;
+    }
+
     /**
+     * A batch answer that ended normally yet holds nothing reviewed no
+     * finding: the whole batch is recorded as errored, never as rejected.
+     *
      * @param list<Vulnerability> $batch
      *
      * @return list<Vulnerability>
      */
-    public function rejectBatch(array $batch, CoverageRecorderInterface $coverageRecorder): array
+    public function recordEmptyAnswer(array $batch, CoverageRecorderInterface $coverageRecorder): array
     {
-        $rejected = [];
-        foreach ($batch as $vulnerability) {
-            $withVerdict = $vulnerability->withReviewerValidation(false);
-            $rejected[] = $withVerdict;
-            ReviewerCoverageRecorder::record($vulnerability, 'rejected', $coverageRecorder, $this->progressReporter);
-            $coverageRecorder->recordReviewedFinding($withVerdict);
-        }
+        $this->logger->warning('Reviewer batch answer was empty; its findings are recorded as errored and left out of the cache', [
+            'batch_size' => \count($batch),
+        ]);
 
-        return $rejected;
+        return $this->markBatchErrored($batch, $coverageRecorder);
     }
 
     /**
@@ -196,10 +210,7 @@ final readonly class BatchVerdictApplier
     {
         $errored = [];
         foreach ($batch as $vulnerability) {
-            $withVerdict = $vulnerability->withReviewerValidation(false);
-            $errored[] = $withVerdict;
-            ReviewerCoverageRecorder::record($vulnerability, 'errored', $coverageRecorder, $this->progressReporter);
-            $coverageRecorder->recordReviewedFinding($withVerdict);
+            $errored[] = $this->recordErrored($vulnerability, $coverageRecorder);
         }
 
         return $errored;

@@ -36,6 +36,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\Skill\Attac
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ConsoleReportRenderer;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\JsonReportRenderer;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommand;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommandDefaults;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditExitCodeResolver;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditPresenter;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Baseline;
@@ -58,6 +59,8 @@ final class AuditCommandIncompleteRunTest extends TestCase
     private const string HINT = 'Pass --fail-on-incomplete to fail the run when this happens.';
 
     private const string FAILING = 'The run fails because --fail-on-incomplete is set.';
+
+    private const string FAILING_BY_CONFIGURATION = 'The run fails because audit.fail_on_incomplete is set.';
 
     private string $fixtureDir;
 
@@ -90,6 +93,53 @@ final class AuditCommandIncompleteRunTest extends TestCase
 
         self::assertSame(3, $commandTester->execute(['project-path' => $this->fixtureDir, '--fail-on-incomplete' => true]));
         self::assertStringContainsString(self::FAILING, $this->flattened($commandTester->getDisplay()));
+    }
+
+    public function test_an_incomplete_run_failed_by_the_configuration_names_its_key(): void
+    {
+        $commandTester = $this->commandTester(auditCommandDefaults: new AuditCommandDefaults(failOnIncomplete: true));
+
+        self::assertSame(3, $commandTester->execute(['project-path' => $this->fixtureDir]));
+        $display = $this->flattened($commandTester->getDisplay());
+        self::assertStringContainsString(self::FAILING_BY_CONFIGURATION, $display);
+        self::assertStringNotContainsString(self::FAILING, $display);
+    }
+
+    public function test_the_flag_that_fails_an_incomplete_run_is_named_over_the_configuration(): void
+    {
+        $commandTester = $this->commandTester(auditCommandDefaults: new AuditCommandDefaults(failOnIncomplete: true));
+
+        self::assertSame(3, $commandTester->execute(['project-path' => $this->fixtureDir, '--fail-on-incomplete' => true]));
+        $display = $this->flattened($commandTester->getDisplay());
+        self::assertStringContainsString(self::FAILING, $display);
+        self::assertStringNotContainsString(self::FAILING_BY_CONFIGURATION, $display);
+    }
+
+    public function test_a_report_on_stdout_failed_by_the_configuration_names_its_key_on_stderr(): void
+    {
+        $commandTester = $this->commandTester(auditCommandDefaults: new AuditCommandDefaults(failOnIncomplete: true));
+
+        $exitCode = $commandTester->execute(['project-path' => $this->fixtureDir, '--format' => 'json'], ['capture_stderr_separately' => true]);
+
+        self::assertSame(3, $exitCode);
+        self::assertStringContainsString(self::FAILING_BY_CONFIGURATION, $this->flattened($commandTester->getErrorOutput()));
+    }
+
+    public function test_a_baseline_generated_from_an_incomplete_run_failed_by_the_configuration_names_its_key(): void
+    {
+        $commandTester = $this->commandTester(auditCommandDefaults: new AuditCommandDefaults(failOnIncomplete: true));
+        $baselineFile = $this->fixtureDir.'/baseline.json';
+
+        self::assertSame(3, $commandTester->execute(['project-path' => $this->fixtureDir, '--generate-baseline' => $baselineFile]));
+        self::assertStringContainsString(self::FAILING_BY_CONFIGURATION, $this->flattened($commandTester->getDisplay()));
+    }
+
+    public function test_the_negated_flag_lets_an_incomplete_run_the_configuration_would_fail_pass(): void
+    {
+        $commandTester = $this->commandTester(auditCommandDefaults: new AuditCommandDefaults(failOnIncomplete: true));
+
+        self::assertSame(Command::SUCCESS, $commandTester->execute(['project-path' => $this->fixtureDir, '--no-fail-on-incomplete' => true]));
+        self::assertStringContainsString(self::HINT, $this->flattened($commandTester->getDisplay()));
     }
 
     public function test_a_report_on_stdout_keeps_it_clean_and_warns_on_stderr(): void
@@ -181,12 +231,36 @@ final class AuditCommandIncompleteRunTest extends TestCase
         self::assertStringContainsString('The scan found no file to audit, so the run has no verdict.', $this->flattened($commandTester->getDisplay()));
     }
 
+    public function test_a_run_whose_scan_found_no_file_fails_and_never_calls_itself_complete(): void
+    {
+        $commandTester = $this->commandTester(self::createStub(PipelineInterface::class));
+
+        $exitCode = $commandTester->execute(['project-path' => $this->fixtureDir]);
+
+        self::assertSame(Command::FAILURE, $exitCode);
+        $display = $this->flattened($commandTester->getDisplay());
+        self::assertStringContainsString('RISK LEVEL: UNKNOWN (no file was analyzed)', $display);
+        self::assertStringContainsString('[ERROR] The scan found no file to audit, so the run has no verdict. A run with no verdict cannot pass, so it fails.', $display);
+        self::assertStringNotContainsString('Audit complete', $display);
+        self::assertStringNotContainsString('SAFE', $display);
+    }
+
+    public function test_a_report_on_stdout_from_a_scan_that_found_no_file_fails_and_says_why_on_stderr(): void
+    {
+        $commandTester = $this->commandTester(self::createStub(PipelineInterface::class));
+
+        $exitCode = $commandTester->execute(['project-path' => $this->fixtureDir, '--format' => 'json'], ['capture_stderr_separately' => true]);
+
+        self::assertSame(Command::FAILURE, $exitCode);
+        self::assertStringContainsString('[ERROR] The scan found no file to audit, so the run has no verdict. A run with no verdict cannot pass, so it fails.', $this->flattened($commandTester->getErrorOutput()));
+    }
+
     private function flattened(string $output): string
     {
         return (string) preg_replace('/\s+/', ' ', $output);
     }
 
-    private function commandTester(PipelineInterface $pipeline = new PartlyFailedPipeline()): CommandTester
+    private function commandTester(PipelineInterface $pipeline = new PartlyFailedPipeline(), AuditCommandDefaults $auditCommandDefaults = new AuditCommandDefaults()): CommandTester
     {
         $modelsDevPricingProvider = new ModelsDevPricingProvider(new NullLogger(), __DIR__.'/../UseCase/Fixture/pricing-catalog.json');
         $projectFileScanner = new ProjectFileScanner(new NullLogger());
@@ -205,6 +279,7 @@ final class AuditCommandIncompleteRunTest extends TestCase
             new ReviewerFeedbackHolder(),
             secretScrubbingEnabled: true,
             findingTypeFilter: new FindingTypeFilter([], []),
+            auditCommandDefaults: $auditCommandDefaults,
         ));
     }
 }

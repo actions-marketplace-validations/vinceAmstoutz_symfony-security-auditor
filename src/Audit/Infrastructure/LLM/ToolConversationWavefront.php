@@ -14,20 +14,20 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM;
 
 use Psr\Log\LoggerInterface;
-use Symfony\AI\Platform\Message\AssistantMessage;
 use Symfony\AI\Platform\Message\Content\Text;
 use Symfony\AI\Platform\Message\Message;
 use Symfony\AI\Platform\Message\MessageBag;
 use Symfony\AI\Platform\Message\ToolCallMessage;
 use Symfony\AI\Platform\PlatformInterface;
 use Symfony\AI\Platform\Result\DeferredResult;
-use Symfony\AI\Platform\Result\ToolCall;
+use Symfony\AI\Platform\Result\ResultInterface;
 use Throwable;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\BudgetTracker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\Exception\BudgetExceededException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\NegativeTokenCountException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidTokenUsageException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\LLMRequestTooLargeException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\ProviderMessageRedactor;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\TokenUsageSnapshot;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMClientInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMResponse;
@@ -44,7 +44,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\Tran
  * conversation WITHOUT blocking, then resolves them, executes the requested
  * tools against that conversation's own registry, and queues the follow-up
  * round. On an async transport (the symfony/ai DeferredResult contract) the
- * per-round invocations overlap on the wire. Any dispatch or resolution
+ * per-round invocations overlap on the wire. A conversation whose last round
+ * still asks to read gets one closing request ({@see FinalRound}), and one
+ * that reads again ends at the iteration cap. Any dispatch or resolution
  * failure first retries the same conversation through
  * `RetryingPlatformInvoker` — the same classify-then-retry-or-fail seam the
  * sequential path uses — once the budget allows another call. When every
@@ -74,7 +76,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\Tran
 final readonly class ToolConversationWavefront
 {
     public function __construct(
-        private ?PlatformInterface $platform,
+        private PlatformBinding $platformBinding,
         private string $model,
         private LoggerInterface $logger,
         private RateLimiterInterface $rateLimiter,
@@ -88,6 +90,7 @@ final readonly class ToolConversationWavefront
         private InFlightRequestCanceller $inFlightRequestCanceller,
         private DegradedAnswerBooker $degradedAnswerBooker,
         private ConversionFailureExplainer $conversionFailureExplainer,
+        private ToolIterationBooker $toolIterationBooker,
     ) {}
 
     /**
@@ -104,11 +107,12 @@ final readonly class ToolConversationWavefront
      */
     public function resolveToolWindow(array $window, int $maxToolIterations): array
     {
-        $platform = $this->platform ?? throw MissingAiPlatformException::create();
+        $platform = $this->platformBinding->platform();
 
         $states = $this->initializeConversationStates($window);
 
-        for ($round = 0; $round < $maxToolIterations && !ConversationState::allAnswered($states); ++$round) {
+        for ($round = 0; $round <= $maxToolIterations && !ConversationState::allAnswered($states); ++$round) {
+            $states = ConversationState::enterRound($states, $round, $maxToolIterations);
             $states = $this->runWavefrontRound($platform, $states, $window, $maxToolIterations);
         }
 
@@ -126,15 +130,9 @@ final readonly class ToolConversationWavefront
         foreach ($window as $index => $toolLLMRequest) {
             $options = $this->platformOptionsFactory->baseOptions();
             $options['tools'] = PlatformToolsMapper::map($toolLLMRequest->tools->definitions());
-            $states[$index] = new ConversationState(
+            $states[$index] = ConversationState::start(
                 new MessageBag(Message::forSystem($toolLLMRequest->system), Message::ofUser($toolLLMRequest->user)),
                 $options,
-                0,
-                0,
-                0,
-                0,
-                false,
-                null,
                 $this->promptTokenEstimator->estimate($toolLLMRequest->system, $toolLLMRequest->user),
             );
         }
@@ -285,9 +283,7 @@ final readonly class ToolConversationWavefront
     {
         $responses = [];
         foreach ($states as $state) {
-            $responses[] = $state->response instanceof LLMResponse
-                ? $state->response
-                : $this->toolIterationCapResponse($state, $maxToolIterations);
+            $responses[] = $state->response ?? $this->toolIterationCapResponse($state, $maxToolIterations);
         }
 
         return $responses;
@@ -348,7 +344,7 @@ final readonly class ToolConversationWavefront
     {
         try {
             $platformResult = $deferredResult->getResult();
-            [$callInput, $callOutput, $callCacheRead, $callCacheCreation] = $this->platformResultExtractor->extractTokens($deferredResult);
+            $callTokens = $this->platformResultExtractor->extractTokens($deferredResult, $conversationState->estimatedInputTokens);
         } catch (Throwable $throwable) {
             $failure = $this->conversionFailureExplainer->explain($throwable, $deferredResult);
             $this->degradedAnswerBooker->bookFailedCall($failure, $deferredResult, $conversationState->estimatedInputTokens);
@@ -356,30 +352,19 @@ final readonly class ToolConversationWavefront
             throw $failure;
         }
 
-        $conversationState = $conversationState->withRecordedTokens($callInput, $callOutput, $callCacheRead, $callCacheCreation);
-        $this->rateLimiter->record($callInput, $callOutput);
-        if ($this->budgetTracker instanceof BudgetTracker) {
-            $this->budgetTracker->recordCall(LLMResponse::of(
-                '',
-                $this->model,
-                'tool_iteration',
-                TokenUsageSnapshot::of($callInput, $callOutput, $callCacheRead, $callCacheCreation),
-            )->withReportedModel($this->platformResultExtractor->extractReportedModel($deferredResult)));
-            $this->budgetTracker->assertWithinBudget();
+        $conversationState = $conversationState->withRecordedTokens(...$callTokens);
+        $this->toolIterationBooker->book($deferredResult, TokenUsageSnapshot::of(...$callTokens));
+
+        if ([] !== $this->platformResultExtractor->extractToolCalls($platformResult)) {
+            return $this->runToolCalls($conversationState, $platformResult, $toolLLMRequest);
         }
 
-        $toolCalls = $this->platformResultExtractor->extractToolCalls($platformResult);
-
-        if ([] !== $toolCalls) {
-            return $this->runToolCalls($conversationState, $toolCalls, $toolLLMRequest);
-        }
-
-        return $conversationState->withResponse(LLMResponse::of(
+        return $conversationState->withResponse(FinalRound::settled(LLMResponse::of(
             $this->platformResultExtractor->extractText($platformResult),
             $this->model,
             $this->platformResultExtractor->extractStopReason($deferredResult) ?? 'end_turn',
-            TokenUsageSnapshot::of($conversationState->input, $conversationState->output, $conversationState->cacheRead, $conversationState->cacheCreation),
-        ));
+            $conversationState->tokenUsage(),
+        ), $conversationState->roundsLeft, $conversationState->askedToRead));
     }
 
     /**
@@ -445,20 +430,25 @@ final readonly class ToolConversationWavefront
     }
 
     /**
-     * @param list<ToolCall> $toolCalls
+     * @throws InvalidTokenUsageException
      */
-    private function runToolCalls(ConversationState $conversationState, array $toolCalls, ToolLLMRequest $toolLLMRequest): ConversationState
+    private function runToolCalls(ConversationState $conversationState, ResultInterface $platformResult, ToolLLMRequest $toolLLMRequest): ConversationState
     {
-        $conversationState->bag->add(new AssistantMessage(...$toolCalls));
+        $toolCalls = $this->platformResultExtractor->extractToolCalls($platformResult);
+        $conversationState->bag->add($this->platformResultExtractor->extractAssistantMessage($platformResult));
 
         $toolResults = [];
-        foreach ($toolCalls as $toolCall) {
-            $result = $toolLLMRequest->tools->execute($toolCall->getName(), $toolCall->getArguments());
-            $conversationState->bag->add(new ToolCallMessage($toolCall, new Text($result)));
+        foreach ($toolCalls as $position => $toolCall) {
+            $result = FinalRound::resultOf($toolLLMRequest->tools, $toolCall, $conversationState->roundsLeft);
+            $conversationState->bag->add(new ToolCallMessage($toolCall, new Text(FinalRound::carried($result, $conversationState->roundsLeft, $position === array_key_last($toolCalls)))));
             $toolResults[] = $result;
         }
 
-        return $conversationState->withExecutedTools($this->promptTokenEstimator->estimate(...$toolResults));
+        $conversationState = $conversationState->withExecutedTools($this->promptTokenEstimator->estimate(...$toolResults), FinalRound::asksToRead($toolLLMRequest->tools, $toolCalls));
+
+        return FinalRound::isConcludedBy($conversationState->roundsLeft, $toolLLMRequest->tools, $toolCalls, $toolResults)
+            ? $conversationState->withResponse(FinalRound::answer($this->model, TokenUsageSnapshot::of($conversationState->input, $conversationState->output, $conversationState->cacheRead, $conversationState->cacheCreation), $conversationState->askedToRead))
+            : $conversationState;
     }
 
     /**
@@ -475,13 +465,30 @@ final readonly class ToolConversationWavefront
     private function abortConversation(ConversationState $conversationState, ToolLLMRequest $toolLLMRequest, int $maxToolIterations, ?Throwable $throwable = null): ConversationState
     {
         if (!$conversationState->toolsRan) {
-            try {
-                return $conversationState->withResponse($this->llmClient->completeWithTools($toolLLMRequest->system, $toolLLMRequest->user, $toolLLMRequest->tools, $maxToolIterations));
-            } catch (LLMRequestTooLargeException $llmRequestTooLargeException) {
-                return $this->endOversizedConversation($conversationState, $llmRequestTooLargeException);
-            }
+            return $this->restartConversation($conversationState, $toolLLMRequest, $maxToolIterations);
         }
 
+        return $this->keepRecordedToolResults($conversationState, $throwable);
+    }
+
+    /**
+     * @throws InvalidTokenUsageException
+     */
+    private function restartConversation(ConversationState $conversationState, ToolLLMRequest $toolLLMRequest, int $maxToolIterations): ConversationState
+    {
+        try {
+            return $conversationState->withResponse($this->llmClient->completeWithTools($toolLLMRequest->system, $toolLLMRequest->user, $toolLLMRequest->tools, $maxToolIterations));
+        } catch (LLMRequestTooLargeException $llmRequestTooLargeException) {
+            return $this->endOversizedConversation($conversationState, $llmRequestTooLargeException);
+        }
+    }
+
+    /**
+     * @throws InvalidTokenUsageException
+     * @throws NonTransientLLMFailureException
+     */
+    private function keepRecordedToolResults(ConversationState $conversationState, ?Throwable $throwable): ConversationState
+    {
         if ($throwable instanceof NonTransientLLMFailureException) {
             throw $throwable;
         }
@@ -495,7 +502,7 @@ final readonly class ToolConversationWavefront
             '',
             $this->model,
             'empty_content',
-            TokenUsageSnapshot::of($conversationState->input, $conversationState->output, $conversationState->cacheRead, $conversationState->cacheCreation),
+            $conversationState->tokenUsage(),
         ));
     }
 
@@ -514,14 +521,14 @@ final readonly class ToolConversationWavefront
             'stop_reason' => $stopReason,
             'input_tokens' => $conversationState->input,
             'output_tokens' => $conversationState->output,
-            'error' => $throwable->getMessage(),
+            'error' => ProviderMessageRedactor::redact($throwable->getMessage()),
         ]);
 
         return $conversationState->withResponse(LLMResponse::of(
             '',
             $this->model,
             $stopReason,
-            TokenUsageSnapshot::of($conversationState->input, $conversationState->output, $conversationState->cacheRead, $conversationState->cacheCreation),
+            $conversationState->tokenUsage(),
         ));
     }
 
@@ -536,23 +543,24 @@ final readonly class ToolConversationWavefront
      */
     private function endOversizedConversation(ConversationState $conversationState, Throwable $throwable): ConversationState
     {
-        $tokenUsageSnapshot = TokenUsageSnapshot::of($conversationState->input, $conversationState->output, $conversationState->cacheRead, $conversationState->cacheCreation);
+        $tokenUsageSnapshot = $conversationState->tokenUsage();
+        $refusal = ProviderMessageRedactor::redact($throwable->getMessage());
 
         if ($conversationState->toolsRan) {
             $this->logger->warning('Concurrent tool-using conversation outgrew the model input limit after tool results were appended; it ends as an empty response and keeps the tool results already recorded', [
                 'input_tokens' => $conversationState->input,
                 'output_tokens' => $conversationState->output,
-                'error' => $throwable->getMessage(),
+                'error' => $refusal,
             ]);
 
             return $conversationState->withResponse(LLMResponse::of('', $this->model, 'empty_content', $tokenUsageSnapshot));
         }
 
         $this->logger->debug('Concurrent tool-using conversation refused as too large for the model before any tool ran; its chunk is handed back to be split', [
-            'error' => $throwable->getMessage(),
+            'error' => $refusal,
         ]);
 
-        return $conversationState->withResponse(LLMResponse::of($throwable->getMessage(), $this->model, 'request_too_large', $tokenUsageSnapshot));
+        return $conversationState->withResponse(LLMResponse::of($refusal, $this->model, 'request_too_large', $tokenUsageSnapshot));
     }
 
     /**
@@ -566,11 +574,6 @@ final readonly class ToolConversationWavefront
             'output_tokens' => $conversationState->output,
         ]);
 
-        return LLMResponse::of(
-            '',
-            $this->model,
-            'max_tool_iterations',
-            TokenUsageSnapshot::of($conversationState->input, $conversationState->output, $conversationState->cacheRead, $conversationState->cacheCreation),
-        );
+        return LLMResponse::of('', $this->model, 'max_tool_iterations', $conversationState->tokenUsage());
     }
 }

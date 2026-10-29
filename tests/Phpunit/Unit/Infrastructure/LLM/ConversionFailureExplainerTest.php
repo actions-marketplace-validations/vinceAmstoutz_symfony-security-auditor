@@ -25,6 +25,7 @@ use Symfony\AI\Platform\Result\RawHttpResult;
 use Symfony\AI\Platform\Result\TextResult;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\ConversionFailureExplainer;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\TransientHttpStatusException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\UnconvertedAnswerException;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\LLM\Fixture\FailingResultConverter;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\LLM\Fixture\UnreadableResponse;
@@ -41,6 +42,7 @@ final class ConversionFailureExplainerTest extends TestCase
 
         self::assertInstanceOf(UnconvertedAnswerException::class, $throwable);
         self::assertSame('content-filter', $throwable->stopReason);
+        self::assertFalse($throwable->refusedWithClientError);
         self::assertSame(self::AZURE_FILTERED, $throwable->getMessage());
         self::assertSame($badRequestException, $throwable->getPrevious());
     }
@@ -104,18 +106,145 @@ final class ConversionFailureExplainerTest extends TestCase
 
         self::assertInstanceOf(UnconvertedAnswerException::class, $throwable);
         self::assertTrue($throwable->refusedAsTooLarge);
+        self::assertFalse($throwable->refusedWithClientError);
         self::assertSame('The provider refused the request as too large (HTTP 413): Syntax error for "https://gw.example.com/v1/chat/completions".', $throwable->getMessage());
     }
 
-    public function test_a_status_other_than_413_refuses_nothing(): void
+    #[DataProvider('clientErrorStatusesTheGatewayRefusedWithCases')]
+    public function test_a_gateway_answering_a_client_error_refuses_the_request_whatever_body_it_sent(int $status): void
     {
-        $badRequestException = new BadRequestException('Bad Request');
-        $badRequest = self::createStub(ResponseInterface::class);
-        $badRequest->method('getStatusCode')->willReturn(400);
-        $deferredResult = new DeferredResult(new FailingResultConverter($badRequestException), new RawHttpResult($badRequest));
-        $this->expectConversionToFailWith($badRequestException, $deferredResult);
+        $runtimeException = new RuntimeException('Response does not contain choices.');
+        $deferredResult = $this->failedConversionWithStatus($runtimeException, $status, ['detail' => 'Not Found']);
 
-        self::assertSame($badRequestException, (new ConversionFailureExplainer())->explain($badRequestException, $deferredResult));
+        $throwable = (new ConversionFailureExplainer())->explain($runtimeException, $deferredResult);
+
+        self::assertInstanceOf(UnconvertedAnswerException::class, $throwable);
+        self::assertNull($throwable->stopReason);
+        self::assertFalse($throwable->refusedAsTooLarge);
+        self::assertTrue($throwable->refusedWithClientError);
+        self::assertSame(\sprintf('The provider refused the request (HTTP %d): Response does not contain choices.', $status), $throwable->getMessage());
+        self::assertSame($runtimeException, $throwable->getPrevious());
+    }
+
+    /** @return iterable<string, array{int}> */
+    public static function clientErrorStatusesTheGatewayRefusedWithCases(): iterable
+    {
+        yield 'the first client error' => [400];
+        yield 'unauthorized' => [401];
+        yield 'forbidden' => [403];
+        yield 'not found' => [404];
+        yield 'unprocessable' => [422];
+        yield 'the last client error' => [499];
+    }
+
+    #[DataProvider('statusesThatRefuseNothingCases')]
+    public function test_a_status_that_is_not_a_refusal_leaves_the_failure_as_it_is(int $status): void
+    {
+        $runtimeException = new RuntimeException('Response does not contain choices.');
+        $deferredResult = $this->failedConversionWithStatus($runtimeException, $status, ['detail' => 'Not Found']);
+
+        self::assertSame($runtimeException, (new ConversionFailureExplainer())->explain($runtimeException, $deferredResult));
+    }
+
+    /** @return iterable<string, array{int}> */
+    public static function statusesThatRefuseNothingCases(): iterable
+    {
+        yield 'below the client errors' => [399];
+    }
+
+    #[DataProvider('statusesThatClearOnTheirOwnCases')]
+    public function test_a_status_that_clears_on_its_own_fails_the_request_transiently_whatever_body_it_sent(int $status): void
+    {
+        $runtimeException = new RuntimeException('Response does not contain message.');
+        $deferredResult = $this->failedConversionWithStatus($runtimeException, $status, ['error' => 'server busy, please try again.']);
+
+        $throwable = (new ConversionFailureExplainer())->explain($runtimeException, $deferredResult);
+
+        self::assertInstanceOf(TransientHttpStatusException::class, $throwable);
+        self::assertSame($status, $throwable->status);
+        self::assertSame('Response does not contain message.', $throwable->getMessage());
+        self::assertSame($runtimeException, $throwable->getPrevious());
+        self::assertSame($runtimeException, $throwable->statusFreeFailure);
+    }
+
+    public function test_a_status_that_clears_on_its_own_keeps_what_its_raw_answer_shows_for_once_the_retries_are_spent(): void
+    {
+        $badRequestException = new BadRequestException(self::AZURE_FILTERED);
+        $deferredResult = $this->failedConversionWithStatus($badRequestException, 503, $this->azureContentFilterBody());
+
+        $throwable = (new ConversionFailureExplainer())->explain($badRequestException, $deferredResult);
+
+        self::assertInstanceOf(TransientHttpStatusException::class, $throwable);
+        $statusFreeFailure = $throwable->statusFreeFailure;
+        self::assertInstanceOf(UnconvertedAnswerException::class, $statusFreeFailure);
+        self::assertSame('content-filter', $statusFreeFailure->stopReason);
+        self::assertSame($badRequestException, $statusFreeFailure->getPrevious());
+    }
+
+    /** @return iterable<string, array{int}> */
+    public static function statusesThatClearOnTheirOwnCases(): iterable
+    {
+        yield 'a request timeout' => [408];
+        yield 'a request that came too early' => [425];
+        yield 'a rate limit' => [429];
+        yield 'the first server error' => [500];
+        yield 'a service unavailable' => [503];
+        yield 'an overloaded provider' => [529];
+    }
+
+    public function test_a_status_that_clears_on_its_own_does_not_repeat_a_credential_the_failure_quoted(): void
+    {
+        $runtimeException = new RuntimeException('Syntax error for "https://gw.example.com/v1/chat?key=AIzaSECRET".');
+        $deferredResult = $this->failedConversionWithStatus($runtimeException, 502, []);
+
+        $throwable = (new ConversionFailureExplainer())->explain($runtimeException, $deferredResult);
+
+        self::assertStringNotContainsString('AIzaSECRET', $throwable->getMessage());
+    }
+
+    public function test_a_content_filter_the_raw_answer_names_wins_over_the_status_it_came_with(): void
+    {
+        $badRequestException = new BadRequestException(self::AZURE_FILTERED);
+        $deferredResult = $this->failedConversionWithStatus($badRequestException, 400, $this->azureContentFilterBody());
+
+        $throwable = (new ConversionFailureExplainer())->explain($badRequestException, $deferredResult);
+
+        self::assertInstanceOf(UnconvertedAnswerException::class, $throwable);
+        self::assertSame('content-filter', $throwable->stopReason);
+        self::assertSame(self::AZURE_FILTERED, $throwable->getMessage());
+    }
+
+    public function test_a_refusal_as_too_large_does_not_repeat_a_credential_the_failure_quoted(): void
+    {
+        $runtimeException = new RuntimeException('Syntax error for "https://gw.example.com/v1/chat?key=AIzaSECRET".');
+        $payloadTooLarge = self::createStub(ResponseInterface::class);
+        $payloadTooLarge->method('getStatusCode')->willReturn(413);
+        $deferredResult = new DeferredResult(new FailingResultConverter($runtimeException), new RawHttpResult($payloadTooLarge));
+        $this->expectConversionToFailWith($runtimeException, $deferredResult);
+
+        $throwable = (new ConversionFailureExplainer())->explain($runtimeException, $deferredResult);
+
+        self::assertSame('The provider refused the request as too large (HTTP 413): Syntax error for "https://gw.example.com/v1/chat?key=***REDACTED***".', $throwable->getMessage());
+        self::assertSame($runtimeException, $throwable->getPrevious());
+        self::assertSame('Syntax error for "https://gw.example.com/v1/chat?key=AIzaSECRET".', $runtimeException->getMessage());
+    }
+
+    public function test_a_refusal_with_a_client_error_does_not_repeat_a_credential_the_failure_quoted(): void
+    {
+        $runtimeException = new RuntimeException('Response does not contain choices for "https://gw.example.com/v1/chat?alt=sse&api_key=AIzaSECRET".');
+
+        $throwable = (new ConversionFailureExplainer())->explain($runtimeException, $this->failedConversionWithStatus($runtimeException, 403, ['detail' => 'Forbidden']));
+
+        self::assertSame('The provider refused the request (HTTP 403): Response does not contain choices for "https://gw.example.com/v1/chat?alt=sse&api_key=***REDACTED***".', $throwable->getMessage());
+    }
+
+    public function test_an_answer_cut_short_does_not_repeat_a_credential_the_failure_quoted(): void
+    {
+        $badRequestException = new BadRequestException('Filtered for "https://gw.example.com/v1/chat?token=AIzaSECRET".');
+
+        $throwable = (new ConversionFailureExplainer())->explain($badRequestException, $this->failedConversion($badRequestException, $this->azureContentFilterBody()));
+
+        self::assertSame('Filtered for "https://gw.example.com/v1/chat?token=***REDACTED***".', $throwable->getMessage());
     }
 
     public function test_a_raw_answer_that_cannot_be_read_leaves_the_failure_as_it_is(): void
@@ -149,6 +278,20 @@ final class ConversionFailureExplainerTest extends TestCase
     private function failedConversion(RuntimeException $runtimeException, array $rawAnswer): DeferredResult
     {
         $deferredResult = new DeferredResult(new FailingResultConverter($runtimeException), new InMemoryRawResult($rawAnswer));
+        $this->expectConversionToFailWith($runtimeException, $deferredResult);
+
+        return $deferredResult;
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     */
+    private function failedConversionWithStatus(RuntimeException $runtimeException, int $status, array $body): DeferredResult
+    {
+        $response = self::createStub(ResponseInterface::class);
+        $response->method('getStatusCode')->willReturn($status);
+        $response->method('toArray')->willReturn($body);
+        $deferredResult = new DeferredResult(new FailingResultConverter($runtimeException), new RawHttpResult($response));
         $this->expectConversionToFailWith($runtimeException, $deferredResult);
 
         return $deferredResult;

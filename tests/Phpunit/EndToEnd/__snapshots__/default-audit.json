@@ -5,6 +5,7 @@
     "completed_at": "TIMESTAMP",
     "duration_seconds": "DURATION",
     "files_scanned": 3,
+    "files_discovered": 3,
     "complete": true,
     "risk_score": 10,
     "risk_level": "LOW",
@@ -50,20 +51,20 @@
         }
     ],
     "cost": {
-        "input_tokens": 0,
+        "input_tokens": 8,
         "output_tokens": 0,
-        "total_tokens": 0,
-        "estimated_cost_usd": 0.0,
+        "total_tokens": 8,
+        "estimated_cost_usd": "COST",
         "primary_model": "gpt-4o",
         "by_role": [],
         "by_model": {
             "gpt-4o": {
                 "model": "gpt-4o",
-                "input_tokens": 0,
+                "input_tokens": 8,
                 "output_tokens": 0,
                 "cache_read_tokens": 0,
                 "cache_creation_tokens": 0,
-                "estimated_cost_usd": 0.0,
+                "estimated_cost_usd": "COST",
                 "billed_models": [
                     "gpt-4o"
                 ]
@@ -115,5 +116,7 @@
             "file": "src/Controller/AdminController.php",
             "status": "validated"
         }
-    ]
+    ],
+    "suppressed_fingerprints": [],
+    "suppressed_baseline_fingerprints": []
 }

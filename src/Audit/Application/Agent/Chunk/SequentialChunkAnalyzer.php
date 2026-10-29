@@ -13,10 +13,11 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunk;
 
-use JsonException;
 use Psr\Log\LoggerInterface;
 use Throwable;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAnalysisRequest;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\KnownFiles;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\RecordingToolClients;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\RecordVulnerabilityToolFactoryInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\RiskMarkerIndex;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\StatusTrackingCoverageRecorder;
@@ -31,22 +32,24 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityHydrationResult;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\CoverageRecorderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMClientInterface;
-use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMResponse;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ProgressReporterInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\Tool\ToolRegistry;
 
 /**
  * Analyzes chunks one at a time. The default structured-collection mode records
  * findings through a per-chunk `record_vulnerability` tool; the opt-out JSON
- * mode parses the model's array response. Cache hits short-circuit the LLM.
+ * mode parses the model's array response, as does a structured turn whose
+ * client never offered the tool. Cache hits short-circuit the LLM.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
 final readonly class SequentialChunkAnalyzer
 {
-    private const int PARSE_FAILURE_PREVIEW_BYTES = 512;
-
     private OversizedChunkRecovery $oversizedChunkRecovery;
+
+    private RefusedRecordingRecorder $refusedRecordingRecorder;
+
+    private ChunkAnswerHydrator $chunkAnswerHydrator;
 
     public function __construct(
         private LLMClientInterface $llmClient,
@@ -58,8 +61,11 @@ final readonly class SequentialChunkAnalyzer
         private int $maxToolIterations,
         private bool $useStructuredCollection,
         private ?RecordVulnerabilityToolFactoryInterface $recordVulnerabilityToolFactory,
+        private RecordingToolClients $recordingToolClients,
     ) {
         $this->oversizedChunkRecovery = new OversizedChunkRecovery($logger, $attackerChunkCache, $vulnerabilityFactory);
+        $this->refusedRecordingRecorder = new RefusedRecordingRecorder($logger);
+        $this->chunkAnswerHydrator = new ChunkAnswerHydrator($attackerChunkCache, $vulnerabilityFactory, $logger);
     }
 
     /**
@@ -96,17 +102,7 @@ final readonly class SequentialChunkAnalyzer
                 throw $llmProviderException;
             }
 
-            foreach ($chunkResult->vulnerabilities() as $vulnerability) {
-                $coverageRecorder->recordFoundVulnerability($vulnerability);
-            }
-
-            ChunkFindingProgress::report($this->progressReporter, $chunkResult->vulnerabilities());
-            $this->progressReporter->report(ProgressEvent::AttackerChunkCompleted->value, [
-                'chunk' => $index + 1,
-                'total_chunks' => \count($chunks),
-                'elapsed_seconds' => microtime(true) - $start,
-                'status' => $statusTrackingCoverageRecorder->chunkStatus($chunk),
-            ]);
+            $this->progressReporter->report(ProgressEvent::AttackerChunkCompleted->value, ChunkCompletionContext::of($index, \count($chunks), microtime(true) - $start, $statusTrackingCoverageRecorder, $chunk));
             array_push($allVulnerabilities, ...$chunkResult->vulnerabilities());
 
             foreach ($chunkResult->dropsByReason() as $reason => $count) {
@@ -152,14 +148,14 @@ final readonly class SequentialChunkAnalyzer
     {
         $chunkContext = $this->chunkContextFactory->create($chunk, $attackerAnalysisRequest, $riskMarkerIndex, $this->attackerChunkCache->isContextAware());
 
-        $servedFromCache = $this->servedFromCacheOrNull($chunk, $chunkContext->cacheable, $chunkContext->contextKey, $coverageRecorder);
+        $servedFromCache = $this->servedFromCacheOrNull($chunk, $chunkContext, $coverageRecorder);
 
         if ($servedFromCache instanceof VulnerabilityHydrationResult) {
-            return $servedFromCache;
+            return $this->recordedFindings($servedFromCache, $coverageRecorder);
         }
 
         try {
-            return $this->analyzeChunkThroughLlm($chunk, $chunkContext, $coverageRecorder, $toolRegistry);
+            return $this->recordedFindings($this->analyzeChunkThroughLlm($chunk, $chunkContext, $coverageRecorder, $toolRegistry), $coverageRecorder);
         } catch (BudgetExceededException $budgetExceededException) {
             // Budget exhaustion is a deliberate abort, not an LLM failure;
             // let it bubble up so RunAuditUseCase can wrap it with a partial report.
@@ -182,7 +178,7 @@ final readonly class SequentialChunkAnalyzer
             $this->logger->error('Attacker agent LLM call failed', [
                 'error' => $exception->getMessage(),
             ]);
-            ChunkCoverageRecorder::record($chunk, 'errored', $coverageRecorder);
+            ChunkCoverageRecorder::recordErrored($chunk, ChunkFailureReason::fromThrowable($exception), $coverageRecorder);
 
             return VulnerabilityHydrationResult::empty();
         }
@@ -205,68 +201,25 @@ final readonly class SequentialChunkAnalyzer
             ? $this->llmClient->completeWithTools($chunkContext->systemPrompt, $chunkContext->userMessage, $toolRegistry, $this->maxToolIterations)
             : $this->llmClient->complete($chunkContext->systemPrompt, $chunkContext->userMessage);
 
-        return $this->hydrateChunkResponse($chunk, $response, $chunkContext->cacheable, $chunkContext->contextKey, $coverageRecorder);
+        return $this->chunkAnswerHydrator->hydrateJsonAnswer($chunk, $response, $chunkContext, $coverageRecorder);
     }
 
     /**
      * @param list<ProjectFile> $chunk
      */
-    private function servedFromCacheOrNull(array $chunk, bool $cacheable, string $contextKey, CoverageRecorderInterface $coverageRecorder): ?VulnerabilityHydrationResult
+    private function servedFromCacheOrNull(array $chunk, ChunkContext $chunkContext, CoverageRecorderInterface $coverageRecorder): ?VulnerabilityHydrationResult
     {
-        if (!$cacheable) {
+        if (!$chunkContext->cacheable) {
             return null;
         }
 
-        $cached = $this->attackerChunkCache->get($chunk, $contextKey);
+        $cached = $this->attackerChunkCache->get($chunk, $chunkContext->contextKey);
 
         if (null === $cached) {
             return null;
         }
 
-        return $this->attackerChunkCache->served($chunk, $cached, $coverageRecorder);
-    }
-
-    /**
-     * @param list<ProjectFile> $chunk
-     */
-    private function hydrateChunkResponse(array $chunk, LLMResponse $llmResponse, bool $cacheable, string $contextKey, CoverageRecorderInterface $coverageRecorder): VulnerabilityHydrationResult
-    {
-        if ($llmResponse->isDegraded()) {
-            return $this->hydrateIncompleteResponse($chunk, $llmResponse, $this->parseablePayload($llmResponse), $coverageRecorder);
-        }
-
-        if ($llmResponse->isEmpty()) {
-            if ($cacheable) {
-                $this->attackerChunkCache->store($chunk, $contextKey, []);
-            }
-
-            ChunkCoverageRecorder::record($chunk, 'analyzed', $coverageRecorder);
-
-            return VulnerabilityHydrationResult::empty();
-        }
-
-        try {
-            /** @var list<mixed> $rawData */
-            $rawData = $llmResponse->parseJson();
-        } catch (JsonException $jsonException) {
-            $this->logger->error('Failed to parse attacker agent JSON response', [
-                'error' => $jsonException->getMessage(),
-                'content_preview' => substr($llmResponse->content(), 0, self::PARSE_FAILURE_PREVIEW_BYTES),
-            ]);
-            ChunkCoverageRecorder::record($chunk, 'errored', $coverageRecorder);
-
-            return VulnerabilityHydrationResult::empty();
-        }
-
-        if ($cacheable) {
-            /** @var list<array<string, mixed>> $cacheablePayload */
-            $cacheablePayload = array_values(array_filter($rawData, 'is_array'));
-            $this->attackerChunkCache->store($chunk, $contextKey, $cacheablePayload);
-        }
-
-        ChunkCoverageRecorder::record($chunk, 'analyzed', $coverageRecorder);
-
-        return $this->vulnerabilityFactory->fromList($rawData);
+        return $this->attackerChunkCache->served($chunk, $cached, $coverageRecorder, $chunkContext->knownFiles);
     }
 
     /**
@@ -278,70 +231,35 @@ final readonly class SequentialChunkAnalyzer
     {
         \assert($this->recordVulnerabilityToolFactory instanceof RecordVulnerabilityToolFactoryInterface);
 
-        $structuredVulnerabilityCollectionSession = StructuredVulnerabilityCollectionSession::begin($this->recordVulnerabilityToolFactory, $this->logger, $toolRegistry?->tools() ?? []);
+        $structuredVulnerabilityCollectionSession = StructuredVulnerabilityCollectionSession::begin($this->recordVulnerabilityToolFactory, $this->logger, $toolRegistry?->tools() ?? [], $chunkContext->knownFiles);
 
         try {
             $llmResponse = $this->llmClient->completeWithTools($chunkContext->systemPrompt, $chunkContext->userMessage, $structuredVulnerabilityCollectionSession->toolRegistry, $this->maxToolIterations);
         } catch (Throwable $throwable) {
-            $this->recordDrainedFindings($structuredVulnerabilityCollectionSession, $coverageRecorder);
+            $this->recordDrainedFindings($structuredVulnerabilityCollectionSession, $chunkContext->knownFiles, $coverageRecorder);
 
             throw $throwable;
+        }
+
+        $this->recordingToolClients->note($this->llmClient, $structuredVulnerabilityCollectionSession->recordingToolReached());
+        if ($this->recordingToolClients->ignoresTools($this->llmClient)) {
+            return $this->chunkAnswerHydrator->hydrateJsonAnswer($chunk, $llmResponse, $chunkContext, $coverageRecorder);
         }
 
         $rawData = $structuredVulnerabilityCollectionSession->drain();
 
         if ($llmResponse->isDegraded()) {
-            return $this->hydrateIncompleteResponse($chunk, $llmResponse, $rawData, $coverageRecorder);
+            return $this->chunkAnswerHydrator->hydrateIncompleteAnswer($chunk, $llmResponse, $rawData, $coverageRecorder, $chunkContext->knownFiles);
         }
 
-        if ($chunkContext->cacheable) {
-            $this->attackerChunkCache->store($chunk, $chunkContext->contextKey, $rawData);
+        $refusedCalls = $structuredVulnerabilityCollectionSession->unsettledRefusals();
+        if ($refusedCalls > 0) {
+            $this->refusedRecordingRecorder->record($chunk, \count($rawData), $refusedCalls, $coverageRecorder);
+
+            return $this->vulnerabilityFactory->fromList($rawData, $chunkContext->knownFiles);
         }
 
-        ChunkCoverageRecorder::record($chunk, 'analyzed', $coverageRecorder);
-
-        return $this->vulnerabilityFactory->fromList($rawData);
-    }
-
-    /**
-     * A response cut short — by the output token limit, a content filter, the
-     * tool-loop cap or a call that produced no content — is not the model's
-     * complete verdict on the chunk: the findings it does carry are kept, but
-     * the chunk is recorded as errored so the report says it could not be
-     * fully analyzed, and nothing is cached, so the next run retries it
-     * instead of replaying an empty result as safe.
-     *
-     * @param list<ProjectFile> $chunk
-     * @param list<mixed>       $rawData
-     */
-    private function hydrateIncompleteResponse(array $chunk, LLMResponse $llmResponse, array $rawData, CoverageRecorderInterface $coverageRecorder): VulnerabilityHydrationResult
-    {
-        $this->logger->warning('Attacker response was cut short; the chunk is recorded as errored and left out of the cache', [
-            'stop_reason' => $llmResponse->stopReason(),
-            'files' => array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $chunk),
-            'findings_kept' => \count($rawData),
-        ]);
-        ChunkCoverageRecorder::record($chunk, 'errored', $coverageRecorder);
-
-        return $this->vulnerabilityFactory->fromList($rawData);
-    }
-
-    /**
-     * The findings a cut-short JSON answer still carries: `parseJson()`
-     * recovers the first balanced block of a truncated array, which is a
-     * single finding object rather than a list, so it is wrapped back into one.
-     *
-     * @return list<mixed>
-     */
-    private function parseablePayload(LLMResponse $llmResponse): array
-    {
-        try {
-            $decoded = $llmResponse->parseJson();
-        } catch (JsonException) {
-            return [];
-        }
-
-        return array_is_list($decoded) ? $decoded : [$decoded];
+        return $this->chunkAnswerHydrator->settle($chunk, $chunkContext->answeredBy($llmResponse), $rawData, $coverageRecorder);
     }
 
     /**
@@ -351,9 +269,28 @@ final readonly class SequentialChunkAnalyzer
      * even though `drainFoundVulnerabilities()` exists precisely to let a
      * caller recover candidates found before a mid-run abort.
      */
-    private function recordDrainedFindings(StructuredVulnerabilityCollectionSession $structuredVulnerabilityCollectionSession, CoverageRecorderInterface $coverageRecorder): void
+    private function recordDrainedFindings(StructuredVulnerabilityCollectionSession $structuredVulnerabilityCollectionSession, KnownFiles $knownFiles, CoverageRecorderInterface $coverageRecorder): void
     {
-        $vulnerabilities = $this->vulnerabilityFactory->fromList($structuredVulnerabilityCollectionSession->drain())->vulnerabilities();
+        $this->recordFindings($this->vulnerabilityFactory->fromList($structuredVulnerabilityCollectionSession->drain(), $knownFiles)->vulnerabilities(), $coverageRecorder);
+    }
+
+    /**
+     * A chunk split in two reaches this once per half, as each half is
+     * analyzed — not once for the merged chunk — so the findings of a first
+     * half are already in the recorder's buffer when an abort ends the second.
+     */
+    private function recordedFindings(VulnerabilityHydrationResult $vulnerabilityHydrationResult, CoverageRecorderInterface $coverageRecorder): VulnerabilityHydrationResult
+    {
+        $this->recordFindings($vulnerabilityHydrationResult->vulnerabilities(), $coverageRecorder);
+
+        return $vulnerabilityHydrationResult;
+    }
+
+    /**
+     * @param list<Vulnerability> $vulnerabilities
+     */
+    private function recordFindings(array $vulnerabilities, CoverageRecorderInterface $coverageRecorder): void
+    {
         foreach ($vulnerabilities as $vulnerability) {
             $coverageRecorder->recordFoundVulnerability($vulnerability);
         }

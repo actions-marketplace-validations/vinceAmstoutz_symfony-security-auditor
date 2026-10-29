@@ -32,8 +32,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\RateLimiterInterface;
  * So it is booked against the budget, the report's token totals and the
  * rate-limit window: at the usage its raw answer reports, or at its estimated
  * input tokens when it reports none, the output it produced then unknown and
- * counted as none. A call the provider never answered only releases its
- * rate-limit reservation.
+ * counted as none. A usage that reports no prompt tokens books the estimated
+ * input tokens as its input, beside the output it reports. A call the
+ * provider never answered only releases its rate-limit reservation.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -62,13 +63,29 @@ final readonly class DegradedAnswerBooker
             return;
         }
 
-        $reportedUsage = $deferredResult instanceof DeferredResult ? $this->platformResultExtractor->extractBilledUsage($deferredResult) : null;
+        $reportedUsage = $deferredResult instanceof DeferredResult ? $this->platformResultExtractor->extractBilledUsage($deferredResult, $estimatedInputTokens) : null;
         $billedUsage = $reportedUsage ?? TokenUsageSnapshot::of($estimatedInputTokens, 0);
 
-        $this->rateLimiter->record($billedUsage->inputTokens(), $billedUsage->outputTokens());
-        $this->budgetTracker?->recordCall(LLMResponse::of('', $this->model, $stopReason, $billedUsage));
+        $this->rateLimiter->record($this->rateLimitedInputTokens($deferredResult, $billedUsage), $billedUsage->outputTokens());
+        $this->budgetTracker?->recordCall(LLMResponse::of('', $this->model, $stopReason, $billedUsage), $this->oneHourCacheCreationTokens($deferredResult, $billedUsage));
         $this->tokenUsageRecorder?->record($billedUsage->inputTokens(), $billedUsage->outputTokens(), $billedUsage->cacheReadTokens(), $billedUsage->cacheCreationTokens());
         $this->logBooking($stopReason, $reportedUsage, $estimatedInputTokens);
+    }
+
+    /**
+     * The share of the booked cache writes the provider keeps for an hour, as
+     * the raw answer reports it: none when no answer came back.
+     */
+    private function oneHourCacheCreationTokens(?DeferredResult $deferredResult, TokenUsageSnapshot $tokenUsageSnapshot): int
+    {
+        return $deferredResult instanceof DeferredResult
+            ? $this->platformResultExtractor->extractOneHourCacheCreationTokens($deferredResult, $tokenUsageSnapshot->cacheCreationTokens())
+            : 0;
+    }
+
+    private function rateLimitedInputTokens(?DeferredResult $deferredResult, TokenUsageSnapshot $tokenUsageSnapshot): int
+    {
+        return $deferredResult instanceof DeferredResult ? $this->platformResultExtractor->rateLimitedInputTokens($deferredResult, $tokenUsageSnapshot) : $tokenUsageSnapshot->inputTokens();
     }
 
     private function logBooking(string $stopReason, ?TokenUsageSnapshot $tokenUsageSnapshot, int $estimatedInputTokens): void

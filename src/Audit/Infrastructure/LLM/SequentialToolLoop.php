@@ -14,12 +14,12 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM;
 
 use Psr\Log\LoggerInterface;
-use Symfony\AI\Platform\Message\AssistantMessage;
 use Symfony\AI\Platform\Message\Content\Text;
 use Symfony\AI\Platform\Message\Message;
 use Symfony\AI\Platform\Message\MessageBag;
 use Symfony\AI\Platform\Message\ToolCallMessage;
 use Symfony\AI\Platform\Result\DeferredResult;
+use Symfony\AI\Platform\Result\ResultInterface;
 use Throwable;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\BudgetTracker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\Exception\BudgetExceededException;
@@ -39,8 +39,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\Tran
 /**
  * Drives one autonomous tool-using conversation sequentially: invokes the
  * platform with retry, executes requested tools against the registry, feeds
- * results back, and returns the model's final textual response — or an
- * empty `max_tool_iterations` response at the iteration cap.
+ * results back, and returns the model's final textual response. A last round
+ * that still asks to read gets one closing request ({@see FinalRound}); one
+ * that reads again ends as an empty `max_tool_iterations` response.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -56,6 +57,7 @@ final readonly class SequentialToolLoop
         private PlatformOptionsFactory $platformOptionsFactory,
         private PromptTokenEstimator $promptTokenEstimator,
         private EmptyLLMResponseFactory $emptyLLMResponseFactory,
+        private ToolIterationBooker $toolIterationBooker,
     ) {}
 
     /**
@@ -72,100 +74,44 @@ final readonly class SequentialToolLoop
     {
         \assert('' !== $this->model, 'Model must be a non-empty string');
 
-        $messageBag = new MessageBag(
-            Message::forSystem($systemPrompt),
-            Message::ofUser($userMessage),
-        );
+        $conversationState = $this->openConversation($systemPrompt, $userMessage, $toolRegistry);
 
-        $options = $this->platformOptionsFactory->baseOptions();
-        $options['tools'] = PlatformToolsMapper::map($toolRegistry->definitions());
-
-        $estimatedInputTokens = $this->promptTokenEstimator->estimate($systemPrompt, $userMessage);
-
-        $iteration = 0;
-        $totalInputTokens = 0;
-        $totalOutputTokens = 0;
-        $totalCacheReadTokens = 0;
-        $totalCacheCreationTokens = 0;
-        while ($iteration < $maxToolIterations) {
+        for ($iteration = 0; $iteration <= $maxToolIterations; ++$iteration) {
             $this->budgetTracker?->assertWithinBudget();
-            $deferredResult = $this->invokeOrEndConversation($messageBag, $options, $estimatedInputTokens, $iteration, TokenUsageSnapshot::of($totalInputTokens, $totalOutputTokens, $totalCacheReadTokens, $totalCacheCreationTokens));
+            $deferredResult = $this->invokeOrEndConversation($conversationState, $iteration);
             if ($deferredResult instanceof LLMResponse) {
                 return $deferredResult;
             }
 
             $platformResult = $deferredResult->getResult();
-            try {
-                [$callInput, $callOutput, $callCacheRead, $callCacheCreation] = $this->platformResultExtractor->extractTokens($deferredResult);
-            } catch (Throwable $throwable) {
-                $this->rateLimiter->record(0, 0);
-
-                throw $throwable;
+            $conversationState = $this->bookIteration($conversationState, $deferredResult);
+            if ([] === $this->platformResultExtractor->extractToolCalls($platformResult)) {
+                return $this->textResponseAndLog($conversationState, $deferredResult, $platformResult, $iteration, $maxToolIterations - $iteration);
             }
 
-            $totalInputTokens += $callInput;
-            $totalOutputTokens += $callOutput;
-            $totalCacheReadTokens += $callCacheRead;
-            $totalCacheCreationTokens += $callCacheCreation;
-            $this->rateLimiter->record($callInput, $callOutput);
-            if ($this->budgetTracker instanceof BudgetTracker) {
-                $this->budgetTracker->recordCall(LLMResponse::of(
-                    '',
-                    $this->model,
-                    'tool_iteration',
-                    TokenUsageSnapshot::of($callInput, $callOutput, $callCacheRead, $callCacheCreation),
-                )->withReportedModel($this->platformResultExtractor->extractReportedModel($deferredResult)));
-                $this->budgetTracker->assertWithinBudget();
+            $afterToolCalls = $this->runToolCalls($conversationState, $platformResult, $toolRegistry, $iteration, $maxToolIterations - $iteration);
+            if ($afterToolCalls instanceof LLMResponse) {
+                return $afterToolCalls;
             }
 
-            $toolCalls = $this->platformResultExtractor->extractToolCalls($platformResult);
-
-            if ([] === $toolCalls) {
-                $content = $this->platformResultExtractor->extractText($platformResult);
-                $this->logger->debug('Tool-using loop ended with text response', [
-                    'iterations' => $iteration,
-                    'content_length' => \strlen($content),
-                    'input_tokens' => $totalInputTokens,
-                    'output_tokens' => $totalOutputTokens,
-                ]);
-
-                return LLMResponse::of(
-                    $content,
-                    $this->model,
-                    $this->platformResultExtractor->extractStopReason($deferredResult) ?? 'end_turn',
-                    TokenUsageSnapshot::of($totalInputTokens, $totalOutputTokens, $totalCacheReadTokens, $totalCacheCreationTokens),
-                );
-            }
-
-            $messageBag->add(new AssistantMessage(...$toolCalls));
-
-            $toolResults = [];
-            foreach ($toolCalls as $toolCall) {
-                $result = $toolRegistry->execute($toolCall->getName(), $toolCall->getArguments());
-                $messageBag->add(new ToolCallMessage($toolCall, new Text($result)));
-                $toolResults[] = $result;
-                $this->logger->debug('Tool invoked', [
-                    'tool' => $toolCall->getName(),
-                    'iteration' => $iteration + 1,
-                ]);
-            }
-
-            $estimatedInputTokens += $this->promptTokenEstimator->estimate(...$toolResults);
-
-            ++$iteration;
+            $conversationState = $afterToolCalls;
         }
 
-        $this->logger->warning('Tool-using loop hit iteration cap', [
-            'max_iterations' => $maxToolIterations,
-            'input_tokens' => $totalInputTokens,
-            'output_tokens' => $totalOutputTokens,
-        ]);
+        return $this->iterationCapResponseAndLog($conversationState, $maxToolIterations);
+    }
 
-        return LLMResponse::of(
-            '',
-            $this->model,
-            'max_tool_iterations',
-            TokenUsageSnapshot::of($totalInputTokens, $totalOutputTokens, $totalCacheReadTokens, $totalCacheCreationTokens),
+    private function openConversation(string $systemPrompt, string $userMessage, ToolRegistry $toolRegistry): ConversationState
+    {
+        $options = $this->platformOptionsFactory->baseOptions();
+        $options['tools'] = PlatformToolsMapper::map($toolRegistry->definitions());
+
+        return ConversationState::start(
+            new MessageBag(
+                Message::forSystem($systemPrompt),
+                Message::ofUser($userMessage),
+            ),
+            $options,
+            $this->promptTokenEstimator->estimate($systemPrompt, $userMessage),
         );
     }
 
@@ -173,8 +119,6 @@ final readonly class SequentialToolLoop
      * Returns the platform's deferred answer, or the response that ends the
      * conversation instead: the model answered with no content, or the
      * conversation outgrew the model after tool results were appended.
-     *
-     * @param array<string, mixed> $options
      *
      * @throws MissingAiPlatformException
      * @throws TransientLLMFailureException
@@ -185,19 +129,112 @@ final readonly class SequentialToolLoop
      * @throws NegativeTokenCountException
      * @throws BudgetExceededException
      */
-    private function invokeOrEndConversation(MessageBag $messageBag, array $options, int $estimatedInputTokens, int $iteration, TokenUsageSnapshot $tokenUsageSnapshot): DeferredResult|LLMResponse
+    private function invokeOrEndConversation(ConversationState $conversationState, int $iteration): DeferredResult|LLMResponse
     {
         try {
-            return $this->retryingPlatformInvoker->invoke($messageBag, $options, $estimatedInputTokens);
+            return $this->retryingPlatformInvoker->invoke($conversationState->bag, $conversationState->options, $conversationState->estimatedInputTokens);
         } catch (EmptyLLMResponseException $emptyllmResponseException) {
-            return $this->emptyToolLoopResponseAndLog($emptyllmResponseException, $iteration, $tokenUsageSnapshot);
+            return $this->emptyToolLoopResponseAndLog($emptyllmResponseException, $iteration, $conversationState->tokenUsage());
         } catch (LLMRequestTooLargeException $llmRequestTooLargeException) {
             if (0 === $iteration) {
                 throw $llmRequestTooLargeException;
             }
 
-            return $this->outgrownConversationResponseAndLog($llmRequestTooLargeException, $iteration, $tokenUsageSnapshot);
+            return $this->outgrownConversationResponseAndLog($llmRequestTooLargeException, $iteration, $conversationState->tokenUsage());
         }
+    }
+
+    /**
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws BudgetExceededException
+     */
+    private function bookIteration(ConversationState $conversationState, DeferredResult $deferredResult): ConversationState
+    {
+        $callTokens = $this->extractCallTokens($deferredResult, $conversationState->estimatedInputTokens);
+        $this->toolIterationBooker->book($deferredResult, TokenUsageSnapshot::of(...$callTokens));
+
+        return $conversationState->withRecordedTokens(...$callTokens);
+    }
+
+    /**
+     * @return array{0: int, 1: int, 2: int, 3: int}
+     *
+     * @throws NegativeTokenCountException
+     */
+    private function extractCallTokens(DeferredResult $deferredResult, int $estimatedInputTokens): array
+    {
+        try {
+            return $this->platformResultExtractor->extractTokens($deferredResult, $estimatedInputTokens);
+        } catch (Throwable $throwable) {
+            $this->rateLimiter->record(0, 0);
+
+            throw $throwable;
+        }
+    }
+
+    /**
+     * @throws InvalidTokenUsageException
+     */
+    private function textResponseAndLog(ConversationState $conversationState, DeferredResult $deferredResult, ResultInterface $platformResult, int $iteration, int $roundsLeft): LLMResponse
+    {
+        $content = $this->platformResultExtractor->extractText($platformResult);
+        $this->logger->debug('Tool-using loop ended with text response', [
+            'iterations' => $iteration,
+            'content_length' => \strlen($content),
+            'input_tokens' => $conversationState->input,
+            'output_tokens' => $conversationState->output,
+        ]);
+
+        return FinalRound::settled(LLMResponse::of(
+            $content,
+            $this->model,
+            $this->platformResultExtractor->extractStopReason($deferredResult) ?? 'end_turn',
+            $conversationState->tokenUsage(),
+        ), $roundsLeft, $conversationState->askedToRead);
+    }
+
+    /**
+     * The conversation after the round's tool calls ran, or the response that
+     * ends it when they were the last round's recording calls.
+     *
+     * @throws InvalidTokenUsageException
+     */
+    private function runToolCalls(ConversationState $conversationState, ResultInterface $platformResult, ToolRegistry $toolRegistry, int $iteration, int $roundsLeft): ConversationState|LLMResponse
+    {
+        $toolCalls = $this->platformResultExtractor->extractToolCalls($platformResult);
+        $conversationState->bag->add($this->platformResultExtractor->extractAssistantMessage($platformResult));
+
+        $toolResults = [];
+        foreach ($toolCalls as $position => $toolCall) {
+            $result = FinalRound::resultOf($toolRegistry, $toolCall, $roundsLeft);
+            $conversationState->bag->add(new ToolCallMessage($toolCall, new Text(FinalRound::carried($result, $roundsLeft, $position === array_key_last($toolCalls)))));
+            $toolResults[] = $result;
+            $this->logger->debug('Tool invoked', [
+                'tool' => $toolCall->getName(),
+                'iteration' => $iteration + 1,
+            ]);
+        }
+
+        $conversationState = $conversationState->withExecutedTools($this->promptTokenEstimator->estimate(...$toolResults), FinalRound::asksToRead($toolRegistry, $toolCalls));
+
+        return FinalRound::isConcludedBy($roundsLeft, $toolRegistry, $toolCalls, $toolResults)
+            ? FinalRound::answer($this->model, $conversationState->tokenUsage(), $conversationState->askedToRead)
+            : $conversationState;
+    }
+
+    /**
+     * @throws InvalidTokenUsageException
+     */
+    private function iterationCapResponseAndLog(ConversationState $conversationState, int $maxToolIterations): LLMResponse
+    {
+        $this->logger->warning('Tool-using loop hit iteration cap', [
+            'max_iterations' => $maxToolIterations,
+            'input_tokens' => $conversationState->input,
+            'output_tokens' => $conversationState->output,
+        ]);
+
+        return LLMResponse::of('', $this->model, 'max_tool_iterations', $conversationState->tokenUsage());
     }
 
     private function emptyToolLoopResponseAndLog(

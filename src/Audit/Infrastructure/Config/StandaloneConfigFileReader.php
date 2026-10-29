@@ -16,6 +16,7 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config;
 use LimitIterator;
 use RecursiveArrayIterator;
 use RecursiveIteratorIterator;
+use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Yaml\Exception\ParseException;
 use Symfony\Component\Yaml\Yaml;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\MalformedProjectConfigException;
@@ -35,6 +36,17 @@ final readonly class StandaloneConfigFileReader
      */
     public const int VALUE_LIMIT = 10_000;
 
+    private const int MAX_BYTES = 524_288;
+
+    private const int MAX_DEPTH = 32;
+
+    /**
+     * Eight times the largest file read, which no configuration comes near:
+     * the parser keeps a few copies of each block it opens, so this bounds
+     * what any file it is handed can take, whatever its shape.
+     */
+    private const int MAX_NESTED_BYTES = 4_194_304;
+
     /**
      * @return array<array-key, mixed>
      *
@@ -46,6 +58,8 @@ final readonly class StandaloneConfigFileReader
             return [];
         }
 
+        $this->assertParseable($configFile);
+
         try {
             $parsed = Yaml::parseFile($configFile);
         } catch (ParseException $parseException) {
@@ -56,11 +70,39 @@ final readonly class StandaloneConfigFileReader
             return [];
         }
 
-        if ($this->reachesValueLimit($parsed)) {
-            throw MalformedProjectConfigException::forOversizedConfig($configFile, self::VALUE_LIMIT);
+        return $this->reachesValueLimit($parsed)
+            ? throw MalformedProjectConfigException::forOversizedConfig($configFile, self::VALUE_LIMIT) : $this->foldHyphenatedKeys($parsed);
+    }
+
+    /**
+     * @throws MalformedProjectConfigException
+     */
+    private function assertParseable(string $configFile): void
+    {
+        $bytes = filesize($configFile);
+        \assert(false !== $bytes, 'filesize() must succeed for a file is_file() found');
+
+        if ($bytes > self::MAX_BYTES) {
+            throw MalformedProjectConfigException::forOversizedFile($configFile, self::MAX_BYTES);
         }
 
-        return $this->foldHyphenatedKeys($parsed);
+        if (is_readable($configFile)) {
+            $this->assertShallowEnough($configFile, YamlNesting::of((new Filesystem())->readFile($configFile), self::MAX_DEPTH));
+        }
+    }
+
+    /**
+     * @throws MalformedProjectConfigException
+     */
+    private function assertShallowEnough(string $configFile, YamlNesting $yamlNesting): void
+    {
+        if ($yamlNesting->depth > self::MAX_DEPTH) {
+            throw MalformedProjectConfigException::forDeeplyNestedFile($configFile, self::MAX_DEPTH);
+        }
+
+        if ($yamlNesting->nestedBytes > self::MAX_NESTED_BYTES) {
+            throw MalformedProjectConfigException::forHeavilyNestedFile($configFile, self::MAX_NESTED_BYTES);
+        }
     }
 
     /**

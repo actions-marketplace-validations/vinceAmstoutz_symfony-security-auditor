@@ -27,6 +27,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAgent;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAgentInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\EscalatingAttackerAgent;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\BudgetTracker;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\CostCalculator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Telemetry\TokenUsageRecorder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\BundleConfiguration;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\CustomAttackerSkill;
@@ -34,6 +35,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\RateLimitCon
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditExecutionConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidRateLimitConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditBudget;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\StageInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\AdvisoryDatabaseInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\AttackerCacheInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\CodeSlicerInterface;
@@ -41,6 +43,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMClientInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\NullCodeSlicer;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\NullStaticPreScanner;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\NullTriageMemoryRecorder;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\PricingProviderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\RateLimiterInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ReviewerCacheInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ReviewerFeedbackProviderInterface;
@@ -53,8 +56,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\AuditedPr
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\ComposerAuditRunnerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\DeferredAdvisoryDatabase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\InMemoryAdvisoryDatabase;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\IsolatedComposerAuditRunner;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\LockfileHashedAdvisoryCache;
-use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\SymfonyProcessComposerAuditRunner;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemAttackerCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemReviewerCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemTriageMemoryStore;
@@ -62,8 +65,13 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\NullAttacker
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\NullReviewerCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\AttackerAgentDefinitionFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\AuditConfigurationDefinition;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\CheapAttackerClientNoticePass;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\ContainerParameterRegistrar;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\TypedNodeEnvPlaceholderException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\PricingPlatformPass;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\TypedNodeEnvPlaceholderFinder;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\UnselectedPlatformsPass;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\GitTrackedIgnoredFiles;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\NullSecretScrubber;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\RegexSecretScrubber;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Delay\SleeperInterface;
@@ -76,7 +84,10 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\RateLimit\Retr
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\RateLimit\TokenBucketRateLimiter;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\RetryPolicy;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\SymfonyAiLLMClient;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TokenEstimator\ProviderTokenEstimatorInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TransientFailureClassifier;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\UnpricedCostCapWarning;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\UsageBookingClientFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\Reviewer\CompositeReviewerFeedbackProvider;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\Reviewer\ReviewerFeedbackHolder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\Skill\ConfiguredAttackerSkill;
@@ -97,6 +108,8 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
     public function build(ContainerBuilder $container): void
     {
         $container->addCompilerPass(new PricingPlatformPass(PlatformInterface::class));
+        $container->addCompilerPass(new UnselectedPlatformsPass(PlatformInterface::class));
+        $container->addCompilerPass(new CheapAttackerClientNoticePass());
     }
 
     #[Override]
@@ -112,10 +125,14 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
      * @throws JsonException
      * @throws InvalidAuditExecutionConfigurationException
      * @throws InvalidRateLimitConfigurationException
+     * @throws TypedNodeEnvPlaceholderException
      */
     #[Override]
     public function loadExtension(array $config, ContainerConfigurator $container, ContainerBuilder $builder): void
     {
+        $this->assertNoEnvPlaceholderOnTypedSetting($config, $builder);
+
+        $this->registerForAutoconfiguration($builder);
         $container->import('../config/services.php');
 
         /** @var BundleConfigArray $config */
@@ -128,8 +145,53 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
         $this->registerRateLimiter($services, $bundleConfiguration);
         $this->registerLlmClients($services, $bundleConfiguration);
         $this->registerImplementationAliases($services, $bundleConfiguration);
+        $this->registerTrackedIgnoredFiles($services, $bundleConfiguration);
         $this->registerCustomSkills($services, $bundleConfiguration);
         $this->registerEscalation($services, $bundleConfiguration);
+    }
+
+    /**
+     * @param array<array-key, mixed> $config
+     *
+     * @throws TypedNodeEnvPlaceholderException
+     */
+    private function assertNoEnvPlaceholderOnTypedSetting(array $config, ContainerBuilder $containerBuilder): void
+    {
+        $paths = (new TypedNodeEnvPlaceholderFinder())->pathsIn($config, $containerBuilder->getParameterBag());
+
+        if ([] !== $paths) {
+            throw TypedNodeEnvPlaceholderException::forPaths($paths);
+        }
+    }
+
+    /**
+     * Every autoconfigured service implementing an extension point joins the
+     * tagged iterator that collects it, the application's own services
+     * included, not only the ones `config/services.php` defines.
+     */
+    private function registerForAutoconfiguration(ContainerBuilder $containerBuilder): void
+    {
+        $containerBuilder->registerForAutoconfiguration(StageInterface::class)
+            ->addTag('symfony_security_auditor.pipeline_stage');
+        $containerBuilder->registerForAutoconfiguration(ProviderTokenEstimatorInterface::class)
+            ->addTag('symfony_security_auditor.token_estimator');
+    }
+
+    /**
+     * The scan lists the files git tracks although a `.gitignore` pattern
+     * matches them only when `scan.include_tracked_ignored` asks for it under
+     * `scan.respect_gitignore`; otherwise no such service exists, the scanner
+     * is handed none, and no git process runs.
+     */
+    private function registerTrackedIgnoredFiles(ServicesConfigurator $servicesConfigurator, BundleConfiguration $bundleConfiguration): void
+    {
+        if (!$bundleConfiguration->scan->respectGitignore || !$bundleConfiguration->scan->includeTrackedIgnored) {
+            return;
+        }
+
+        $servicesConfigurator->set(GitTrackedIgnoredFiles::class)
+            ->private()
+            ->args([service('logger')]);
     }
 
     /**
@@ -227,6 +289,42 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
             ));
 
         $servicesConfigurator->alias(LLMClientInterface::class, 'security_auditor.attacker_client');
+
+        $this->bookUsageOfReplacedClients($servicesConfigurator);
+    }
+
+    /**
+     * An application may wire its own client in place of either one; its
+     * decorator wraps the client the id ends up naming before any decorator of
+     * the application's own does, so the usage is booked once.
+     */
+    private function bookUsageOfReplacedClients(ServicesConfigurator $servicesConfigurator): void
+    {
+        $servicesConfigurator->set(UnpricedCostCapWarning::class)
+            ->private()
+            ->args([
+                service(AuditBudget::class),
+                service(CostCalculator::class),
+                service(PricingProviderInterface::class),
+                service('logger'),
+            ]);
+
+        $this->bookUsageOf($servicesConfigurator, 'security_auditor.attacker_client');
+        $this->bookUsageOf($servicesConfigurator, 'security_auditor.reviewer_client');
+    }
+
+    private function bookUsageOf(ServicesConfigurator $servicesConfigurator, string $clientId): void
+    {
+        $servicesConfigurator->set(\sprintf('%s.usage_booking', $clientId), LLMClientInterface::class)
+            ->private()
+            ->decorate($clientId, null, \PHP_INT_MAX)
+            ->factory([UsageBookingClientFactory::class, 'around'])
+            ->args([
+                service('.inner'),
+                service(TokenUsageRecorder::class),
+                service(BudgetTracker::class),
+                service(UnpricedCostCapWarning::class),
+            ]);
     }
 
     private function registerImplementationAliases(ServicesConfigurator $servicesConfigurator, BundleConfiguration $bundleConfiguration): void
@@ -249,7 +347,7 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
 
         $servicesConfigurator->alias(ComposerAuditRunnerInterface::class, $bundleConfiguration->cache->enabled
             ? LockfileHashedAdvisoryCache::class
-            : SymfonyProcessComposerAuditRunner::class);
+            : IsolatedComposerAuditRunner::class);
 
         $this->registerStaticPreScanner($servicesConfigurator, $bundleConfiguration);
         $this->registerTriageMemory($servicesConfigurator, $bundleConfiguration);
@@ -323,6 +421,7 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
                 $cheapModel,
                 $bundleConfiguration->llm->attackerMaxOutputTokens(),
             ));
+        $this->bookUsageOf($servicesConfigurator, 'security_auditor.cheap_attacker_client');
 
         $this->registerCheapAttackerCache($servicesConfigurator, $bundleConfiguration);
 
@@ -379,11 +478,13 @@ final class SymfonySecurityAuditorBundle extends AbstractBundle
                 $model,
                 service('logger'),
                 $maxOutputTokens,
+                param(UnselectedPlatformsPass::PARAMETER),
             ]),
             inline_service(PlatformRequestConfig::class)->args([
                 SymfonyAiLLMClient::DEFAULT_TEMPERATURE,
                 $bundleConfiguration->llm->providerJsonMode,
                 service(TokenEstimatorInterface::class),
+                param(PricingPlatformPass::PARAMETER),
             ]),
             inline_service(PlatformResilienceConfig::class)->args([
                 service(RetryPolicy::class),

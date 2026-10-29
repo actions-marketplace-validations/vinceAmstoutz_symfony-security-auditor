@@ -88,7 +88,7 @@ final readonly class OversizedChunkRecovery
      * A half cut short or errored is left out of the cache by the analyzers,
      * and so is the whole chunk then: a cache entry replays as the model's
      * complete verdict, which the merged findings only are once every file
-     * ended analyzed or served from the cache.
+     * ended analyzed or served from the cache, and none on a partial look.
      *
      * @param list<ProjectFile> $chunk
      */
@@ -99,7 +99,7 @@ final readonly class OversizedChunkRecovery
         }
 
         $paths = array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $chunk);
-        if ([] !== array_diff($paths, $statusTrackingCoverageRecorder->analyzedFiles())) {
+        if ([] !== array_diff($paths, $statusTrackingCoverageRecorder->conclusiveFiles())) {
             return;
         }
 
@@ -115,7 +115,7 @@ final readonly class OversizedChunkRecovery
      */
     private function failSingleFile(ProjectFile $projectFile, ChunkContext $chunkContext, string $reason, CoverageRecorderInterface $coverageRecorder): VulnerabilityHydrationResult
     {
-        ChunkCoverageRecorder::record([$projectFile], 'errored', $coverageRecorder);
+        ChunkCoverageRecorder::recordErrored([$projectFile], ChunkFailureReason::FILE_TOO_LARGE, $coverageRecorder);
 
         $bytes = $chunkContext->promptedFileBytes;
         $promptBytes = \strlen($chunkContext->systemPrompt) + \strlen($chunkContext->userMessage);

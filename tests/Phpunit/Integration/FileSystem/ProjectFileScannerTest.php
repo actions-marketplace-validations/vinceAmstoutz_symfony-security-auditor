@@ -13,18 +13,25 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\FileSystem;
 
+use Closure;
 use Override;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use RuntimeException;
+use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Finder\SplFileInfo;
 use Symfony\Component\Process\Process;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\SkippedFile;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\SkippedFileReason;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\SecretScrubberInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\Exception\SecretScrubberConfigurationException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\GitTrackedIgnoredFiles;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\NullSecretScrubber;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\ProjectFileScanner;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\RegexSecretScrubber;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\Agent\Fixture\WarningCollectingLogger;
 
 final class ProjectFileScannerTest extends TestCase
 {
@@ -32,7 +39,11 @@ final class ProjectFileScannerTest extends TestCase
     // nor GitHub's secret scanner sees a contiguous credential-shaped string.
     private const string STRIPE_LIVE_PREFIX = 'sk_live';
 
+    private const int UNPRIVILEGED_USER_ID = 65534;
+
     private string $tmpDir;
+
+    private Filesystem $filesystem;
 
     private ProjectFileScanner $projectFileScanner;
 
@@ -108,6 +119,28 @@ final class ProjectFileScannerTest extends TestCase
 
         self::assertCount(1, $files);
         self::assertSame('src/App.php', $files[0]->relativePath());
+    }
+
+    public function test_it_leaves_out_dot_files_dot_directories_and_version_control_directories_by_default(): void
+    {
+        $this->writeDotFilesProject();
+
+        $projectFileScan = (new ProjectFileScanner(new NullLogger(), ['src', 'templates']))->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame(['src/Controller/AdminController.php', 'templates/admin/index.html.twig'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $projectFileScan->files));
+        self::assertSame([], $projectFileScan->skippedFiles);
+    }
+
+    public function test_it_scans_dot_files_and_dot_directories_but_never_version_control_directories_when_asked_to(): void
+    {
+        $this->writeDotFilesProject();
+
+        $files = (new ProjectFileScanner(new NullLogger(), ['src', 'templates'], includeDotfiles: true))->scan($this->tmpDir);
+
+        self::assertSame(
+            ['src/Controller/.helpers.php', 'src/Controller/Admin/.legacy/OldController.php', 'src/Controller/AdminController.php', 'templates/admin/.row.html.twig', 'templates/admin/index.html.twig'],
+            array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $files),
+        );
     }
 
     public function test_it_scans_an_explicitly_included_dotenv_file(): void
@@ -341,6 +374,165 @@ final class ProjectFileScannerTest extends TestCase
         self::assertSame($content, $files[0]->content());
     }
 
+    public function test_it_writes_bytes_that_are_not_valid_utf8_in_file_content_as_latin1_characters(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Legacy.php', "<?php\n\$id\xE9 = \$request->get('id');\n\$id\xE8 = (int) \$id\xE9;\n");
+
+        $files = $this->projectFileScanner->scan($this->tmpDir);
+
+        self::assertCount(1, $files);
+        self::assertSame("<?php\n\$idé = \$request->get('id');\n\$idè = (int) \$idé;\n", $files[0]->content());
+    }
+
+    public function test_it_writes_bytes_that_are_not_valid_utf8_in_a_file_name_as_latin1_characters(): void
+    {
+        mkdir($this->tmpDir.'/src/Controller', 0o777, true);
+        $absolutePath = $this->tmpDir."/src/Controller/Fo\xFFo.php";
+        file_put_contents($absolutePath, '<?php class Foo {}');
+
+        $files = $this->projectFileScanner->scan($this->tmpDir);
+
+        self::assertCount(1, $files);
+        self::assertSame('src/Controller/Foÿo.php', $files[0]->relativePath());
+        self::assertSame($absolutePath, $files[0]->absolutePath());
+    }
+
+    public function test_two_files_whose_names_differ_only_in_their_invalid_bytes_are_both_scanned_under_different_names(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir."/src/caf\xE9.php", '<?php class A {}');
+        file_put_contents($this->tmpDir."/src/caf\xE8.php", '<?php class B {}');
+
+        $projectFileScan = $this->projectFileScanner->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame([['src/cafè.php', '<?php class B {}'], ['src/café.php', '<?php class A {}']], array_map(static fn (ProjectFile $projectFile): array => [$projectFile->relativePath(), $projectFile->content()], $projectFileScan->files));
+        self::assertSame([], $projectFileScan->skippedFiles);
+    }
+
+    public function test_it_keeps_one_of_two_files_whose_names_are_the_same_once_their_invalid_bytes_are_replaced_and_reports_the_other_as_skipped(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir."/src/caf\xE9.php", '<?php class A {}');
+        file_put_contents($this->tmpDir.'/src/café.php', '<?php class B {}');
+
+        $projectFileScan = $this->projectFileScanner->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame([['src/café.php', '<?php class B {}']], array_map(static fn (ProjectFile $projectFile): array => [$projectFile->relativePath(), $projectFile->content()], $projectFileScan->files));
+        self::assertSame([['src/café.php', SkippedFileReason::AmbiguousName]], array_map(static fn (SkippedFile $skippedFile): array => [$skippedFile->relativePath, $skippedFile->reason], $projectFileScan->skippedFiles));
+    }
+
+    public function test_the_file_kept_among_those_with_the_same_repaired_name_is_the_first_in_byte_order_of_its_path_not_the_first_listed(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir."/src/caf\xE9.php", '<?php class A {}');
+        file_put_contents($this->tmpDir.'/src/café.php', '<?php class B {}');
+
+        $projectFileScan = (new ProjectFileScanner(new NullLogger(), includedPaths: ["src/caf\xE9.php", 'src/café.php']))->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame(['<?php class B {}'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->content(), $projectFileScan->files));
+        self::assertCount(1, $projectFileScan->skippedFiles);
+    }
+
+    public function test_three_files_that_share_a_repaired_name_leave_one_file_and_one_skipped_entry_for_the_name(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        foreach (["\xE9\xE9", "\xE9é", "é\xE9"] as $name) {
+            file_put_contents($this->tmpDir.'/src/'.$name.'.php', '<?php');
+        }
+
+        $projectFileScan = $this->projectFileScanner->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame(['src/éé.php'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $projectFileScan->files));
+        self::assertSame([['src/éé.php', SkippedFileReason::AmbiguousName]], array_map(static fn (SkippedFile $skippedFile): array => [$skippedFile->relativePath, $skippedFile->reason], $projectFileScan->skippedFiles));
+    }
+
+    public function test_a_file_whose_content_mixes_invalid_bytes_with_the_characters_they_are_repaired_into_is_skipped_as_ambiguous(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Clear.php', "<?php\n\$caf\xE9 = 1;\n");
+        file_put_contents($this->tmpDir.'/src/Mixed.php', "<?php\n\$id\xE9 = \$request->get('id');\n\$idé = (int) \$id\xE9;\n");
+
+        $projectFileScan = $this->projectFileScanner->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame(['src/Clear.php'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $projectFileScan->files));
+        self::assertSame([['src/Mixed.php', SkippedFileReason::AmbiguousContent]], array_map(static fn (SkippedFile $skippedFile): array => [$skippedFile->relativePath, $skippedFile->reason], $projectFileScan->skippedFiles));
+    }
+
+    public function test_a_file_reached_through_two_spellings_of_its_path_is_not_a_name_collision(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/App.php', '<?php');
+
+        $projectFileScan = (new ProjectFileScanner(new NullLogger(), includedPaths: ['src', 'src/./App.php', 'src//App.php']))->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertCount(1, $projectFileScan->files);
+        self::assertSame([], $projectFileScan->skippedFiles);
+    }
+
+    public function test_it_warns_once_that_the_content_of_a_file_was_not_valid_utf8(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Legacy.php', "<?php\n// caf\xE9\n");
+
+        $warnings = [];
+        $logger = self::createStub(LoggerInterface::class);
+        $logger->method('warning')->willReturnCallback(
+            static function (string $message, array $context = []) use (&$warnings): void {
+                $warnings[] = [$message, $context];
+            },
+        );
+
+        (new ProjectFileScanner($logger))->scan($this->tmpDir);
+
+        self::assertSame([['File content is not valid UTF-8, its invalid bytes were replaced', ['path' => 'src/Legacy.php']]], $warnings);
+    }
+
+    public function test_it_warns_once_that_a_file_name_was_not_valid_utf8_and_names_it_as_replaced(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir."/src/Fo\xFFo.php", '<?php class Foo {}');
+
+        $warnings = [];
+        $logger = self::createStub(LoggerInterface::class);
+        $logger->method('warning')->willReturnCallback(
+            static function (string $message, array $context = []) use (&$warnings): void {
+                $warnings[] = [$message, $context];
+            },
+        );
+
+        (new ProjectFileScanner($logger))->scan($this->tmpDir);
+
+        self::assertSame([['File name is not valid UTF-8, its invalid bytes were replaced', ['path' => 'src/Foÿo.php']]], $warnings);
+    }
+
+    public function test_it_does_not_warn_about_encoding_for_valid_utf8_names_and_content(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Café.php', "<?php\n// café\n");
+
+        $logger = self::createMock(LoggerInterface::class);
+        $logger->expects(self::never())->method('warning');
+
+        $files = (new ProjectFileScanner($logger))->scan($this->tmpDir);
+
+        self::assertSame(['src/Café.php' => "<?php\n// café\n"], [$files[0]->relativePath() => $files[0]->content()]);
+    }
+
+    /**
+     * @throws SecretScrubberConfigurationException
+     */
+    public function test_the_secret_scrubber_sees_the_bytes_of_a_file_as_they_are_on_disk(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Legacy.php', "<?php\n// geheim\xE4 caf\xE9\n");
+
+        $projectFileScanner = new ProjectFileScanner(new NullLogger(), secretScrubber: new RegexSecretScrubber(["/geheim\xE4/"]));
+        $files = $projectFileScanner->scan($this->tmpDir);
+
+        self::assertSame("<?php\n// ***REDACTED:custom_0*** café\n", $files[0]->content());
+    }
+
     public function test_it_logs_scanning_start_and_completion_with_exact_context(): void
     {
         mkdir($this->tmpDir.'/src', 0o777, true);
@@ -382,6 +574,148 @@ final class ProjectFileScannerTest extends TestCase
         self::assertSame('src/App.php', $files[0]->relativePath());
     }
 
+    public function test_it_skips_every_file_a_gitignore_pattern_matches_including_the_ones_git_tracks(): void
+    {
+        mkdir($this->tmpDir.'/src/Generated', 0o777, true);
+        file_put_contents($this->tmpDir.'/.gitignore', "src/Evil.php\nsrc/Untracked.php\nsrc/Generated/\n");
+        file_put_contents($this->tmpDir.'/src/Evil.php', '<?php class Evil { function run($c) { system($c); } }');
+        file_put_contents($this->tmpDir.'/src/Untracked.php', '<?php class Untracked {}');
+        file_put_contents($this->tmpDir.'/src/Generated/Cache.php', '<?php class Cache {}');
+        file_put_contents($this->tmpDir.'/src/Ok.php', '<?php class Ok {}');
+        (new Process(['git', 'init', '--quiet', $this->tmpDir]))->mustRun();
+        (new Process(['git', 'add', '--force', 'src/Evil.php', 'src/Ok.php'], $this->tmpDir))->mustRun();
+
+        $files = (new ProjectFileScanner(new NullLogger(), ['src'], respectGitignore: true))->scan($this->tmpDir);
+
+        self::assertSame(['src/Ok.php'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $files));
+    }
+
+    public function test_it_skips_an_explicitly_included_file_a_gitignore_pattern_matches_although_git_tracks_it(): void
+    {
+        file_put_contents($this->tmpDir.'/.gitignore', ".env.local\n.env.dev\n");
+        file_put_contents($this->tmpDir.'/.env.local', 'APP_ENV=prod');
+        file_put_contents($this->tmpDir.'/.env.dev', 'APP_ENV=dev');
+        file_put_contents($this->tmpDir.'/.env', 'APP_ENV=test');
+        (new Process(['git', 'init', '--quiet', $this->tmpDir]))->mustRun();
+        (new Process(['git', 'add', '--force', '.env.local', '.env'], $this->tmpDir))->mustRun();
+
+        $files = (new ProjectFileScanner(new NullLogger(), ['.env', '.env.local', '.env.dev'], respectGitignore: true))->scan($this->tmpDir);
+
+        self::assertSame(['.env'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $files));
+    }
+
+    public function test_it_scans_a_file_git_tracks_although_a_gitignore_pattern_matches_it_when_asked_to(): void
+    {
+        mkdir($this->tmpDir.'/src/Generated', 0o777, true);
+        file_put_contents($this->tmpDir.'/.gitignore', "src/Evil.php\nsrc/Untracked.php\nsrc/Generated/\n");
+        file_put_contents($this->tmpDir.'/src/Evil.php', '<?php class Evil { function run($c) { system($c); } }');
+        file_put_contents($this->tmpDir.'/src/Untracked.php', '<?php class Untracked {}');
+        file_put_contents($this->tmpDir.'/src/Generated/Cache.php', '<?php class Cache {}');
+        file_put_contents($this->tmpDir.'/src/Ok.php', '<?php class Ok {}');
+        (new Process(['git', 'init', '--quiet', $this->tmpDir]))->mustRun();
+        (new Process(['git', 'add', '--force', 'src/Evil.php', 'src/Ok.php'], $this->tmpDir))->mustRun();
+
+        $files = (new ProjectFileScanner(new NullLogger(), ['src'], respectGitignore: true, gitTrackedIgnoredFiles: new GitTrackedIgnoredFiles(new NullLogger())))->scan($this->tmpDir);
+
+        self::assertSame(['src/Evil.php', 'src/Ok.php'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $files));
+    }
+
+    public function test_it_asks_git_once_per_scan_for_the_tracked_ignored_files(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/App.php', '<?php');
+        $listedIn = [];
+        $gitTrackedIgnoredFiles = new GitTrackedIgnoredFiles(new NullLogger(), static function (string $projectPath) use (&$listedIn): Process {
+            $listedIn[] = $projectPath;
+
+            return new Process([\PHP_BINARY, '-r', '']);
+        });
+
+        $files = (new ProjectFileScanner(new NullLogger(), ['src'], respectGitignore: true, gitTrackedIgnoredFiles: $gitTrackedIgnoredFiles))->scan($this->tmpDir);
+
+        self::assertSame([$this->tmpDir], $listedIn);
+        self::assertSame(['src/App.php'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $files));
+    }
+
+    public function test_it_scans_an_explicitly_included_file_git_tracks_although_a_gitignore_pattern_matches_it_when_asked_to(): void
+    {
+        file_put_contents($this->tmpDir.'/.gitignore', ".env.local\n.env.dev\n");
+        file_put_contents($this->tmpDir.'/.env.local', 'APP_ENV=prod');
+        file_put_contents($this->tmpDir.'/.env.dev', 'APP_ENV=dev');
+        (new Process(['git', 'init', '--quiet', $this->tmpDir]))->mustRun();
+        (new Process(['git', 'add', '--force', '.env.local'], $this->tmpDir))->mustRun();
+
+        $files = (new ProjectFileScanner(new NullLogger(), ['.env.local', '.env.dev'], respectGitignore: true, gitTrackedIgnoredFiles: new GitTrackedIgnoredFiles(new NullLogger())))->scan($this->tmpDir);
+
+        self::assertSame(['.env.local'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $files));
+    }
+
+    public function test_it_neither_scans_nor_reports_as_skipped_a_tracked_file_a_gitignore_pattern_matches_by_default(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/.gitignore', "src/BigTracked.php\nsrc/Tracked.php\n");
+        file_put_contents($this->tmpDir.'/src/BigTracked.php', str_repeat('a', (2 * 1024) + 1));
+        file_put_contents($this->tmpDir.'/src/Tracked.php', '<?php class Tracked {}');
+        (new Process(['git', 'init', '--quiet', $this->tmpDir]))->mustRun();
+        (new Process(['git', 'add', '--force', 'src/BigTracked.php', 'src/Tracked.php'], $this->tmpDir))->mustRun();
+
+        $projectFileScan = (new ProjectFileScanner(new NullLogger(), ['src'], respectGitignore: true, maxFileSizeKb: 2))->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame([], $projectFileScan->files);
+        self::assertSame([], $projectFileScan->skippedFiles);
+    }
+
+    public function test_it_reports_a_tracked_file_a_gitignore_pattern_matches_as_skipped_when_it_is_over_the_size_limit_and_tracked_files_are_asked_for(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/.gitignore', "src/BigTracked.php\nsrc/BigUntracked.php\n");
+        file_put_contents($this->tmpDir.'/src/BigTracked.php', str_repeat('a', (2 * 1024) + 1));
+        file_put_contents($this->tmpDir.'/src/BigUntracked.php', str_repeat('a', (2 * 1024) + 1));
+        (new Process(['git', 'init', '--quiet', $this->tmpDir]))->mustRun();
+        (new Process(['git', 'add', '--force', 'src/BigTracked.php'], $this->tmpDir))->mustRun();
+
+        $projectFileScan = (new ProjectFileScanner(new NullLogger(), ['src'], respectGitignore: true, maxFileSizeKb: 2, gitTrackedIgnoredFiles: new GitTrackedIgnoredFiles(new NullLogger())))->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame([], $projectFileScan->files);
+        self::assertSame(
+            [['src/BigTracked.php', SkippedFileReason::TooLarge]],
+            array_map(static fn (SkippedFile $skippedFile): array => [$skippedFile->relativePath, $skippedFile->reason], $projectFileScan->skippedFiles),
+        );
+    }
+
+    public function test_it_scans_a_tracked_file_a_gitignore_pattern_matches_in_a_project_inside_a_larger_repository_when_asked_to(): void
+    {
+        mkdir($this->tmpDir.'/apps/api/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/.gitignore', "Evil.php\n");
+        file_put_contents($this->tmpDir.'/apps/api/src/Evil.php', '<?php class Evil {}');
+        (new Process(['git', 'init', '--quiet', $this->tmpDir]))->mustRun();
+        (new Process(['git', 'add', '--force', 'apps/api/src/Evil.php'], $this->tmpDir))->mustRun();
+
+        $files = (new ProjectFileScanner(new NullLogger(), ['src'], respectGitignore: true, gitTrackedIgnoredFiles: new GitTrackedIgnoredFiles(new NullLogger())))->scan($this->tmpDir.'/apps/api');
+
+        self::assertSame(['src/Evil.php'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $files));
+    }
+
+    public function test_it_reads_a_tracked_file_a_gitignore_pattern_matches_once_when_gitignore_is_not_respected(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/.gitignore', "src/Evil.php\n");
+        file_put_contents($this->tmpDir.'/src/Evil.php', '<?php class Evil {}');
+        (new Process(['git', 'init', '--quiet', $this->tmpDir]))->mustRun();
+        (new Process(['git', 'add', '--force', 'src/Evil.php'], $this->tmpDir))->mustRun();
+        $reads = 0;
+        $reader = static function (SplFileInfo $splFile) use (&$reads): string {
+            ++$reads;
+
+            return $splFile->getContents();
+        };
+
+        $files = (new ProjectFileScanner(new NullLogger(), ['src'], respectGitignore: false, fileReader: $reader))->scan($this->tmpDir);
+
+        self::assertCount(1, $files);
+        self::assertSame(1, $reads);
+    }
+
     public function test_it_does_not_respect_gitignore_when_disabled(): void
     {
         mkdir($this->tmpDir.'/src', 0o777, true);
@@ -403,6 +737,71 @@ final class ProjectFileScannerTest extends TestCase
         sort($paths);
 
         self::assertSame(['derived/Generated.php', 'src/App.php'], $paths);
+    }
+
+    public function test_a_directory_inside_another_scanned_directory_is_not_read_twice(): void
+    {
+        mkdir($this->tmpDir.'/src/Controller', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Controller/HomeController.php', '<?php');
+        file_put_contents($this->tmpDir.'/src/App.php', '<?php');
+        $reads = [];
+        $reader = static function (SplFileInfo $splFile) use (&$reads): string {
+            $reads[] = $splFile->getFilename();
+
+            return $splFile->getContents();
+        };
+
+        $files = (new ProjectFileScanner(new NullLogger(), includedPaths: ['src', 'src/Controller'], fileReader: $reader))->scan($this->tmpDir);
+
+        sort($reads);
+        self::assertSame(['App.php', 'HomeController.php'], $reads);
+        self::assertCount(2, $files);
+    }
+
+    public function test_a_directory_listed_twice_is_read_once(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/App.php', '<?php');
+        $reads = 0;
+        $reader = static function (SplFileInfo $splFile) use (&$reads): string {
+            ++$reads;
+
+            return $splFile->getContents();
+        };
+
+        (new ProjectFileScanner(new NullLogger(), includedPaths: ['src', 'src/', './src'], fileReader: $reader))->scan($this->tmpDir);
+
+        self::assertSame(1, $reads);
+    }
+
+    public function test_a_sibling_directory_sharing_a_name_prefix_is_not_taken_for_a_nested_one(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        mkdir($this->tmpDir.'/src-extra', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/App.php', '<?php');
+        file_put_contents($this->tmpDir.'/src-extra/Extra.php', '<?php');
+
+        $paths = array_map(
+            static fn (ProjectFile $projectFile): string => $projectFile->relativePath(),
+            (new ProjectFileScanner(new NullLogger(), includedPaths: ['src', 'src-extra']))->scan($this->tmpDir),
+        );
+
+        self::assertSame(['src-extra/Extra.php', 'src/App.php'], $paths);
+    }
+
+    public function test_a_file_reached_by_two_scan_paths_is_the_first_one_read(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/App.php', '<?php');
+        $reads = 0;
+        $reader = static function (SplFileInfo $splFile) use (&$reads): string {
+            return \sprintf('<?php // read %d', ++$reads);
+        };
+
+        $files = (new ProjectFileScanner(new NullLogger(), includedPaths: ['src', 'src/App.php'], fileReader: $reader))->scan($this->tmpDir);
+
+        self::assertCount(1, $files);
+        self::assertStringEndsWith('read 1', $files[0]->content());
     }
 
     public function test_default_constructor_does_not_respect_gitignore(): void
@@ -453,6 +852,77 @@ final class ProjectFileScannerTest extends TestCase
         self::assertSame([], $files);
     }
 
+    public function test_it_reports_the_files_it_left_out_for_being_over_the_size_limit_in_path_order(): void
+    {
+        mkdir($this->tmpDir.'/src/Zed', 0o777, true);
+        mkdir($this->tmpDir.'/public', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Small.php', '<?php');
+        file_put_contents($this->tmpDir.'/src/Zed/Big.php', str_repeat('a', (2 * 1024) + 1));
+        file_put_contents($this->tmpDir.'/src/Big.php', str_repeat('a', (2 * 1024) + 1));
+        file_put_contents($this->tmpDir.'/public/index.php', str_repeat('a', (2 * 1024) + 1));
+
+        $projectFileScan = (new ProjectFileScanner(new NullLogger(), maxFileSizeKb: 2))->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame(['src/Small.php'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $projectFileScan->files));
+        self::assertSame(
+            [['public/index.php', SkippedFileReason::TooLarge], ['src/Big.php', SkippedFileReason::TooLarge], ['src/Zed/Big.php', SkippedFileReason::TooLarge]],
+            array_map(static fn (SkippedFile $skippedFile): array => [$skippedFile->relativePath, $skippedFile->reason], $projectFileScan->skippedFiles),
+        );
+    }
+
+    public function test_it_names_a_file_left_out_for_its_size_with_the_latin1_characters_of_the_invalid_utf8_bytes_in_its_name(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir."/src/Fo\xFFo.php", str_repeat('a', (2 * 1024) + 1));
+
+        $projectFileScan = (new ProjectFileScanner(new NullLogger(), maxFileSizeKb: 2))->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame(['src/Foÿo.php'], array_map(static fn (SkippedFile $skippedFile): string => $skippedFile->relativePath, $projectFileScan->skippedFiles));
+    }
+
+    public function test_it_reports_a_file_it_could_not_read_as_skipped_and_unreadable(): void
+    {
+        mkdir($this->tmpDir.'/src', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Unreadable.php', '<?php');
+        $reader = static fn (SplFileInfo $splFile): string => throw new RuntimeException('disk read error');
+
+        $projectFileScan = (new ProjectFileScanner(new NullLogger(), fileReader: $reader))->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame([], $projectFileScan->files);
+        self::assertCount(1, $projectFileScan->skippedFiles);
+        self::assertSame('src/Unreadable.php', $projectFileScan->skippedFiles[0]->relativePath);
+        self::assertSame(SkippedFileReason::Unreadable, $projectFileScan->skippedFiles[0]->reason);
+    }
+
+    public function test_a_named_pipe_in_a_scanned_folder_is_reported_unreadable_without_being_opened(): void
+    {
+        mkdir($this->tmpDir.'/src/Controller', 0o777, true);
+        posix_mkfifo($this->tmpDir.'/src/Controller/Fifo.php', 0o600);
+        file_put_contents($this->tmpDir.'/src/Controller/Ok.php', '<?php class Ok {}');
+        $opened = [];
+        $reader = static function (SplFileInfo $splFile) use (&$opened): string {
+            $opened[] = $splFile->getRelativePathname();
+
+            return '<?php class Ok {}';
+        };
+        $warningCollectingLogger = new WarningCollectingLogger();
+
+        $projectFileScan = (new ProjectFileScanner($warningCollectingLogger, ['src'], fileReader: $reader))->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame(['Controller/Ok.php'], $opened);
+        self::assertSame(['src/Controller/Ok.php'], array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $projectFileScan->files));
+        self::assertSame([['src/Controller/Fifo.php', SkippedFileReason::Unreadable]], array_map(static fn (SkippedFile $skippedFile): array => [$skippedFile->relativePath, $skippedFile->reason], $projectFileScan->skippedFiles));
+        self::assertSame([['Skipped a file that is not a regular file', ['path' => $this->tmpDir.'/src/Controller/Fifo.php']]], $warningCollectingLogger->warnings);
+    }
+
+    public function test_it_reports_nothing_skipped_for_a_project_without_included_paths(): void
+    {
+        $projectFileScan = $this->projectFileScanner->scanReportingSkippedFiles($this->tmpDir);
+
+        self::assertSame([], $projectFileScan->files);
+        self::assertSame([], $projectFileScan->skippedFiles);
+    }
+
     public function test_it_keeps_explicit_file_at_exact_max_size_boundary(): void
     {
         mkdir($this->tmpDir.'/public', 0o777, true);
@@ -496,6 +966,18 @@ final class ProjectFileScannerTest extends TestCase
         foreach ($files as $file) {
             self::assertStringNotContainsString($stripeShape, $file->content());
         }
+    }
+
+    public function test_a_scrubber_that_reads_no_file_name_scrubs_the_content_of_every_file(): void
+    {
+        mkdir($this->tmpDir.'/config/secrets/prod', 0o777, true);
+        file_put_contents($this->tmpDir.'/config/secrets/prod/prod.decrypt.private.php', "<?php return 'k';");
+        $secretScrubber = self::createStub(SecretScrubberInterface::class);
+        $secretScrubber->method('scrub')->willReturnCallback(static fn (string $content): string => strtoupper($content));
+
+        $files = (new ProjectFileScanner(new NullLogger(), secretScrubber: $secretScrubber))->scan($this->tmpDir);
+
+        self::assertSame(["<?PHP RETURN 'K';"], array_map(static fn (ProjectFile $projectFile): string => $projectFile->content(), $files));
     }
 
     public function test_null_scrubber_leaves_file_content_unmodified(): void
@@ -555,6 +1037,34 @@ final class ProjectFileScannerTest extends TestCase
         self::assertIsString($error);
         self::assertStringEndsWith('Unreadable.php', $path);
         self::assertSame('disk read error', $error);
+    }
+
+    public function test_it_skips_an_unreadable_directory_and_logs_it_instead_of_aborting_the_scan(): void
+    {
+        mkdir($this->tmpDir.'/src/Locked', 0o777, true);
+        mkdir($this->tmpDir.'/src/Zeta', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Readable.php', '<?php class Readable {}');
+        file_put_contents($this->tmpDir.'/src/Locked/Hidden.php', '<?php class Hidden {}');
+        file_put_contents($this->tmpDir.'/src/Zeta/Later.php', '<?php class Later {}');
+        $warningCollectingLogger = new WarningCollectingLogger();
+        $projectFileScanner = new ProjectFileScanner($warningCollectingLogger, ['src']);
+        $projectFileScanner->scan($this->tmpDir);
+        chmod($this->tmpDir.'/src/Locked', 0o000);
+
+        try {
+            $files = $this->asUnprivilegedUser(fn (): array => $projectFileScanner->scan($this->tmpDir));
+        } finally {
+            chmod($this->tmpDir.'/src/Locked', 0o755);
+        }
+
+        $paths = array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $files);
+        self::assertSame(['src/Readable.php', 'src/Zeta/Later.php'], $paths);
+        self::assertCount(1, $warningCollectingLogger->warnings);
+        [$message, $context] = $warningCollectingLogger->warnings[0];
+        self::assertSame('Skipped unreadable directory', $message);
+        self::assertSame($this->tmpDir.'/src/Locked', $context['path']);
+        self::assertIsString($context['error']);
+        self::assertStringContainsString('Permission denied', $context['error']);
     }
 
     public function test_it_skips_a_symlinked_file_and_logs_a_warning(): void
@@ -628,7 +1138,7 @@ final class ProjectFileScannerTest extends TestCase
             self::assertIsString($path);
             self::assertStringEndsWith('/src', $path);
         } finally {
-            $this->rmdirRecursive($outsideDir);
+            $this->filesystem->remove($outsideDir);
         }
     }
 
@@ -668,13 +1178,14 @@ final class ProjectFileScannerTest extends TestCase
             self::assertIsString($path);
             self::assertStringEndsWith($traversalPath, $path);
         } finally {
-            $this->rmdirRecursive($outsideDir);
+            $this->filesystem->remove($outsideDir);
         }
     }
 
     #[Override]
     protected function setUp(): void
     {
+        $this->filesystem = new Filesystem();
         $this->tmpDir = sys_get_temp_dir().'/scanner_int_'.uniqid('', true);
         mkdir($this->tmpDir, 0o777, true);
         $this->projectFileScanner = new ProjectFileScanner(new NullLogger());
@@ -683,34 +1194,7 @@ final class ProjectFileScannerTest extends TestCase
     #[Override]
     protected function tearDown(): void
     {
-        $this->rmdirRecursive($this->tmpDir);
-    }
-
-    private function rmdirRecursive(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-
-        $items = scandir($dir);
-        if (false === $items) {
-            return;
-        }
-
-        foreach ($items as $item) {
-            if ('.' === $item) {
-                continue;
-            }
-
-            if ('..' === $item) {
-                continue;
-            }
-
-            $path = $dir.'/'.$item;
-            is_dir($path) ? $this->rmdirRecursive($path) : unlink($path);
-        }
-
-        rmdir($dir);
+        $this->filesystem->remove($this->tmpDir);
     }
 
     public function test_an_included_path_reached_through_a_symlinked_directory_is_skipped_and_logged(): void
@@ -743,7 +1227,7 @@ final class ProjectFileScannerTest extends TestCase
 
             self::assertSame(['Skipped included path outside the project root', 'Skipped included path outside the project root'], array_column($warnings, 0));
         } finally {
-            $this->rmdirRecursive($outsideDir);
+            $this->filesystem->remove($outsideDir);
         }
     }
 
@@ -761,12 +1245,44 @@ final class ProjectFileScannerTest extends TestCase
         try {
             self::assertSame([], $projectFileScanner->scan($this->tmpDir));
         } finally {
-            $this->rmdirRecursive($outsideDir);
+            $this->filesystem->remove($outsideDir);
         }
     }
 
     public function test_it_scans_nothing_when_the_project_path_does_not_exist(): void
     {
         self::assertSame([], $this->projectFileScanner->scan($this->tmpDir.'/missing-'.uniqid('', true)));
+    }
+
+    private function writeDotFilesProject(): void
+    {
+        $this->filesystem->dumpFile($this->tmpDir.'/src/Controller/AdminController.php', "<?php\nrequire __DIR__.'/.helpers.php';\n");
+        $this->filesystem->dumpFile($this->tmpDir.'/src/Controller/.helpers.php', "<?php\nfunction q(\$q) { return \$GLOBALS['db']->query(\$q); }\n");
+        $this->filesystem->dumpFile($this->tmpDir.'/src/Controller/Admin/.legacy/OldController.php', '<?php class OldController {}');
+        $this->filesystem->dumpFile($this->tmpDir.'/templates/admin/index.html.twig', "{% include 'admin/.row.html.twig' %}\n");
+        $this->filesystem->dumpFile($this->tmpDir.'/templates/admin/.row.html.twig', "{{ x|raw }}\n");
+        foreach (['.git', '.svn', '.hg', '.bzr', 'CVS', '_darcs'] as $versionControlDirectory) {
+            $this->filesystem->dumpFile(\sprintf('%s/src/Integration/%s/Client.php', $this->tmpDir, $versionControlDirectory), '<?php class Client {}');
+        }
+    }
+
+    /**
+     * @param Closure(): list<ProjectFile> $action
+     *
+     * @return list<ProjectFile>
+     */
+    private function asUnprivilegedUser(Closure $action): array
+    {
+        if (0 !== posix_geteuid()) {
+            return $action();
+        }
+
+        self::assertTrue(posix_seteuid(self::UNPRIVILEGED_USER_ID));
+
+        try {
+            return $action();
+        } finally {
+            posix_seteuid(0);
+        }
     }
 }

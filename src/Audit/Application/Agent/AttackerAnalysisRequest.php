@@ -27,6 +27,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
  */
 final readonly class AttackerAnalysisRequest
 {
+    private KnownFiles $knownFiles;
+
     /**
      * @param list<ProjectFile>   $files
      * @param list<Vulnerability> $previousFindings  findings already validated by the
@@ -42,6 +44,11 @@ final readonly class AttackerAnalysisRequest
      *                                               refines or discards each one — unlike
      *                                               previousFindings they are unvalidated and
      *                                               must be re-reported when confirmed
+     * @param ?list<ProjectFile>  $toolFiles         the files the investigation tools may open when they
+     *                                               are not the files to analyze — every scanned file on a
+     *                                               run narrowed by `--since`, `--path` or the escalation
+     *                                               deep pass, with `audit.tools_scope: scanned`; null
+     *                                               means `files`, those of the deep pass included
      */
     public function __construct(
         public array $files,
@@ -50,7 +57,30 @@ final readonly class AttackerAnalysisRequest
         public array $previousFindings = [],
         public array $rejectedFindings = [],
         public array $candidateFindings = [],
-    ) {}
+        public ?array $toolFiles = null,
+    ) {
+        $this->knownFiles = new KnownFiles($this->filesForTools());
+    }
+
+    /**
+     * @return list<ProjectFile>
+     */
+    public function filesForTools(): array
+    {
+        return $this->toolFiles ?? $this->files;
+    }
+
+    /**
+     * The files a finding reported on `$chunk` is named by: the chunk's own,
+     * then every file the investigation tools may open, so a finding another
+     * chunk's file was reported under is named by that file too.
+     *
+     * @param list<ProjectFile> $chunk
+     */
+    public function knownFilesFor(array $chunk): KnownFiles
+    {
+        return new KnownFiles($chunk, $this->knownFiles);
+    }
 
     /**
      * @param list<ProjectFile>   $files
@@ -58,6 +88,6 @@ final readonly class AttackerAnalysisRequest
      */
     public function withFilesAndCandidateFindings(array $files, array $candidateFindings): self
     {
-        return new self($files, $this->symfonyMapping, $this->bypassCache, $this->previousFindings, $this->rejectedFindings, $candidateFindings);
+        return new self($files, $this->symfonyMapping, $this->bypassCache, $this->previousFindings, $this->rejectedFindings, $candidateFindings, $this->toolFiles);
     }
 }

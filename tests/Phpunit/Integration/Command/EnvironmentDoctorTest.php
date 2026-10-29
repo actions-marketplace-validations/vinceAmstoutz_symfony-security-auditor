@@ -27,6 +27,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\XdgConfigPa
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Pricing\ModelsDevPricingProvider;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditPreflightInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\ComposerAvailabilityCheckerInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\ComposerProbe;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\DoctorCheckResult;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\DoctorCheckStatus;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\EnvironmentDoctor;
@@ -95,11 +96,11 @@ final class EnvironmentDoctorTest extends TestCase
         $this->writeConfig("platform:\n    openai:\n        api_key: 'sk-test'\n");
         $this->installBridge();
         $refreshed = $this->cacheHome.'/symfony-security-auditor/models-dev.json';
-        (new Filesystem())->dumpFile($refreshed, '{"anthropic":{}}');
+        (new Filesystem())->dumpFile($refreshed, '{"anthropic":{"models":{"claude-opus-5":{"cost":{"input":5,"output":25}}}}}');
 
         $xdgConfigPathResolver = $this->resolver();
         $composerAvailabilityChecker = self::createStub(ComposerAvailabilityCheckerInterface::class);
-        $composerAvailabilityChecker->method('isAvailable')->willReturn(true);
+        $composerAvailabilityChecker->method('probe')->willReturn(ComposerProbe::available());
 
         $environmentDoctor = new EnvironmentDoctor(
             new StandaloneConfigLoader($xdgConfigPathResolver, new StandalonePlatformConfigResolver([])),
@@ -120,6 +121,32 @@ final class EnvironmentDoctorTest extends TestCase
         );
     }
 
+    public function test_it_names_the_bundled_catalog_when_the_refreshed_one_is_unusable(): void
+    {
+        $this->writeConfig("platform:\n    openai:\n        api_key: 'sk-test'\n");
+        $this->installBridge();
+        $refreshed = $this->cacheHome.'/symfony-security-auditor/models-dev.json';
+        (new Filesystem())->dumpFile($refreshed, '{"anthropic":{}}');
+
+        $xdgConfigPathResolver = $this->resolver();
+        $composerAvailabilityChecker = self::createStub(ComposerAvailabilityCheckerInterface::class);
+        $composerAvailabilityChecker->method('probe')->willReturn(ComposerProbe::available());
+
+        $environmentDoctor = new EnvironmentDoctor(
+            new StandaloneConfigLoader($xdgConfigPathResolver, new StandalonePlatformConfigResolver([])),
+            $xdgConfigPathResolver,
+            $composerAvailabilityChecker,
+            self::createStub(AuditPreflightInterface::class),
+            new ModelsDevPricingProvider(new NullLogger(), $refreshed),
+        );
+
+        $results = $environmentDoctor->diagnose();
+
+        self::assertSame(DoctorCheckStatus::Ok, $results[3]->status);
+        self::assertStringNotContainsString($refreshed, $results[3]->detail, 'the run prices from the bundled catalog, so doctor must not name an override it ignores');
+        self::assertMatchesRegularExpression('/^symfony\/models-dev v?[0-9]+(\.[0-9]+)* \(.+models-dev\.json\)\.$/', $results[3]->detail);
+    }
+
     public function test_it_warns_when_the_pricing_catalog_package_is_not_installed(): void
     {
         $this->writeConfig("platform:\n    openai:\n        api_key: 'sk-test'\nmodel: 'gpt-4'\n");
@@ -127,7 +154,7 @@ final class EnvironmentDoctorTest extends TestCase
 
         $xdgConfigPathResolver = $this->resolver();
         $composerAvailabilityChecker = self::createStub(ComposerAvailabilityCheckerInterface::class);
-        $composerAvailabilityChecker->method('isAvailable')->willReturn(true);
+        $composerAvailabilityChecker->method('probe')->willReturn(ComposerProbe::available());
         $auditPreflight = self::createStub(AuditPreflightInterface::class);
 
         $environmentDoctor = new EnvironmentDoctor(
@@ -393,9 +420,28 @@ final class EnvironmentDoctorTest extends TestCase
         $results = $this->doctorWith($this->resolver(), [], false)->diagnose();
 
         self::assertEquals(
-            new DoctorCheckResult('Composer', DoctorCheckStatus::Warning, 'Not found — needed only to run "init" or switch providers, not to audit.'),
+            new DoctorCheckResult('Composer', DoctorCheckStatus::Warning, 'Not usable (php: not found) — needed only to run "init" or switch providers, not to audit. "init" lists how to install it.'),
             $results[2],
         );
+    }
+
+    public function test_it_prints_what_composer_reported_as_written(): void
+    {
+        $this->writeConfig("platform:\n    openai:\n        api_key: 'sk-test'\n");
+        $this->installBridge();
+        $composerAvailabilityChecker = self::createStub(ComposerAvailabilityCheckerInterface::class);
+        $composerAvailabilityChecker->method('probe')->willReturn(ComposerProbe::unavailable('<error>boom</error>'));
+        $xdgConfigPathResolver = $this->resolver();
+
+        $results = (new EnvironmentDoctor(
+            new StandaloneConfigLoader($xdgConfigPathResolver, new StandalonePlatformConfigResolver([])),
+            $xdgConfigPathResolver,
+            $composerAvailabilityChecker,
+            self::createStub(AuditPreflightInterface::class),
+            new ModelsDevPricingProvider(new NullLogger()),
+        ))->diagnose();
+
+        self::assertSame('Not usable (\\<error\\>boom\\</error\\>) — needed only to run "init" or switch providers, not to audit. "init" lists how to install it.', $results[2]->detail);
     }
 
     /**
@@ -404,7 +450,7 @@ final class EnvironmentDoctorTest extends TestCase
     private function doctorWith(XdgConfigPathResolver $xdgConfigPathResolver, array $environment, bool $composerAvailable, ?string $preflightFailure = null, ?string $projectConfigFile = null): EnvironmentDoctor
     {
         $composerAvailabilityChecker = self::createStub(ComposerAvailabilityCheckerInterface::class);
-        $composerAvailabilityChecker->method('isAvailable')->willReturn($composerAvailable);
+        $composerAvailabilityChecker->method('probe')->willReturn($composerAvailable ? ComposerProbe::available() : ComposerProbe::unavailable('php: not found'));
 
         $auditPreflight = self::createStub(AuditPreflightInterface::class);
         $auditPreflight->method('failureReason')->willReturn($preflightFailure);
@@ -444,7 +490,7 @@ final class EnvironmentDoctorTest extends TestCase
     {
         $xdgConfigPathResolver = $this->resolver();
         $composerAvailabilityChecker = self::createStub(ComposerAvailabilityCheckerInterface::class);
-        $composerAvailabilityChecker->method('isAvailable')->willReturn(true);
+        $composerAvailabilityChecker->method('probe')->willReturn(ComposerProbe::available());
 
         return new EnvironmentDoctor(
             new StandaloneConfigLoader($xdgConfigPathResolver, new StandalonePlatformConfigResolver([])),

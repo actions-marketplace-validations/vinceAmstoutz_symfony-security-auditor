@@ -31,6 +31,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\TerminalTex
 /** @internal not part of the BC promise — see docs/versioning.md */
 final readonly class AuditPresenter implements AuditPresenterInterface
 {
+    private const string NO_FILE_FOUND_VERDICT = 'The scan found no file to audit, so the run has no verdict.';
+
     public function __construct(
         private PricingProviderInterface $pricingProvider,
         private ConsoleBannerInterface $consoleBanner = new ConsoleBanner(),
@@ -50,6 +52,14 @@ final readonly class AuditPresenter implements AuditPresenterInterface
     }
 
     #[Override]
+    public function enclosingProject(SymfonyStyle $symfonyStyle, string $folder, string $projectPath, array $scanPaths): void
+    {
+        $paths = implode('', array_map(fn (string $scanPath): string => \sprintf(' --path %s', $this->sanitizeForWarning($scanPath)), $scanPaths));
+
+        $symfonyStyle->note(\sprintf('Auditing "%s"%s: "%s" is not a project root, it holds no composer.json.', $this->sanitizeForWarning($projectPath), $paths, $this->sanitizeForWarning($folder)));
+    }
+
+    #[Override]
     public function preflightWarnings(SymfonyStyle $symfonyStyle, bool $secretScrubbingEnabled, array $configNotices = []): void
     {
         foreach ($configNotices as $configNotice) {
@@ -61,6 +71,18 @@ final readonly class AuditPresenter implements AuditPresenterInterface
         }
 
         $symfonyStyle->getErrorStyle()->warning('Secret scrubbing is disabled. File contents will be sent verbatim to the configured LLM provider. If that provider runs in the cloud, credentials in committed configs or .env.dist files may be exposed. Re-enable scan.secret_scrubbing.enabled (the default) or confirm you are using a local provider.');
+    }
+
+    #[Override]
+    public function minScoreBelowRange(SymfonyStyle $symfonyStyle, int $minScore): void
+    {
+        $symfonyStyle->getErrorStyle()->warning(\sprintf('--min-score %d is below 0, the lowest normalized score, so it never fails a run. Use a value from 0 to 100.', $minScore));
+    }
+
+    #[Override]
+    public function minScoreAboveRange(SymfonyStyle $symfonyStyle, int $minScore): void
+    {
+        $symfonyStyle->getErrorStyle()->warning(\sprintf('--min-score %d is above 100, the highest normalized score, so it fails every run. Use a value from 0 to 100.', $minScore));
     }
 
     #[Override]
@@ -196,14 +218,26 @@ final readonly class AuditPresenter implements AuditPresenterInterface
     }
 
     #[Override]
-    public function scannedFiles(SymfonyStyle $symfonyStyle, array $projectFiles): void
+    public function noFilesMatched(SymfonyStyle $symfonyStyle, string $projectPath, array $scanPaths): void
     {
-        if ([] === $projectFiles) {
-            $symfonyStyle->warning('No files matched. Check your included_paths configuration and any --path filters.');
+        $project = $this->sanitizeForWarning($projectPath);
+
+        if ([] === $scanPaths) {
+            $symfonyStyle->warning(\sprintf('No files matched under "%s". Check your included_paths configuration.', $project));
 
             return;
         }
 
+        $symfonyStyle->warning(\sprintf(
+            'No files matched under "%s" for --path %s. Check that each --path exists in the project, relative to its root, and holds PHP, Twig, YAML or XML files.',
+            $project,
+            implode(', ', array_map($this->sanitizeForWarning(...), $scanPaths)),
+        ));
+    }
+
+    #[Override]
+    public function scannedFiles(SymfonyStyle $symfonyStyle, array $projectFiles): void
+    {
         $symfonyStyle->section(\sprintf('Scanned files (%d)', \count($projectFiles)));
 
         foreach ($this->relativePathsByType($projectFiles) as $type => $relativePaths) {
@@ -256,6 +290,16 @@ final readonly class AuditPresenter implements AuditPresenterInterface
      * fake listing entry or spoof the terminal — and a legacy `##[command]`
      * in it is defused for a CI runner's log.
      */
+    /**
+     * `SymfonyStyle::warning()` escapes console markup itself, so the text is
+     * only collapsed to one line, stripped of control characters and defused
+     * for a CI runner's log.
+     */
+    private function sanitizeForWarning(string $text): string
+    {
+        return WorkflowCommandText::inLine(TerminalTextSanitizer::collapseToSingleLine(mb_scrub($text, 'UTF-8')));
+    }
+
     private function sanitizePathForListing(string $relativePath): string
     {
         return OutputFormatter::escape(WorkflowCommandText::inLine(TerminalTextSanitizer::collapseToSingleLine(mb_scrub($relativePath, 'UTF-8'))));
@@ -314,9 +358,9 @@ final readonly class AuditPresenter implements AuditPresenterInterface
     }
 
     #[Override]
-    public function result(SymfonyStyle $symfonyStyle, AuditReport $auditReport, int $exitCode): void
+    public function result(SymfonyStyle $symfonyStyle, AuditReport $auditReport, int $exitCode, string $failOnIncompleteSetting): void
     {
-        if (Command::FAILURE === $exitCode && !$auditReport->hasNoVerdict()) {
+        if (Command::FAILURE === $exitCode && !$auditReport->isWithoutVerdict()) {
             $totalVulnerabilities = $auditReport->totalVulnerabilities();
             $symfonyStyle->caution(\sprintf(
                 'Audit failed a configured gate. Risk: %s. Score: %d/100. %d %s found.',
@@ -325,13 +369,13 @@ final readonly class AuditPresenter implements AuditPresenterInterface
                 $totalVulnerabilities,
                 1 === $totalVulnerabilities ? 'vulnerability' : 'vulnerabilities',
             ));
-            $this->incompleteRunNotice($symfonyStyle, $auditReport, $exitCode);
+            $this->incompleteRunNotice($symfonyStyle, $auditReport, $exitCode, $failOnIncompleteSetting);
 
             return;
         }
 
-        if (!$auditReport->isComplete()) {
-            $this->incompleteRunNotice($symfonyStyle, $auditReport, $exitCode);
+        if ($this->statesNoCleanResult($auditReport)) {
+            $this->incompleteRunNotice($symfonyStyle, $auditReport, $exitCode, $failOnIncompleteSetting);
 
             return;
         }
@@ -344,21 +388,21 @@ final readonly class AuditPresenter implements AuditPresenterInterface
     }
 
     #[Override]
-    public function incompleteRunNotice(SymfonyStyle $symfonyStyle, AuditReport $auditReport, int $exitCode): void
+    public function incompleteRunNotice(SymfonyStyle $symfonyStyle, AuditReport $auditReport, int $exitCode, string $failOnIncompleteSetting): void
     {
-        if ($auditReport->isComplete()) {
+        if (!$this->statesNoCleanResult($auditReport)) {
             return;
         }
 
         $summary = $this->incompleteSummary($auditReport);
 
         if (ExitCode::Incomplete->value === $exitCode) {
-            $symfonyStyle->error(\sprintf('%s The run fails because --fail-on-incomplete is set.', $summary));
+            $symfonyStyle->error(\sprintf('%s The run fails because %s is set.', $summary, $failOnIncompleteSetting));
 
             return;
         }
 
-        if (ExitCode::Failure->value === $exitCode && $auditReport->hasNoVerdict()) {
+        if (ExitCode::Failure->value === $exitCode && $auditReport->isWithoutVerdict()) {
             $symfonyStyle->error(\sprintf('%s A run with no verdict cannot pass, so it fails.', $summary));
 
             return;
@@ -367,12 +411,22 @@ final readonly class AuditPresenter implements AuditPresenterInterface
         $symfonyStyle->warning(ExitCode::Success->value === $exitCode ? \sprintf('%s Pass --fail-on-incomplete to fail the run when this happens.', $summary) : $summary);
     }
 
+    private function statesNoCleanResult(AuditReport $auditReport): bool
+    {
+        return !$auditReport->isComplete() || $auditReport->isWithoutVerdict();
+    }
+
     /**
-     * A run with no verdict — no file analyzed, nothing found — states no
-     * risk level: a SAFE there would vouch for code nobody read.
+     * A run with no verdict — no file found, or none analyzed and nothing
+     * found — states no risk level: a SAFE there would vouch for code nobody
+     * read.
      */
     private function incompleteSummary(AuditReport $auditReport): string
     {
+        if (0 === $auditReport->filesDiscovered()) {
+            return self::NO_FILE_FOUND_VERDICT;
+        }
+
         if ($auditReport->hasNoVerdict()) {
             return \sprintf(
                 'Audit incomplete: none of the %d file(s) in scope could be analyzed, so the run has no verdict. Vulnerabilities: %d.',
@@ -395,7 +449,7 @@ final readonly class AuditPresenter implements AuditPresenterInterface
         $symfonyStyle->error(\sprintf(
             '%s The baseline at %s was left as it was: a run with no verdict cannot replace the accepted findings, so it fails.',
             0 === $auditReport->filesDiscovered()
-                ? 'The scan found no file to audit, so the run has no verdict.'
+                ? self::NO_FILE_FOUND_VERDICT
                 : \sprintf('Audit incomplete: none of the %d file(s) in scope could be analyzed, so the run has no verdict.', $auditReport->filesScanned()),
             $path,
         ));

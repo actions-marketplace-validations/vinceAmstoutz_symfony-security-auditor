@@ -14,6 +14,7 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Domain\Model;
 
 use Override;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditContextException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidCodeLocationException;
@@ -25,6 +26,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditContext;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\CodeLocation;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFileInventory;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\SuppressedFinding;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\SymfonyMapping;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityClassification;
@@ -85,6 +87,7 @@ final class AuditContextTest extends TestCase
 
         self::assertTrue($auditContext->consumeBaselineCredit('SSA-AAA'));
         self::assertSame(['SSA-AAA'], $auditContext->consumedBaselineFingerprints());
+        self::assertEquals([new SuppressedFinding('SSA-AAA', 'SSA-AAA')], $auditContext->baselineAcceptedFindings());
     }
 
     /**
@@ -96,6 +99,7 @@ final class AuditContextTest extends TestCase
 
         self::assertFalse($auditContext->consumeBaselineCredit('SSA-AAA'));
         self::assertSame([], $auditContext->consumedBaselineFingerprints());
+        self::assertSame([], $auditContext->baselineAcceptedFindings());
     }
 
     /**
@@ -125,6 +129,71 @@ final class AuditContextTest extends TestCase
         self::assertTrue($auditContext->consumeBaselineCredit('SSA-AAA'));
         self::assertFalse($auditContext->consumeBaselineCredit('SSA-AAA'));
         self::assertSame(['SSA-AAA', 'SSA-AAA'], $auditContext->consumedBaselineFingerprints());
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    #[DataProvider('typesXssWasReportedAsBefore')]
+    public function test_it_consumes_the_credit_an_xss_finding_has_in_a_baseline_under_the_type_it_was_reported_as_before(VulnerabilityType $vulnerabilityType): void
+    {
+        $accepted = $this->makeVulnerability('page', VulnerabilitySeverity::HIGH, $vulnerabilityType)->fingerprint();
+        $auditContext = AuditContext::forProject($this->tmpDir, acceptedFingerprints: [$accepted]);
+        $vulnerability = $this->makeVulnerability('page', VulnerabilitySeverity::HIGH, VulnerabilityType::XSS);
+
+        self::assertTrue($auditContext->consumeBaselineCreditFor($vulnerability));
+        self::assertSame([$accepted], $auditContext->consumedBaselineFingerprints());
+        self::assertEquals([new SuppressedFinding($vulnerability->fingerprint(), $accepted)], $auditContext->baselineAcceptedFindings());
+        self::assertFalse($auditContext->consumeBaselineCreditFor($vulnerability));
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_consumes_the_own_credit_of_an_xss_finding_before_the_one_of_a_former_type(): void
+    {
+        $vulnerability = $this->makeVulnerability('page', VulnerabilitySeverity::HIGH, VulnerabilityType::XSS);
+        $former = $this->makeVulnerability('page', VulnerabilitySeverity::HIGH, VulnerabilityType::TWIG_INJECTION);
+        $auditContext = AuditContext::forProject($this->tmpDir, acceptedFingerprints: [$former->fingerprint(), $vulnerability->fingerprint()]);
+
+        self::assertTrue($auditContext->consumeBaselineCreditFor($vulnerability));
+        self::assertTrue($auditContext->consumeBaselineCreditFor($vulnerability));
+        self::assertFalse($auditContext->consumeBaselineCreditFor($vulnerability));
+        self::assertSame([$vulnerability->fingerprint(), $former->fingerprint()], $auditContext->consumedBaselineFingerprints());
+        self::assertEquals(
+            [new SuppressedFinding($vulnerability->fingerprint(), $vulnerability->fingerprint()), new SuppressedFinding($vulnerability->fingerprint(), $former->fingerprint())],
+            $auditContext->baselineAcceptedFindings(),
+        );
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_consumes_nothing_for_a_finding_of_a_former_type_a_baseline_holds_under_xss(): void
+    {
+        $vulnerability = $this->makeVulnerability('page', VulnerabilitySeverity::HIGH, VulnerabilityType::XSS);
+        $auditContext = AuditContext::forProject($this->tmpDir, acceptedFingerprints: [$vulnerability->fingerprint()]);
+
+        self::assertFalse($auditContext->consumeBaselineCreditFor($this->makeVulnerability('page', VulnerabilitySeverity::HIGH, VulnerabilityType::TWIG_INJECTION)));
+        self::assertSame([], $auditContext->consumedBaselineFingerprints());
+    }
+
+    /**
+     * @return iterable<string, array{VulnerabilityType}>
+     */
+    public static function typesXssWasReportedAsBefore(): iterable
+    {
+        yield 'twig_injection' => [VulnerabilityType::TWIG_INJECTION];
+        yield 'sensitive_data_exposure' => [VulnerabilityType::SENSITIVE_DATA_EXPOSURE];
     }
 
     /**
@@ -250,6 +319,38 @@ final class AuditContextTest extends TestCase
 
     /**
      * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
+     */
+    public function test_files_discovered_falls_back_to_the_count_of_mapping_files_when_never_explicitly_set(): void
+    {
+        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext->setMappingFiles([
+            ProjectFile::create('src/A.php', '/app/src/A.php', '<?php'),
+            ProjectFile::create('src/B.php', '/app/src/B.php', '<?php'),
+        ]);
+
+        self::assertSame(2, $auditContext->filesDiscovered());
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     * @throws InvalidProjectFileException
+     */
+    public function test_files_discovered_can_be_set_independently_of_the_mapping_files(): void
+    {
+        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditContext->setMappingFiles([
+            ProjectFile::create('src/A.php', '/app/src/A.php', '<?php'),
+            ProjectFile::create('src/B.php', '/app/src/B.php', '<?php'),
+        ]);
+
+        $auditContext->setFilesDiscovered(0);
+
+        self::assertSame(0, $auditContext->filesDiscovered());
+    }
+
+    /**
+     * @throws InvalidAuditContextException
      */
     public function test_it_accepts_mapping(): void
     {
@@ -316,6 +417,26 @@ final class AuditContextTest extends TestCase
         self::assertSame('Test cv', $only->title());
         self::assertTrue($only->isReviewerValidated());
         self::assertSame(VulnerabilitySeverity::CRITICAL, $only->severity());
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_removes_only_the_vulnerability_with_the_given_id(): void
+    {
+        $auditContext = AuditContext::forProject($this->tmpDir);
+
+        $vulnerability = $this->makeVulnerability('v1', VulnerabilitySeverity::HIGH);
+        $kept = $this->makeVulnerability('v2', VulnerabilitySeverity::HIGH);
+        $auditContext->addVulnerability($vulnerability);
+        $auditContext->addVulnerability($kept);
+
+        $auditContext->removeVulnerability($vulnerability->id());
+
+        self::assertSame([$kept->id() => $kept], $auditContext->vulnerabilities());
     }
 
     /**
@@ -583,10 +704,10 @@ final class AuditContextTest extends TestCase
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidVulnerabilityNarrativeException
      */
-    private function makeVulnerability(string $discriminator, VulnerabilitySeverity $vulnerabilitySeverity): Vulnerability
+    private function makeVulnerability(string $discriminator, VulnerabilitySeverity $vulnerabilitySeverity, VulnerabilityType $vulnerabilityType = VulnerabilityType::SQL_INJECTION): Vulnerability
     {
         return Vulnerability::of(
-            new VulnerabilityClassification(VulnerabilityType::SQL_INJECTION, $vulnerabilitySeverity, 'Test '.$discriminator, 0.9),
+            new VulnerabilityClassification($vulnerabilityType, $vulnerabilitySeverity, 'Test '.$discriminator, 0.9),
             new CodeLocation('src/'.$discriminator.'.php', 1, 5),
             new VulnerabilityNarrative('Test', 'Inject SQL', "' OR 1=1--", 'Use prepared statements'),
             '$query',

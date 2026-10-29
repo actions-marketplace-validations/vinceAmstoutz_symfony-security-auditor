@@ -13,6 +13,7 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate;
 
+use Closure;
 use JsonException;
 use Override;
 use Symfony\Component\Filesystem\Exception\IOException;
@@ -28,13 +29,24 @@ use function Symfony\Component\String\u;
  * stripped — `version_compare()` ranks a raw `v1.2.3` *below* every plain
  * `1.2.3`, which would silently disable update detection if a release were
  * ever tagged with the prefix — while asset URLs keep the tag verbatim, since
- * that is the path the release publishes under.
+ * that is the path the release publishes under. A tag outside `ReleaseTag`'s
+ * grammar is refused before any URL is built from it.
+ *
+ * The snapshot channel reads the version from the title of the `snapshot`
+ * pre-release, which the Snapshot workflow sets once every asset is attached,
+ * and installs whenever it differs from the running one. A snapshot binary on
+ * the stable channel likewise takes the latest release, older or not, so
+ * leaving the snapshot channel takes a plain `self-update`.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
 final readonly class SelfUpdater implements SelfUpdaterInterface
 {
     private const string LATEST_RELEASE_API_URL = 'https://api.github.com/repos/vinceAmstoutz/symfony-security-auditor/releases/latest';
+
+    private const string SNAPSHOT_TAG = 'snapshot';
+
+    private const string SNAPSHOT_RELEASE_API_URL = 'https://api.github.com/repos/vinceAmstoutz/symfony-security-auditor/releases/tags/snapshot';
 
     public function __construct(
         private ReleaseClientInterface $releaseClient,
@@ -50,14 +62,16 @@ final readonly class SelfUpdater implements SelfUpdaterInterface
      * @throws UnsupportedSelfUpdatePlatformException
      */
     #[Override]
-    public function run(string $currentVersion, bool $checkOnly): SelfUpdateResult
+    public function run(string $currentVersion, bool $checkOnly, ReleaseChannel $releaseChannel = ReleaseChannel::Stable, ?Closure $onDownloadProgress = null): SelfUpdateResult
     {
         $this->gitHubBinaryAssetResolver->assertSupportedPlatform();
 
-        $latestTag = $this->latestTag();
-        $latestVersion = u($latestTag)->trimPrefix(['v', 'V'])->toString();
+        [$latestTag, $latestVersion] = match ($releaseChannel) {
+            ReleaseChannel::Stable => $this->latestRelease(),
+            ReleaseChannel::Snapshot => [self::SNAPSHOT_TAG, $this->snapshotVersion()],
+        };
 
-        if (!version_compare($latestVersion, $currentVersion, '>')) {
+        if (!$this->replacesRunningVersion($releaseChannel, $latestVersion, $currentVersion)) {
             return new SelfUpdateResult(
                 SelfUpdateStatus::AlreadyUpToDate,
                 $currentVersion,
@@ -70,7 +84,7 @@ final readonly class SelfUpdater implements SelfUpdaterInterface
             return new SelfUpdateResult(SelfUpdateStatus::UpdateAvailable, $currentVersion, $latestVersion);
         }
 
-        $this->replaceBinary($this->gitHubBinaryAssetResolver->resolve($latestTag));
+        $this->replaceBinary($this->gitHubBinaryAssetResolver->resolve($latestTag), $onDownloadProgress);
 
         return new SelfUpdateResult(
             SelfUpdateStatus::Updated,
@@ -90,36 +104,75 @@ final readonly class SelfUpdater implements SelfUpdaterInterface
         return $checkOnly ? PricingCatalogRefreshOutcome::Skipped : $this->pricingCatalogRefresher->refresh();
     }
 
-    /**
-     * @throws SelfUpdateFailedException
-     */
-    private function latestTag(): string
+    private function replacesRunningVersion(ReleaseChannel $releaseChannel, string $latestVersion, string $currentVersion): bool
     {
-        $payload = $this->releaseClient->get(self::LATEST_RELEASE_API_URL);
-
-        try {
-            $decoded = json_decode($payload, true, flags: \JSON_THROW_ON_ERROR);
-        } catch (JsonException $jsonException) {
-            throw SelfUpdateFailedException::forUnresolvableLatestVersion(self::LATEST_RELEASE_API_URL, $jsonException);
+        if (ReleaseChannel::Snapshot === $releaseChannel || SnapshotVersion::isValid($currentVersion)) {
+            return $latestVersion !== $currentVersion;
         }
 
-        if (!\is_array($decoded) || !\array_key_exists('tag_name', $decoded) || !\is_string($decoded['tag_name']) || '' === $decoded['tag_name']) {
+        return version_compare($latestVersion, $currentVersion, '>');
+    }
+
+    /**
+     * @return array{string, string} the release tag, then the version it carries
+     *
+     * @throws SelfUpdateFailedException
+     */
+    private function latestRelease(): array
+    {
+        $latestTag = $this->releaseField(self::LATEST_RELEASE_API_URL, 'tag_name');
+        if (!ReleaseTag::isValid($latestTag)) {
             throw SelfUpdateFailedException::forUnresolvableLatestVersion(self::LATEST_RELEASE_API_URL);
         }
 
-        return $decoded['tag_name'];
+        return [$latestTag, u($latestTag)->trimPrefix(['v', 'V'])->toString()];
     }
 
     /**
      * @throws SelfUpdateFailedException
      */
-    private function replaceBinary(GitHubBinaryAsset $gitHubBinaryAsset): void
+    private function snapshotVersion(): string
+    {
+        $snapshotVersion = $this->releaseField(self::SNAPSHOT_RELEASE_API_URL, 'name');
+        if (!SnapshotVersion::isValid($snapshotVersion)) {
+            throw SelfUpdateFailedException::forUnresolvableLatestVersion(self::SNAPSHOT_RELEASE_API_URL);
+        }
+
+        return $snapshotVersion;
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     */
+    private function releaseField(string $url, string $field): string
+    {
+        $payload = $this->releaseClient->get($url);
+
+        try {
+            $decoded = json_decode($payload, true, flags: \JSON_THROW_ON_ERROR);
+        } catch (JsonException $jsonException) {
+            throw SelfUpdateFailedException::forUnresolvableLatestVersion($url, $jsonException);
+        }
+
+        if (!\is_array($decoded) || !\array_key_exists($field, $decoded) || !\is_string($decoded[$field])) {
+            throw SelfUpdateFailedException::forUnresolvableLatestVersion($url);
+        }
+
+        return $decoded[$field];
+    }
+
+    /**
+     * @param (Closure(int): void)|null $onDownloadProgress
+     *
+     * @throws SelfUpdateFailedException
+     */
+    private function replaceBinary(GitHubBinaryAsset $gitHubBinaryAsset, ?Closure $onDownloadProgress): void
     {
         $binaryPath = $this->runningBinaryLocator->path();
         $downloadPath = $this->stageDownloadNextTo($binaryPath, $gitHubBinaryAsset);
 
         try {
-            $this->releaseClient->download($gitHubBinaryAsset->downloadUrl, $downloadPath);
+            $this->releaseClient->download($gitHubBinaryAsset->downloadUrl, $downloadPath, $onDownloadProgress);
             $this->assertChecksumMatches($gitHubBinaryAsset, $downloadPath);
             $this->scheduleInstall($downloadPath, $binaryPath);
         } catch (Throwable $throwable) {

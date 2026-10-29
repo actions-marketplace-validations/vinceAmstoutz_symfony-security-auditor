@@ -14,14 +14,17 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Command;
 
 use Override;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Filesystem\Filesystem;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\InsufficientTrendReportsException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\MalformedReportFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\ReportFileNotReadableException;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\LoadedReport;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\ReportDiffer;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\ReportFindingsLoader;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\ReportFindingsLoaderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\ReportTrendAnalyzer;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\TrendPoint;
 
@@ -139,6 +142,45 @@ final class ReportTrendAnalyzerTest extends TestCase
      * @throws ReportFileNotReadableException
      * @throws MalformedReportFileException
      */
+    #[DataProvider('seriesLengths')]
+    public function test_it_reads_each_report_once_however_long_the_series_is(int $reportCount): void
+    {
+        $paths = [];
+        for ($index = 1; $index <= $reportCount; ++$index) {
+            $paths[] = $this->writeReport(\sprintf('report-%d.json', $index), []);
+        }
+
+        $loads = [];
+        $reportFindingsLoader = new ReportFindingsLoader($this->filesystem);
+        $countingLoader = self::createStub(ReportFindingsLoaderInterface::class);
+        $countingLoader->method('load')->willReturnCallback(
+            static function (string $path) use (&$loads, $reportFindingsLoader): LoadedReport {
+                $loads[$path] = ($loads[$path] ?? 0) + 1;
+
+                return $reportFindingsLoader->load($path);
+            },
+        );
+
+        (new ReportTrendAnalyzer(new ReportDiffer($countingLoader)))->analyze($paths);
+
+        self::assertSame(array_fill_keys($paths, 1), $loads);
+    }
+
+    /**
+     * @return iterable<string, array{int}>
+     */
+    public static function seriesLengths(): iterable
+    {
+        yield 'two reports' => [2];
+        yield 'three reports' => [3];
+        yield 'five reports' => [5];
+    }
+
+    /**
+     * @throws InsufficientTrendReportsException
+     * @throws ReportFileNotReadableException
+     * @throws MalformedReportFileException
+     */
     public function test_fewer_than_two_reports_are_rejected(): void
     {
         $this->expectException(InsufficientTrendReportsException::class);
@@ -208,6 +250,30 @@ final class ReportTrendAnalyzerTest extends TestCase
         $reportTrend = $this->reportTrendAnalyzer->analyze([$first, $second]);
 
         self::assertSame(['report' => $second, 'total' => 0, 'new' => 0, 'fixed' => 1, 'unverified' => 0], $reportTrend->points[1]->toArray());
+    }
+
+    /**
+     * @throws InsufficientTrendReportsException
+     * @throws ReportFileNotReadableException
+     * @throws MalformedReportFileException
+     */
+    public function test_a_finding_the_later_report_lists_as_suppressed_counts_as_unverified_not_fixed(): void
+    {
+        $accepted = $this->vulnerability('SQL Injection', 'src/Repository/B.php');
+        $first = $this->writeReport('first.json', [$accepted]);
+        $second = $this->tmpDir.'/second.json';
+        $this->filesystem->dumpFile($second, json_encode([
+            'complete' => true,
+            'vulnerabilities' => [],
+            'suppressed_fingerprints' => [$accepted['fingerprint']],
+            'coverage' => [['stage' => 'attacker', 'file' => 'src/Repository/B.php', 'status' => 'analyzed']],
+        ], \JSON_THROW_ON_ERROR));
+
+        $reportTrend = $this->reportTrendAnalyzer->analyze([$first, $second]);
+
+        self::assertSame(['report' => $first, 'total' => 1, 'new' => null, 'fixed' => null, 'unverified' => null], $reportTrend->points[0]->toArray());
+        self::assertSame(['report' => $second, 'total' => 0, 'new' => 0, 'fixed' => 0, 'unverified' => 1], $reportTrend->points[1]->toArray());
+        self::assertStringContainsString('1 unverified rather than fixed', $reportTrend->summary());
     }
 
     /**

@@ -100,6 +100,7 @@ final readonly class AttackerAgent implements AttackerAgentInterface
         );
         $attackerChunkCache = new AttackerChunkCache($attackerScanCollaborators->attackerCache, $attackerLlmCollaborators->vulnerabilityFactory, $logger);
 
+        $recordingToolClients = RecordingToolClients::forAttacker($logger);
         $this->sequentialChunkAnalyzer = new SequentialChunkAnalyzer(
             $attackerLlmCollaborators->llmClient,
             $chunkContextFactory,
@@ -110,6 +111,7 @@ final readonly class AttackerAgent implements AttackerAgentInterface
             $attackerAnalysisSettings->maxToolIterations,
             $this->useStructuredCollection,
             $attackerLlmCollaborators->recordVulnerabilityToolFactory,
+            $recordingToolClients,
         );
 
         $this->concurrentChunkAnalyzer = $attackerLlmCollaborators->llmClient instanceof ToolBatchCapableLLMClientInterface && $attackerLlmCollaborators->recordVulnerabilityToolFactory instanceof RecordVulnerabilityToolFactoryInterface
@@ -123,6 +125,7 @@ final readonly class AttackerAgent implements AttackerAgentInterface
                 $attackerAnalysisSettings->maxToolIterations,
                 $attackerLlmCollaborators->recordVulnerabilityToolFactory,
                 $this->maxConcurrent,
+                $recordingToolClients,
             )
             : null;
     }
@@ -157,7 +160,7 @@ final readonly class AttackerAgent implements AttackerAgentInterface
 
         $this->logStartingAnalysis($files, $effectiveFiles, $markers, $useTools, $attackerAnalysisRequest);
 
-        $toolRegistry = $useTools ? $this->toolRegistryFactory->forProjectFiles($files) : null;
+        $toolRegistry = $useTools ? $this->toolRegistryFactory->forProjectFiles($attackerAnalysisRequest->filesForTools()) : null;
 
         $chunks = $this->fileChunker->chunk($effectiveFiles);
 
@@ -200,11 +203,11 @@ final readonly class AttackerAgent implements AttackerAgentInterface
      */
     private function droppedByLeanFilter(array $files, array $effectiveFiles): array
     {
-        $effectivePaths = array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $effectiveFiles);
+        $effectivePaths = array_flip(array_map(static fn (ProjectFile $projectFile): string => $projectFile->relativePath(), $effectiveFiles));
 
         return array_values(array_filter(
             $files,
-            static fn (ProjectFile $projectFile): bool => !\in_array($projectFile->relativePath(), $effectivePaths, true),
+            static fn (ProjectFile $projectFile): bool => !\array_key_exists($projectFile->relativePath(), $effectivePaths),
         ));
     }
 

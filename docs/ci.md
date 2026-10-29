@@ -13,6 +13,7 @@ Run the AI security audit on a nightly schedule and ship the SARIF report to Git
   - [Live security badge in your README](#live-security-badge-in-your-readme)
 - [GitLab CI](#gitlab-ci)
 - [Output Formats in CI](#output-formats-in-ci)
+- [How This Project Guards Compatibility](#how-this-project-guards-compatibility)
 
 > See also: [Configuration](configuration.md) · [FAQ](faq.md) · [Troubleshooting](troubleshooting.md)
 
@@ -34,7 +35,7 @@ Use a powerful model for discovery and a cheap/fast model for validation:
 # config/packages/symfony_security_auditor.yaml
 symfony_security_auditor:
     attacker_model: 'claude-opus-5'   # deep reasoning for vulnerability discovery
-    reviewer_model: 'claude-haiku-4-5-20251001'  # ~20× cheaper for false-positive filtering
+    reviewer_model: 'claude-haiku-5-5'  # ~20× cheaper for false-positive filtering
 ```
 
 Any supported provider works — see [Configuration](configuration.md#split-model-setup) for all options.
@@ -144,12 +145,12 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so `since` can diff against the base branch
 
       - name: Symfony Security Audit
-        uses: vinceamstoutz/symfony-security-auditor@1.21.0
+        uses: vinceamstoutz/symfony-security-auditor@1.22.0
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
@@ -164,16 +165,18 @@ jobs:
           sarif_file: report.sarif
 ```
 
-Inputs (all optional): `mode` (`bundle`/`standalone`, default `bundle`), `project-path` (default `.`), `format` (`console`/`executive`/`json`/`sarif`/`html`/`markdown`/`junit`/`github`/`github-comment`, default `sarif`), `output` (default `report.sarif`), `baseline`, `generate-baseline`, `since`, `fail-on` (`safe`/`low`/`medium`/`high`/`critical`), `min-score` (a normalized-score floor, 0-100 — independent of `fail-on`, either gate failing fails the audit), `fail-on-incomplete` (_since 1.21_; default `false`; `true` makes a run that could not fully analyze every file exit `3`), `comment-pr` (default `false`), `update-badge` (default `false`), `badge-path` (default `.github/security-auditor-badge.json`), `extra-args`, `php-version` (default `8.3`), `setup-php` (default `true`), `install-dependencies` (default `true`, ignored in standalone mode), and `working-directory` (default `.`). Set `setup-php: false` / `install-dependencies: false` when your job has already done those steps. Pass your provider key via `env:` (e.g. `ANTHROPIC_API_KEY`).
+Inputs (all optional): `mode` (`bundle`/`standalone`, default `bundle`), `project-path` (default `.`), `format` (`console`/`executive`/`json`/`sarif`/`html`/`markdown`/`junit`/`github`/`github-comment`, default `sarif`), `output` (default `report.sarif`; left empty, the report is printed to the job log — _since 1.22_ whatever `audit.output` says), `baseline`, `generate-baseline`, `since`, `fail-on` (`safe`/`low`/`medium`/`high`/`critical`), `min-score` (a normalized-score floor, 0-100 — independent of `fail-on`, either gate failing fails the audit; left empty, the project's `audit.min_score` applies _since 1.22_, none by default), `fail-on-incomplete` (_since 1.21_; `true` makes a run that could not fully analyze every file exit `3`, `false` keeps such a run from failing; left empty — the default _since 1.22_, which was `false` before — the project's `audit.fail_on_incomplete` decides, `false` unless it is set), `comment-pr` (default `false`), `update-badge` (default `false`), `badge-path` (default `.github/security-auditor-badge.json`), `extra-args`, `php-version` (default `8.3`), `setup-php` (default `true`), `install-dependencies` (default `true`, ignored in standalone mode), and `working-directory` (default `.`). Set `setup-php: false` / `install-dependencies: false` when your job has already done those steps. Pass your provider key via `env:` (e.g. `ANTHROPIC_API_KEY`).
+
+On a monorepo whose project lives in a sub-folder (`project-path: backend`, or `working-directory: backend`), GitHub resolves the locations of a SARIF upload and of `format: github` annotations from the repository root, while the report's paths are relative to the project, so an alert would point at `src/Controller/UserController.php` instead of `backend/src/Controller/UserController.php`. _Since 1.22_ set `audit.report_path_prefix: backend` in the project's configuration (`config/packages/symfony_security_auditor.yaml`, or `.symfony-security-auditor.yaml` in standalone mode) to put that folder in front of every path in those two formats; it is off by default, and the JSON report and the baseline keep project-relative paths.
 
 Keep `output`, `baseline` and `generate-baseline` inside `working-directory`, or give an absolute path outside the checkout such as `${{ runner.temp }}/report.sarif`. A report or baseline write refuses a symlink on any directory between the working directory and the file, and on any directory between the audited project's root and the file, but trusts every directory above both: with a sub-directory `working-directory`, a path climbing out of it (`../build/reports/report.sarif`) passes through directories the checked-out repository controls, where a committed symlink could redirect the write.
 
-Outputs: `exit-code`, `report-path`, `badge-path`, `comment-url`, `complete` (_since 1.21_; `true` or `false` when `format` is `json` or `sarif` and the report went to a file), and — only when `format: json` — `findings-count`, `highest-severity` (the report's aggregate `risk_level`) and `grade` (its `A`-`F` letter). When `complete` is `false`, those three cover only the files the run analyzed, so read them together with `complete`. A run that could not fully analyze every file yet exited `0` raises a warning annotation naming `fail-on-incomplete` — when `format` is `json` or `sarif` and the report went to a file, the cases where `complete` is populated; set `fail-on-incomplete` to fail the job instead. A run that exited `1` or `2` already fails the job, and one that analyzed no file and found nothing exits `1` whatever the inputs (_since 1.21_).
+Outputs: `exit-code`, `report-path`, `badge-path`, `comment-url`, `complete` (_since 1.21_; `true` or `false` when `format` is `json` or `sarif` and the report went to a file), and — only when `format: json` — `findings-count`, `highest-severity` (the report's aggregate `risk_level`, in capitals as the JSON writes it: `SAFE`, `LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, where `fail-on` takes them in lowercase) and `grade` (its `A`-`F` letter). When `complete` is `false`, those three cover only the files the run analyzed, so read them together with `complete`. _Since 1.22_, a run whose scan found no file to audit — it exits `1`, having no verdict — sets `highest-severity` to `UNKNOWN`, leaves `grade` empty and sets `complete` to `false`, as SARIF already did, instead of `SAFE`, `A` and `true`; a `--since` run whose diff left nothing changed keeps its grade. A run that could not fully analyze every file yet exited `0` raises a warning annotation naming `fail-on-incomplete` — when `format` is `json` or `sarif` and the report went to a file, the cases where `complete` is populated; set `fail-on-incomplete` to fail the job instead. A run that exited `1` or `2` already fails the job, and one that analyzed no file and found nothing exits `1` whatever the inputs (_since 1.21_).
 
 ```yaml
       - name: Symfony Security Audit
         id: audit
-        uses: vinceamstoutz/symfony-security-auditor@1.21.0
+        uses: vinceamstoutz/symfony-security-auditor@1.22.0
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
@@ -183,13 +186,13 @@ Outputs: `exit-code`, `report-path`, `badge-path`, `comment-url`, `complete` (_s
       - run: echo "found ${{ steps.audit.outputs.findings-count }} findings (${{ steps.audit.outputs.highest-severity }})"
 ```
 
-**Standalone mode** (`mode: standalone`) downloads the checksum-verified standalone binary instead of requiring the bundle in your project's `composer.json` — a host PHP and Composer are still installed by this action (`setup-php` stays `true`) since `init` fetches the provider bridge through Composer even for the standalone binary. Non-Anthropic providers currently require running `symfony-security-auditor init` interactively once outside CI to pick a provider; standalone mode in this action always configures the `anthropic`/`claude-opus-4-8` default non-interactively.
+**Standalone mode** (`mode: standalone`) downloads the checksum-verified standalone binary instead of requiring the bundle in your project's `composer.json` — a host PHP and Composer are still installed by this action (`setup-php` stays `true`) since `init` fetches the provider bridge through Composer even for the standalone binary. Non-Anthropic providers currently require running `symfony-security-auditor init` interactively once outside CI to pick a provider; standalone mode in this action always configures the `anthropic`/`claude-opus-5-5` default non-interactively.
 
 `mode` defaults to `bundle`, not `standalone`, so upgrading to a newer action version never silently changes what an existing workflow does — `bundle` is exactly today's behavior with no `mode` input at all. It also avoids opting every new adopter into the Anthropic-only standalone path by default when they may already have a different provider configured via `config/packages/ai.yaml`. Neither install method is otherwise preferred; see the [Standalone tool](../README.md#standalone-tool-binary) and [bundle](../README.md#use-it-as-a-symfony-bundle) sections for the general tradeoffs.
 
 ```yaml
       - name: Symfony Security Audit
-        uses: vinceamstoutz/symfony-security-auditor@1.21.0
+        uses: vinceamstoutz/symfony-security-auditor@1.22.0
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
@@ -227,7 +230,7 @@ jobs:
     name: Symfony Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: shivammathur/setup-php@v2
         with:
@@ -269,7 +272,7 @@ jobs:
     name: Symfony Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so `since` can diff against the base branch
 
@@ -288,7 +291,7 @@ jobs:
           php bin/console audit:run --since origin/${{ github.base_ref }} --format github
 ```
 
-Critical and high-severity findings become `::error`, medium becomes `::warning`, and low/info become `::notice` — the annotation level only affects how GitHub displays the finding, not the job's exit code; combine with `--fail-on` to also fail the check run. Don't pass `--output` — annotations must reach stdout for GitHub to parse them.
+Critical and high-severity findings become `::error`, medium becomes `::warning`, and low/info become `::notice` — the annotation level only affects how GitHub displays the finding, not the job's exit code; combine with `--fail-on` to also fail the check run. Don't pass `--output`, and pass `--no-output` when the configuration sets `audit.output` (_since 1.22_) — annotations must reach stdout for GitHub to parse them. The reusable action passes `--no-output` itself when its `output` input is empty.
 
 Every other format printed to the job log is defused for the runner: while `GITHUB_ACTIONS` is `true`, a line of audited code or model text that starts with `::` gets a backslash (`:\:`), and so does a legacy `##[` anywhere (`#\#[`), so neither acts as a workflow command. JSON and SARIF keep their meaning byte for byte once decoded (`##[` is written `#\u0023[`), so piping them into `jq` still works. A report saved with `--output` is written unchanged.
 
@@ -311,7 +314,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so `since` can diff against the base branch
 
@@ -352,7 +355,7 @@ permissions:
 # …
 
       - name: Symfony Security Audit
-        uses: vinceamstoutz/symfony-security-auditor@1.21.0
+        uses: vinceamstoutz/symfony-security-auditor@1.22.0
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # required by comment-pr
@@ -364,7 +367,7 @@ permissions:
           fail-on: high
 ```
 
-`GITHUB_TOKEN` has to be passed explicitly: a composite action cannot read the calling workflow's secrets on its own. When it is missing, or the format is not `github-comment`, or no report file was produced, the step emits a `::warning::` naming the reason and leaves the audit's own exit code untouched rather than failing the job over a comment.
+`GITHUB_TOKEN` has to be passed explicitly: a composite action cannot read the calling workflow's secrets on its own. When it is missing, or the format is not `github-comment`, or no report file was produced, the step emits a `::warning::` naming the reason and leaves the audit's own exit code untouched rather than failing the job over a comment. _Since 1.22_ it also posts only the report this run wrote: not a file the audit did not replace — one the pull request committed, left from an earlier step, or kept because the audit failed before writing — and not one a symbolic link between the working directory and the file leads to, which the audit refuses to write through.
 
 The step runs under `if: always()` internally, so a run that trips `--fail-on` still posts its summary — that being the run reviewers most need to see.
 
@@ -376,7 +379,7 @@ It needs a JSON report to read the grade from (`format: json` plus a non-empty `
 
 ```yaml
       - name: Symfony Security Audit
-        uses: vinceamstoutz/symfony-security-auditor@1.21.0
+        uses: vinceamstoutz/symfony-security-auditor@1.22.0
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
@@ -402,7 +405,7 @@ Then point shields.io at the committed file:
 ![Security audit](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/<owner>/<repo>/main/.github/security-auditor-badge.json)
 ```
 
-The grade maps to a badge color: `A` brightgreen, `B` green, `C` yellow, `D` orange, `F` red. _Since 1.21_, a run that could not fully analyze every file (`complete` is `false`) writes a lightgrey `incomplete` badge instead: its grade covers only the files it analyzed, so it cannot stand for the whole project.
+The grade maps to a badge color: `A` brightgreen, `B` green, `C` yellow, `D` orange, `F` red. _Since 1.21_, a run that could not fully analyze every file (`complete` is `false`) writes a lightgrey `incomplete` badge instead: its grade covers only the files it analyzed, so it cannot stand for the whole project. _Since 1.22_, a run whose scan found no file to audit writes a lightgrey `no verdict` badge rather than a green `A`.
 
 ### JSON report as artifact
 
@@ -427,7 +430,9 @@ Add your LLM provider key as a CI/CD variable (`Settings → CI/CD → Variables
 
 ### Scheduled pipeline with Security Dashboard upload
 
-GitLab natively parses SARIF and displays findings in the **Security Dashboard** and **Vulnerability Report** when you upload a `gl-sast-report.json` (GitLab SAST format) or use the `security` artifact report type.
+GitLab Ultimate reads a SARIF 2.1.0 report through the `artifacts:reports:sarif` report type — generally available since GitLab 19.2, and from GitLab 18.11 behind the `sarif_ingestion` feature flag — and lists its findings in the pipeline **Security** tab, the **Vulnerability Report** and the **Security Dashboard**. Do not upload the SARIF report as `artifacts:reports:sast`: that type takes GitLab's own SAST report format, not SARIF, so GitLab shows none of the findings.
+
+GitLab ingests the report only when its job succeeds, and the audit exits non-zero when a gate trips (exit codes `1`, `2` and `3`, see [Exit codes](configuration.md#exit-codes)). The script below therefore keeps the exit code, prints it, and fails the job only when no report was written:
 
 ```yaml
 # .gitlab-ci.yml (add to existing file or create standalone)
@@ -443,13 +448,15 @@ symfony-security-audit:
     - curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
     - composer install --no-interaction --prefer-dist --no-progress
   script:
-    - php bin/console audit:run --format sarif --output gl-sast-report.sarif
+    - php bin/console audit:run --format sarif --output security-audit.sarif || audit_exit=$?
+    - if [ ! -s security-audit.sarif ]; then echo "The audit wrote no report (exit ${audit_exit:-0})."; exit 1; fi
+    - echo "The audit exited ${audit_exit:-0}; its findings are in the pipeline Security tab."
   artifacts:
     when: always
     reports:
-      sast: gl-sast-report.sarif
+      sarif: security-audit.sarif
     paths:
-      - gl-sast-report.sarif
+      - security-audit.sarif
     expire_in: 30 days
 ```
 
@@ -457,7 +464,7 @@ Set the schedule in `CI/CD → Schedules` (e.g., every night at 02:00).
 
 ### JUnit test report (free tier)
 
-The `sast:` report above renders in GitLab's security dashboard, which requires the Ultimate tier. On any tier — including free — the JUnit format shows every finding directly in the merge-request test widget instead:
+The `sarif:` report above needs GitLab Ultimate on a version that reads SARIF. On any tier and version — including free — the JUnit format shows every finding directly in the merge-request test widget instead; keep a SARIF or JSON report as a plain artifact beside it (see [JSON artifact only](#json-artifact-only-no-dashboard)) for the full detail:
 
 ```yaml
 security_audit_junit:
@@ -515,3 +522,13 @@ php bin/console audit:run /path/to/project --format html --output report.html
 ```
 
 Every format, its options and sample output live in the [Output Formats Reference](configuration.md#output-formats-reference).
+
+## How This Project Guards Compatibility
+
+Upgrading within `1.x` must not change what your pipeline relies on. Besides its unit, integration and end-to-end suites, this repository's own CI compares every pull request with the last release, and fails on any difference the maintainer has not accepted and announced in [`CHANGELOG.md`](../CHANGELOG.md):
+
+- **Configuration** — the bundle configuration, path by path: kind, default, choices, bounds, the values each setting takes and what it reads them as, `%env()%` placeholders, what a project's `.symfony-security-auditor.yaml` may set, and the published container parameters for each `profile`. A key added since the release must be listed in [Versioning](versioning.md).
+- **Behaviour** — a few hundred scenarios replayed from the last release: every `audit:run` option, the nine formats and their exit codes, an incomplete run, baselines, `audit:diff` and `audit:trend` on that release's reports, the configurations its docs showed, the standalone binary's configuration stack and `init`, its cache directory, `mcp:serve`'s tools, and the Domain models' accessors. A key a JSON report gains is not a difference.
+- **Public PHP API** — every class, interface, enum and member not tagged `@internal` (see [Versioning](versioning.md#public-api--what-is-covered-by-the-bc-promise)), compared by [roave/backward-compatibility-check](https://github.com/Roave/BackwardCompatibilityCheck) with the last release of the line the change is headed for.
+
+[CONTRIBUTING.md → Compatibility Checks](../CONTRIBUTING.md#compatibility-checks) explains how to run them, accept a difference, and record them again from a new release.

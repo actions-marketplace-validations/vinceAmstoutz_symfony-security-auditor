@@ -15,7 +15,6 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan;
 
 use JsonException;
 use Override;
-use Symfony\Component\Filesystem\Exception\IOException;
 use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Filesystem\Path;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidRiskMarkerException;
@@ -23,6 +22,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\RiskMarker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\StaticPreScannerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\AuditedProjectPathHolder;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\BoundedFileReader;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\Exception\UnreadableInputFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\Exception\MalformedSarifFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\Exception\SarifFileNotReadableException;
 
@@ -50,6 +51,7 @@ final readonly class SarifImportingPreScanner implements StaticPreScannerInterfa
         private array $sarifPaths,
         private Filesystem $filesystem,
         private AuditedProjectPathHolder $auditedProjectPathHolder,
+        private SarifTaintPathFormatter $sarifTaintPathFormatter = new SarifTaintPathFormatter(),
     ) {}
 
     /**
@@ -122,9 +124,9 @@ final readonly class SarifImportingPreScanner implements StaticPreScannerInterfa
         }
 
         try {
-            $decoded = json_decode($this->filesystem->readFile($path), true, flags: \JSON_THROW_ON_ERROR);
-        } catch (IOException $ioException) {
-            throw SarifFileNotReadableException::forPath($path, $ioException);
+            $decoded = json_decode(BoundedFileReader::read($path), true, flags: \JSON_THROW_ON_ERROR);
+        } catch (UnreadableInputFileException $unreadableInputFileException) {
+            throw SarifFileNotReadableException::fromUnreadableFile($path, $unreadableInputFileException);
         } catch (JsonException $jsonException) {
             throw MalformedSarifFileException::fromJsonException($path, $jsonException);
         }
@@ -199,26 +201,20 @@ final readonly class SarifImportingPreScanner implements StaticPreScannerInterfa
      */
     private function describeWithTaintPath(string $message, array $result, array $scannedPaths): string
     {
-        $steps = $this->taintPathSteps($result, $scannedPaths);
-        if ([] === $steps) {
-            return $message;
-        }
-
-        return \sprintf('%s (taint path: %s)', $message, implode(' -> ', $steps));
+        return $this->sarifTaintPathFormatter->describe($message, $this->taintPathSteps($result, $scannedPaths));
     }
 
     /**
      * A SARIF `codeFlows[0].threadFlows[0].locations` array is the taint-
      * tracking tool's source-to-sink path — richer evidence than the single
-     * primary location. Steps outside the scan surface are dropped, same as
-     * the primary location, so the attacker never sees an unscanned file; an
-     * `...` placeholder marks each gap so a surviving step is never mistaken
-     * for the source (or the whole path for a single relabeled sink).
+     * primary location. A step outside the scan surface comes back as `null`,
+     * same as the primary location is dropped, so the attacker never sees an
+     * unscanned file.
      *
      * @param array<array-key, mixed> $result
      * @param array<string, true>     $scannedPaths
      *
-     * @return list<string>
+     * @return list<string|null>
      */
     private function taintPathSteps(array $result, array $scannedPaths): array
     {
@@ -232,40 +228,7 @@ final readonly class SarifImportingPreScanner implements StaticPreScannerInterfa
             $rawSteps[] = \is_array($location) ? $this->taintPathStep($location, $scannedPaths) : null;
         }
 
-        return $this->collapseDroppedStepsToEllipses($rawSteps);
-    }
-
-    /**
-     * @param list<string|null> $rawSteps each dropped (null) step collapses to
-     *                                    a single `...` so a surviving step is
-     *                                    never mistaken for the taint source
-     *
-     * @return list<string>
-     */
-    private function collapseDroppedStepsToEllipses(array $rawSteps): array
-    {
-        $steps = [];
-        $droppedSincePreviousStep = false;
-        foreach ($rawSteps as $rawStep) {
-            if (null === $rawStep) {
-                $droppedSincePreviousStep = true;
-
-                continue;
-            }
-
-            if ($droppedSincePreviousStep) {
-                $steps[] = '...';
-            }
-
-            $steps[] = $rawStep;
-            $droppedSincePreviousStep = false;
-        }
-
-        if ($droppedSincePreviousStep && [] !== $steps) {
-            $steps[] = '...';
-        }
-
-        return $steps;
+        return $rawSteps;
     }
 
     /**
@@ -340,8 +303,8 @@ final readonly class SarifImportingPreScanner implements StaticPreScannerInterfa
      */
     private function normalizeUri(string $uri): string
     {
-        $normalized = u($this->decodePercentEncoding($uri))->trimPrefix('./');
-        $projectRootPrefix = u($this->auditedProjectPathHolder->path())->ensureEnd('/');
+        $normalized = u(WindowsDrivePath::normalize($this->decodePercentEncoding($uri)))->trimPrefix('./');
+        $projectRootPrefix = u(WindowsDrivePath::normalize($this->auditedProjectPathHolder->path()))->ensureEnd('/');
 
         return $normalized->trimPrefix($projectRootPrefix->toString())->trimStart('/')->toString();
     }

@@ -105,6 +105,19 @@ final class HtmlReportRendererTest extends AbstractReportRendererTestCase
     /**
      * @throws InvalidAuditContextException
      */
+    public function test_render_gives_a_scan_that_found_no_file_no_verdict(): void
+    {
+        $output = $this->renderer->render($this->makeReportOfAScanThatFoundNoFile());
+
+        self::assertStringContainsString('<span class="risk risk-unknown">UNKNOWN</span> (no file was analyzed)', $output);
+        self::assertStringContainsString('<p class="incomplete">⚠️ Audit incomplete: the scan found no file to audit, so this report has no verdict', $output);
+        self::assertStringNotContainsString('>SAFE<', $output);
+        self::assertStringNotContainsString('No validated vulnerabilities found.', $output);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
     public function test_render_never_calls_an_incomplete_audit_clean(): void
     {
         self::assertStringNotContainsString('No validated vulnerabilities found.', $this->renderer->render($this->makeIncompleteReport()));
@@ -251,6 +264,47 @@ final class HtmlReportRendererTest extends AbstractReportRendererTestCase
         self::assertStringContainsString('txt.exe', $output);
         self::assertStringNotContainsString("\u{202E}", $output);
         self::assertStringNotContainsString("\u{202C}", $output);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_render_strips_terminal_control_sequences_from_finding_content(): void
+    {
+        $vulnerability = Vulnerability::of(
+            new VulnerabilityClassification(VulnerabilityType::SQL_INJECTION, VulnerabilitySeverity::HIGH, "Title\x1b]0;pwned\x07 end", 0.9),
+            new CodeLocation("src/\x1b[2JFoo.php", 1, 2),
+            new VulnerabilityNarrative("desc\x1b[31m red\r overwritten\x00", "vec\u{85}tor", 'proof', 'fix'),
+            "\$code\x7f",
+        )->withReviewerValidation(true);
+
+        $output = $this->renderer->render($this->makeReport($vulnerability));
+
+        self::assertDoesNotMatchRegularExpression('/[\x{0}-\x{8}\x{B}-\x{1F}\x{7F}-\x{9F}]/u', $output);
+        self::assertStringContainsString('Title]0;pwned end', $output);
+        self::assertStringContainsString('src/[2JFoo.php:1-2', $output);
+        self::assertStringContainsString('desc[31m red overwritten', $output);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_render_keeps_the_line_breaks_and_tabs_of_a_code_snippet(): void
+    {
+        $vulnerability = Vulnerability::of(
+            new VulnerabilityClassification(VulnerabilityType::SQL_INJECTION, VulnerabilitySeverity::HIGH, 'Title', 0.9),
+            new CodeLocation('src/Foo.php', 1, 2),
+            new VulnerabilityNarrative('desc', 'vec', 'proof', 'fix'),
+            "if (\$a) {\n\treturn \$q;\n}",
+        )->withReviewerValidation(true);
+
+        self::assertStringContainsString("if (\$a) {\n\treturn \$q;\n}", $this->renderer->render($this->makeReport($vulnerability)));
     }
 
     /**

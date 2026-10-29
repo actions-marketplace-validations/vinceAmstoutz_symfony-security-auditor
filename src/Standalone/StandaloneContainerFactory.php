@@ -26,6 +26,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Bridge\ProviderKey
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\ContainerParameterSyntax;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\CredentialIdentity;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\NonLocalPlatformEndpointException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\FreeTextSettings;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\OfflineOnlyPlatformGuard;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\PricingPlatformPass;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfig;
@@ -47,8 +48,6 @@ use VinceAmstoutz\SymfonySecurityAuditor\SymfonySecurityAuditorBundle;
 final readonly class StandaloneContainerFactory
 {
     private const string CONFIG_NOTICES_PARAMETER = 'symfony_security_auditor.config_notices';
-
-    private const string PROJECT_CONFIG_NOTICE = 'Project config %s is layered over your user config: the audited repository may tune the audit through it (paths, profile, models, a tighter budget), never the platform and its credentials, the cache, privacy, custom skills, secret scrubbing, custom risk patterns or imported SARIF.';
 
     private const string PLATFORM_TAG = 'ai.platform';
 
@@ -72,21 +71,13 @@ final readonly class StandaloneContainerFactory
             $this->offlineOnlyPlatformGuard->assertEveryPlatformIsLocal($standaloneConfig->platform);
         }
 
-        $workingDirectory = getcwd();
-
-        $containerBuilder = new ContainerBuilder(new EnvPlaceholderParameterBag([
-            'kernel.cache_dir' => $cacheDir,
-            'kernel.build_dir' => $cacheDir,
-            'kernel.project_dir' => false !== $workingDirectory ? $workingDirectory : $cacheDir,
-            'kernel.environment' => 'prod',
-            'kernel.debug' => false,
-        ]));
+        $containerBuilder = new ContainerBuilder(new EnvPlaceholderParameterBag($this->kernelParameters($cacheDir)));
 
         $containerBuilder->register('event_dispatcher', EventDispatcher::class)->setPublic(true);
         $containerBuilder->register('logger', NullLogger::class);
         $containerBuilder->register('http_client', HttpClientInterface::class)
             ->setFactory([HttpClient::class, 'create'])
-            ->setArguments([['timeout' => $standaloneConfig->httpTimeout, 'max_duration' => 0]]);
+            ->setArguments([$this->httpClientOptions($standaloneConfig)]);
 
         try {
             $this->bundleExtensionLoader->load(new AiBundle(), $standaloneConfig->platform->toAiConfig(), $containerBuilder);
@@ -94,9 +85,9 @@ final readonly class StandaloneContainerFactory
             throw ProviderBridgeException::forBundleFailure($runtimeException) ?? $runtimeException;
         }
 
-        $this->bundleExtensionLoader->load(new SymfonySecurityAuditorBundle(), $standaloneConfig->auditConfig, $containerBuilder);
+        $this->bundleExtensionLoader->load(new SymfonySecurityAuditorBundle(), FreeTextSettings::literalIn($standaloneConfig->auditConfig, $containerBuilder->getParameterBag()), $containerBuilder);
 
-        $this->announceProjectConfig($containerBuilder, $standaloneConfig->projectConfigFile);
+        $this->announceProjectConfigs($containerBuilder, $standaloneConfig);
         $this->registerAuditHeaderBanner($containerBuilder, $standaloneConfig->platform);
 
         $this->selectActivePlatform($containerBuilder, $standaloneConfig->platform);
@@ -110,14 +101,42 @@ final readonly class StandaloneContainerFactory
     }
 
     /**
-     * The audited repository may tune the run through its own config file, so
-     * the audit header says which file was layered in: a stricter `fail_on` or
-     * another model coming from the checkout rather than from the user's own
-     * file would otherwise be silent.
+     * @return array<string, float|int|string>
      */
-    private function announceProjectConfig(ContainerBuilder $containerBuilder, ?string $projectConfigFile): void
+    private function httpClientOptions(StandaloneConfig $standaloneConfig): array
     {
-        if (null === $projectConfigFile) {
+        $options = ['timeout' => $standaloneConfig->httpTimeout, 'max_duration' => 0];
+
+        return $standaloneConfig->offlineOnly() && $this->offlineOnlyPlatformGuard->reachesOnlyLoopback($standaloneConfig->platform)
+            ? [...$options, 'no_proxy' => '*']
+            : $options;
+    }
+
+    /**
+     * The directories come from the user's home and the working directory, so
+     * their `%` signs are escaped: left as typed, a pair reads as a parameter
+     * reference, `%%` loses one sign and `%env(VAR)%` becomes the variable.
+     *
+     * @return array<string, bool|string>
+     */
+    private function kernelParameters(string $cacheDir): array
+    {
+        $escapedCacheDir = ContainerParameterSyntax::escape($cacheDir);
+        $workingDirectory = getcwd();
+
+        return [
+            'kernel.cache_dir' => $escapedCacheDir,
+            'kernel.build_dir' => $escapedCacheDir,
+            'kernel.project_dir' => false !== $workingDirectory ? ContainerParameterSyntax::escape($workingDirectory) : $escapedCacheDir,
+            'kernel.environment' => 'prod',
+            'kernel.debug' => false,
+        ];
+    }
+
+    private function announceProjectConfigs(ContainerBuilder $containerBuilder, StandaloneConfig $standaloneConfig): void
+    {
+        $projectConfigNotices = ProjectConfigNotices::of($standaloneConfig);
+        if ([] === $projectConfigNotices) {
             return;
         }
 
@@ -125,7 +144,7 @@ final readonly class StandaloneContainerFactory
 
         $containerBuilder->setParameter(self::CONFIG_NOTICES_PARAMETER, [
             ...(\is_array($notices) ? $notices : []),
-            \sprintf(self::PROJECT_CONFIG_NOTICE, ContainerParameterSyntax::escape($projectConfigFile)),
+            ...$projectConfigNotices,
         ]);
     }
 

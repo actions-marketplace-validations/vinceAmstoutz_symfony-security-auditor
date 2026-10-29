@@ -13,6 +13,7 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Infrastructure\SelfUpdate;
 
+use Ergebnis\PHPUnit\SlowTestDetector\Attribute\MaximumDuration;
 use Override;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Filesystem\Filesystem;
@@ -50,7 +51,7 @@ final class ProcessReleaseClientTest extends TestCase
     /**
      * @throws SelfUpdateFailedException
      */
-    public function test_get_bounds_the_transfer_tightly_and_passes_the_url(): void
+    public function test_get_bounds_the_transfer_and_the_body_tightly_and_passes_the_url(): void
     {
         $captured = [];
         $processReleaseClient = new ProcessReleaseClient(static function (array $arguments) use (&$captured): Process {
@@ -61,13 +62,13 @@ final class ProcessReleaseClientTest extends TestCase
 
         $processReleaseClient->get('https://example.test/resource');
 
-        self::assertSame(['--max-time', '20', 'https://example.test/resource'], $captured);
+        self::assertSame(['--max-time', '20', '--max-filesize', '1048576', 'https://example.test/resource'], $captured);
     }
 
     /**
      * @throws SelfUpdateFailedException
      */
-    public function test_download_keeps_a_generous_transfer_bound_and_targets_the_destination(): void
+    public function test_download_keeps_a_generous_transfer_and_body_bound_and_targets_the_destination(): void
     {
         $captured = [];
         $destination = $this->workingDirectory.'/asset';
@@ -79,7 +80,19 @@ final class ProcessReleaseClientTest extends TestCase
 
         $processReleaseClient->download('https://example.test/asset', $destination);
 
-        self::assertSame(['--max-time', '600', '--output', $destination, 'https://example.test/asset'], $captured);
+        self::assertSame(['--max-time', '600', '--output', $destination, '--max-filesize', '268435456', 'https://example.test/asset'], $captured);
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     */
+    public function test_a_failed_request_names_the_reason_curl_gave(): void
+    {
+        $processReleaseClient = new ProcessReleaseClient(static fn (array $arguments): Process => Process::fromShellCommandline('printf "curl: (22) The requested URL returned error: 404\n" >&2; exit 22'));
+
+        $this->expectExceptionMessageMatches('~^Failed to download "https://example\.test/resource": curl: \(22\) The requested URL returned error: 404\z~');
+
+        $processReleaseClient->get('https://example.test/resource');
     }
 
     /**
@@ -90,8 +103,59 @@ final class ProcessReleaseClientTest extends TestCase
         $processReleaseClient = new ProcessReleaseClient(static fn (array $arguments): Process => new Process(['false']));
 
         $this->expectException(SelfUpdateFailedException::class);
+        $this->expectExceptionMessageMatches('~^Failed to download "https://example\.test/resource"\.\z~');
 
         $processReleaseClient->get('https://example.test/resource');
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     */
+    #[MaximumDuration(4000)]
+    public function test_download_reports_the_bytes_received_while_it_runs_and_once_it_ends(): void
+    {
+        $destination = $this->workingDirectory.'/asset';
+        $processReleaseClient = new ProcessReleaseClient(static fn (array $arguments): Process => Process::fromShellCommandline(\sprintf('printf A > %1$s; sleep 1; printf BB >> %1$s', escapeshellarg($arguments[3]))));
+        $receivedBytes = [];
+
+        $processReleaseClient->download('https://example.test/asset', $destination, static function (int $bytes) use (&$receivedBytes): void {
+            $receivedBytes[] = $bytes;
+        });
+
+        self::assertSame([1, 3], array_values(array_unique(array_filter($receivedBytes, static fn (int $bytes): bool => 0 < $bytes))));
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     */
+    public function test_a_download_that_wrote_nothing_reports_no_byte(): void
+    {
+        $processReleaseClient = new ProcessReleaseClient(static fn (array $arguments): Process => new Process(['true']));
+        $receivedBytes = [];
+
+        $processReleaseClient->download('https://example.test/asset', $this->workingDirectory.'/asset', static function (int $bytes) use (&$receivedBytes): void {
+            $receivedBytes[] = $bytes;
+        });
+
+        self::assertSame([0], array_values(array_unique($receivedBytes)));
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     */
+    #[MaximumDuration(4000)]
+    public function test_a_download_that_outlives_its_process_timeout_fails(): void
+    {
+        $processReleaseClient = new ProcessReleaseClient(static function (array $arguments): Process {
+            $process = Process::fromShellCommandline('sleep 5');
+            $process->setTimeout(0.5);
+
+            return $process;
+        });
+
+        $this->expectException(SelfUpdateFailedException::class);
+
+        $processReleaseClient->download('https://example.test/asset', $this->workingDirectory.'/asset', static function (int $bytes): void {});
     }
 
     /**
@@ -130,6 +194,16 @@ final class ProcessReleaseClientTest extends TestCase
         $this->expectException(SelfUpdateFailedException::class);
 
         $processReleaseClient->get('https://example.test/resource');
+    }
+
+    public function test_default_process_builder_keeps_every_transfer_and_redirect_on_https_with_tls_1_2_or_newer(): void
+    {
+        $process = (ProcessReleaseClient::defaultProcessBuilder())(['https://example.test/asset']);
+
+        self::assertSame(
+            "'curl' '-fsSL' '--proto' '=https' '--tlsv1.2' '--connect-timeout' '10' '-H' 'User-Agent: symfony-security-auditor-self-update' 'https://example.test/asset'",
+            $process->getCommandLine(),
+        );
     }
 
     public function test_default_process_builder_uses_authenticated_curl(): void

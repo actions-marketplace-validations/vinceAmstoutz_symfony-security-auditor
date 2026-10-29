@@ -25,6 +25,7 @@ use Symfony\AI\Platform\Result\RawHttpResult;
 use Symfony\AI\Platform\Result\TextResult;
 use Symfony\AI\Platform\Result\ToolCall;
 use Symfony\AI\Platform\Result\ToolCallResult;
+use Symfony\AI\Platform\TokenUsage\TokenUsage;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunk\StructuredVulnerabilityCollectionSession;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\BudgetTracker;
@@ -193,7 +194,7 @@ final class SymfonyAiLLMClientRequestTooLargeTest extends TestCase
         $scriptedTokenUsagePlatform = new ScriptedTokenUsagePlatform([
             new ToolCallResult([new ToolCall('call-1', 'record_vulnerability', $this->finding())]),
             new BadRequestException(self::PROMPT_TOO_LONG),
-        ], []);
+        ], [new TokenUsage(promptTokens: 7, completionTokens: 3)]);
         $messageCollectingLogger = new MessageCollectingLogger();
         $symfonyAiLLMClient = $this->client($scriptedTokenUsagePlatform, $messageCollectingLogger);
 
@@ -202,7 +203,7 @@ final class SymfonyAiLLMClientRequestTooLargeTest extends TestCase
         self::assertSame('empty_content', $llmResponse->stopReason());
         self::assertSame(2, $scriptedTokenUsagePlatform->invocations);
         self::assertContains(
-            [self::OUTGROWN_WARNING, ['iterations' => 1, 'input_tokens' => 0, 'output_tokens' => 0, 'error' => 'The model cannot fit the request: '.self::PROMPT_TOO_LONG]],
+            [self::OUTGROWN_WARNING, ['iterations' => 1, 'input_tokens' => 7, 'output_tokens' => 3, 'error' => 'The model cannot fit the request: '.self::PROMPT_TOO_LONG]],
             $messageCollectingLogger->records,
         );
     }
@@ -283,7 +284,7 @@ final class SymfonyAiLLMClientRequestTooLargeTest extends TestCase
         $scriptedTokenUsagePlatform = new ScriptedTokenUsagePlatform([
             new ToolCallResult([new ToolCall('call-1', 'record_vulnerability', $this->finding())]),
             new BadRequestException(self::PROMPT_TOO_LONG),
-        ], []);
+        ], [new TokenUsage(promptTokens: 7, completionTokens: 3)]);
         $messageCollectingLogger = new MessageCollectingLogger();
         $symfonyAiLLMClient = $this->client($scriptedTokenUsagePlatform, $messageCollectingLogger);
 
@@ -292,7 +293,7 @@ final class SymfonyAiLLMClientRequestTooLargeTest extends TestCase
         self::assertSame('empty_content', $responses[0]->stopReason());
         self::assertSame(2, $scriptedTokenUsagePlatform->invocations);
         self::assertContains(
-            [self::CONCURRENT_OUTGROWN_WARNING, ['input_tokens' => 0, 'output_tokens' => 0, 'error' => self::PROMPT_TOO_LONG]],
+            [self::CONCURRENT_OUTGROWN_WARNING, ['input_tokens' => 7, 'output_tokens' => 3, 'error' => self::PROMPT_TOO_LONG]],
             $messageCollectingLogger->records,
         );
     }
@@ -319,6 +320,30 @@ final class SymfonyAiLLMClientRequestTooLargeTest extends TestCase
         self::assertStringContainsString('exceed window capacity (100)', $responses[0]->content());
         self::assertSame('ok', $responses[1]->content());
         self::assertSame(1, $scriptedTokenUsagePlatform->invocations);
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws LLMProviderException
+     * @throws InvalidToolRegistryException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     */
+    public function test_a_conversation_the_rate_limit_window_cannot_fit_holds_back_none_dispatched_after_it_in_the_same_round(): void
+    {
+        $scriptedTokenUsagePlatform = new ScriptedTokenUsagePlatform([
+            new ToolCallResult([new ToolCall('call-1', 'lookup', [])]),
+            new TextResult('ok'),
+        ], []);
+        $symfonyAiLLMClient = $this->clientRefusingEstimatesAbove(100, $scriptedTokenUsagePlatform, new NullLogger());
+
+        $responses = $symfonyAiLLMClient->completeBatchWithTools([
+            ['system' => 's', 'user' => str_repeat('x', 4000), 'tools' => new ToolRegistry([new FixedResultTool('lookup', 'a file')], new NullLogger())],
+            ['system' => 's', 'user' => 'fits', 'tools' => new ToolRegistry([new FixedResultTool('lookup', 'a file')], new NullLogger())],
+        ], 2, 1);
+
+        self::assertSame(['ok', 'end_turn', 2], [$responses[1]->content(), $responses[1]->stopReason(), $scriptedTokenUsagePlatform->invocations]);
     }
 
     /**

@@ -37,7 +37,7 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
      * alter scan output for existing chunk content. Folded into the attacker
      * cache key so stale entries are invalidated.
      */
-    public const int CACHE_VERSION = 31;
+    public const int CACHE_VERSION = 32;
 
     /**
      * Detects the `s` (DOTALL) flag among a PCRE pattern's trailing modifier
@@ -46,23 +46,51 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
      */
     private const string TRAILING_DOT_ALL_MODIFIER = '/s[a-zA-Z]*$/';
 
+    private const string UNMAPPED_ACCESS_CONTROL = 'unmapped_access_control';
+
+    private const string UNMAPPED_ACCESS_CONTROL_DESCRIPTION = 'The access-control map could not read this file, whose brackets nest too deeply or hold too many unmatched closers to parse safely: its routes, access checks and voter attributes are missing from the map, so read them in the code.';
+
     /**
-     * @param array<string, array<string, array{regex: string, description: string}>> $customPatterns extra patterns merged into the static dictionary keyed by file-type bucket
+     * @var array<string, array<string, array{regex: string, description: string}>>
+     */
+    private array $customPatterns;
+
+    /**
+     * @param array<string, array<string, array{regex: mixed, description: string}>> $customPatterns extra patterns merged into the static dictionary keyed by file-type bucket; a regex that is not text is refused
      *
      * @throws InvalidCustomRiskPatternException
      */
     public function __construct(
-        private array $customPatterns = [],
+        array $customPatterns = [],
         private LoggerInterface $logger = new NullLogger(),
+        private NestingDepthGuard $nestingDepthGuard = new NestingDepthGuard(),
     ) {
-        foreach ($this->customPatterns as $bucket => $patterns) {
+        $validPatterns = [];
+        foreach ($customPatterns as $bucket => $patterns) {
+            $validPatterns[$bucket] = [];
             foreach ($patterns as $label => $entry) {
-                $error = $this->validatePattern($entry['regex']);
-                if (null !== $error) {
-                    throw InvalidCustomRiskPatternException::forPattern($bucket, $label, $entry['regex'], $error);
-                }
+                $validPatterns[$bucket][$label] = ['regex' => $this->validRegex($bucket, $label, $entry['regex']), 'description' => $entry['description']];
             }
         }
+
+        $this->customPatterns = $validPatterns;
+    }
+
+    /**
+     * @throws InvalidCustomRiskPatternException
+     */
+    private function validRegex(string $bucket, string $label, mixed $regex): string
+    {
+        if (!\is_string($regex)) {
+            throw InvalidCustomRiskPatternException::forPatternThatIsNoText($bucket, $label, $regex);
+        }
+
+        $error = $this->validatePattern($regex);
+        if (null !== $error) {
+            throw InvalidCustomRiskPatternException::forPattern($bucket, $label, $regex, $error);
+        }
+
+        return $regex;
     }
 
     private function validatePattern(string $pattern): ?string
@@ -146,7 +174,7 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
                 'description' => 'File I/O sink — verify the path is not built from user input (path traversal, LFI, arbitrary read/write/delete)',
             ],
             'dynamic_file_inclusion' => [
-                'regex' => '/\b(?:require_once|require|include_once|include)\b[^;]*\$/',
+                'regex' => '/\b(?:require_once|require|include_once|include)\b[^;]{0,512}\$/',
                 'description' => 'include/require with a variable path — verify the included path is not user-controlled (LFI / RCE)',
             ],
             'upload_handling' => [
@@ -246,7 +274,7 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
         ],
         ProjectFileType::LIVE_COMPONENT->value => [
             'live_prop_writable' => [
-                'regex' => '/#\[\s*LiveProp\s*\([^)]*writable\s*:\s*true/',
+                'regex' => '/#\[\s*LiveProp\s*\([^)]{0,512}writable\s*:\s*true/',
                 'description' => 'Writable LiveProp — client-controlled before any action runs; verify it is not a privileged or owned-resource field',
             ],
             'live_action_endpoint' => [
@@ -271,7 +299,7 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
             ],
             'extension_is_safe_html' => [
                 'regex' => '/[\'"]is_safe[\'"]\s*=>\s*\[\s*[\'"]html[\'"]\s*\]/',
-                'description' => 'is_safe => [\'html\'] declared — verify the returned string is built only from hardcoded markup or sanitized input, not raw user/DB content (stored XSS otherwise)',
+                'description' => "is_safe => ['html'] declared — verify the returned string is built only from hardcoded markup or sanitized input, not raw user/DB content (stored XSS otherwise)",
             ],
         ],
         ProjectFileType::TEMPLATE->value => [
@@ -318,7 +346,7 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
                 'description' => 'A credential-shaped value was redacted here before analysis — a real secret is committed in this file',
             ],
             'trusted_proxies_wildcard' => [
-                'regex' => '/(?:trusted_proxies\s*:|TRUSTED_PROXIES\s*=)[^\n]*(?:0\.0\.0\.0\/0|::\/0)|trusted_proxies\s*:[^\S\n]*\n(?:[^\S\n]*-[^\n]*\n)*?[^\S\n]*-[^\n]*(?:0\.0\.0\.0\/0|::\/0)/is',
+                'regex' => '/(?:trusted_proxies\s*:|TRUSTED_PROXIES\s*=)[^\n]{0,512}(?:0\.0\.0\.0\/0|::\/0)|trusted_proxies\s*:[^\S\n]*\n(?:[^\S\n]*-[^\n]*\n)*?[^\S\n]*-[^\n]*(?:0\.0\.0\.0\/0|::\/0)/is',
                 'description' => 'trusted_proxies set to a wildcard CIDR (0.0.0.0/0, ::/0) — any client can spoof X-Forwarded-* headers, defeating IP allowlists and rate limiters',
             ],
             'weak_password_hasher_algorithm' => [
@@ -338,7 +366,7 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
                 'description' => "Content-Security-Policy directive allows 'unsafe-inline'/'unsafe-eval' — defeats CSP's main protection against script injection",
             ],
             'hsts_disabled' => [
-                'regex' => '/forced_ssl\s*:[^\n]*\benabled\s*:\s*false\b|^(\h*)forced_ssl\s*:[^\n]*+(?:\n\1\h++[^\n]*+)*?\n\1\h++enabled\s*:\s*false\b/sm',
+                'regex' => '/forced_ssl\s*:[^\n]{0,512}\benabled\s*:\s*false\b|^(\h*)forced_ssl\s*:[^\n]*+(?:\n\1\h++[^\n]*+)*?\n\1\h++enabled\s*:\s*false\b/sm',
                 'description' => 'NelmioSecurity forced_ssl.enabled: false — HSTS not enforced, leaving the app open to SSL-stripping on the first plaintext request',
             ],
             'app_debug_enabled' => [
@@ -360,13 +388,13 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
                 'description' => 'SelfValidatingPassport — skips credential check; verify the flow is OAuth/token, not password',
             ],
             'supports_returns_null' => [
-                'regex' => '/public\s+function\s+supports\s*\([^)]*\)\s*:\s*\??bool\s*\{[\s\S]{0,500}?return\s+null\s*;/s',
+                'regex' => '/public\s+function\s+supports\s*\([^)]{0,512}\)\s*:\s*\??bool\s*\{[\s\S]{0,500}?return\s+null\s*;/s',
                 'description' => 'supports() returning null — Symfony treats null as "supports", silently letting non-matching paths through',
             ],
         ],
         ProjectFileType::LDAP_SERVICE->value => [
             'ldap_unescaped_filter_concat' => [
-                'regex' => '/->query\s*\([^)]*[\'"][^\'"]*\.\s*\$|ldap_search\s*\([^)]*\.\s*\$/',
+                'regex' => '/->query\s*\([^)]{0,512}[\'"][^\'"]{0,512}\.\s*\$|ldap_search\s*\([^)]{0,512}\.\s*\$/',
                 'description' => 'LDAP filter built with string concatenation — verify the interpolated value is passed through ldap_escape() first (LDAP injection)',
             ],
             'ldap_bind_variable_password' => [
@@ -391,7 +419,7 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
             ],
             'easyadmin_destructive_action' => [
                 'regex' => '/Action::(?:DELETE|BATCH_DELETE)\b/',
-                'description' => 'EasyAdmin DELETE/BATCH_DELETE action referenced in configureActions() — verify it is scoped with ->setPermission(Action::DELETE, \'ROLE_...\'), not left at the dashboard\'s default role',
+                'description' => "EasyAdmin DELETE/BATCH_DELETE action referenced in configureActions() — verify it is scoped with ->setPermission(Action::DELETE, 'ROLE_...'), not left at the dashboard's default role",
             ],
         ],
         ProjectFileType::MESSENGER_HANDLER->value => [
@@ -463,9 +491,35 @@ final readonly class RegexStaticPreScanner implements StaticPreScannerInterface
                     );
                 }
             }
+
+            array_push($markers, ...$this->unmappedAccessControlMarkers($file));
         }
 
         return $markers;
+    }
+
+    /**
+     * The mapping parsers skip a controller or voter that {@see NestingDepthGuard}
+     * refuses, so its routes and guards are missing from the access-control
+     * map the attacker reads: this marker tells the attacker so, instead of
+     * letting the file pass as one with nothing to map.
+     *
+     * @return list<RiskMarker>
+     *
+     * @throws InvalidRiskMarkerException
+     */
+    private function unmappedAccessControlMarkers(ProjectFile $projectFile): array
+    {
+        if (!$this->isReadByTheMapping($projectFile) || $this->nestingDepthGuard->admits($projectFile)) {
+            return [];
+        }
+
+        return [RiskMarker::create($projectFile->relativePath(), 1, self::UNMAPPED_ACCESS_CONTROL, self::UNMAPPED_ACCESS_CONTROL_DESCRIPTION)];
+    }
+
+    private function isReadByTheMapping(ProjectFile $projectFile): bool
+    {
+        return $projectFile->fileType()->isControllerLike() || ProjectFileType::VOTER === $projectFile->fileType();
     }
 
     /**

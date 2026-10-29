@@ -16,7 +16,8 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Command;
 use Symfony\Component\Console\Attribute\Argument;
 use Symfony\Component\Console\Attribute\Option;
 use Symfony\Component\Filesystem\Path;
-use Symfony\Component\String\UnicodeString;
+use Symfony\Component\String\AbstractString;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Scan\PathText;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\RiskLevel;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\ConflictingCommandOptionsException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\WorkingDirectoryUnavailableException;
@@ -32,19 +33,28 @@ use function Symfony\Component\String\u;
  */
 final class AuditCommandInput
 {
-    #[Argument(description: 'Path to the Symfony project to audit. Defaults to the current working directory.')]
+    private const int LOWEST_MIN_SCORE = 0;
+
+    private const int HIGHEST_MIN_SCORE = 100;
+
+    #[Argument(description: 'Path to the Symfony project to audit. Defaults to the current working directory. A folder that holds no composer.json and no file scan.included_paths reaches audits the Composer project it lies in, narrowed to that folder, and reads a --path relative to it.')]
     public ?string $projectPath = null;
 
-    #[Option(description: 'Output format: console, executive, json, sarif, html, markdown, junit or github', shortcut: 'f')]
+    #[Option(description: 'Output format: console, executive, json, sarif, html, markdown, junit, github or github-comment. Defaults to the audit.format config key, console when it is unset.', name: 'format', shortcut: 'f')]
+    public ?OutputFormat $givenFormat = null;
+
     public OutputFormat $format = OutputFormat::Console;
 
-    #[Option(description: 'Output file path (any format)', shortcut: 'o')]
+    #[Option(description: 'Output file path (any format). Overrides the audit.output config key for this run.', shortcut: 'o')]
     public ?string $output = null;
+
+    #[Option(description: 'Print the report instead of writing it to a file, whatever audit.output says. Cannot be combined with --output.', name: 'no-output')]
+    public bool $noOutput = false;
 
     #[Option(description: 'Estimate token usage and cost without invoking the LLM; emits a report with zero vulnerabilities and an estimated cost block.')]
     public bool $dryRun = false;
 
-    #[Option(description: 'List the files that would be audited (after applying included_paths and any --path filters) and exit, without invoking the LLM. Use it to confirm your scan scope. Combine with --dry-run to also print the cost estimate.', name: 'show-scanned')]
+    #[Option(description: 'List the files that would be audited (those of the configured included_paths, or of the --path values in their place) and exit, without invoking the LLM. Use it to confirm your scan scope. Combine with --dry-run to also print the cost estimate.', name: 'show-scanned')]
     public bool $showScanned = false;
 
     #[Option(description: 'Bypass the attacker and reviewer caches for this run: skip cache reads so every chunk and verdict hits the LLM, and skip cache writes so existing entries stay untouched. Useful after upgrading the auditor or when you need to force a fresh analysis.', name: 'no-cache')]
@@ -53,7 +63,7 @@ final class AuditCommandInput
     /**
      * @var list<string>
      */
-    #[Option(description: 'Restrict the scan to a subdirectory of the project (relative to the project root). Repeat the option to include several subdirectories. Useful for monorepos where only one app should be audited. By default the whole project is scanned.', name: 'path', shortcut: 'p')]
+    #[Option(description: 'Scan these directories or files of the project (relative to the project root) in place of scan.included_paths for this run; the project root itself keeps the configured scope. Repeat the option to give several. Useful for monorepos where only one app should be audited. By default the configured scope is scanned.', name: 'path', shortcut: 'p')]
     public array $paths = [];
 
     #[Option(description: 'Diff mode: audit only files changed against the given git ref (e.g. main, origin/main, abc1234). Honors both committed changes (ref...HEAD) and uncommitted working-tree changes. Designed for CI on pull requests; the cache stays warm for unchanged files.', name: 'since')]
@@ -68,11 +78,42 @@ final class AuditCommandInput
     #[Option(description: 'Minimum aggregate risk level (safe|low|medium|high|critical) that makes the command exit 1. Overrides the audit.fail_on config key for this run. Defaults to the configured value (critical) when omitted.', name: 'fail-on')]
     public ?RiskLevel $failOn = null;
 
-    #[Option(description: 'Minimum normalized score (0-100) below which the command exits 1. Independent of --fail-on: the audit fails when either gate trips. Omit to gate on the risk level alone.', name: 'min-score')]
+    #[Option(description: 'Minimum normalized score (0-100) below which the command exits 1. Independent of --fail-on: the audit fails when either gate trips. Overrides the audit.min_score config key for this run; with neither, the risk level alone gates.', name: 'min-score')]
     public ?int $minScore = null;
 
-    #[Option(description: 'Exit 3 when some file could not be fully analyzed (a scan or LLM call failed), so a partial report cannot pass CI. A tripped --fail-on or --min-score gate still exits 1. Without it, such a run only prints a warning.', name: 'fail-on-incomplete')]
-    public bool $failOnIncomplete = false;
+    #[Option(description: 'Exit 3 when some file could not be fully analyzed (a scan or LLM call failed), so a partial report cannot pass CI. A tripped --fail-on or --min-score gate still exits 1. Without it, such a run only prints a warning unless audit.fail_on_incomplete is set; --no-fail-on-incomplete turns that off for this run.', name: 'fail-on-incomplete')]
+    public ?bool $failOnIncomplete = null;
+
+    private bool $failOnIncompleteFromConfiguration = false;
+
+    /**
+     * Fills what the command line left unset from the configuration, so a flag
+     * always wins over its `audit.*` key. An empty `audit.output`, such as an
+     * `%env()%` an `.env` file leaves blank, prints the report, as an unset
+     * one does.
+     */
+    public function applyDefaults(AuditCommandDefaults $auditCommandDefaults): void
+    {
+        $this->minScore ??= $auditCommandDefaults->minScore;
+        $this->failOnIncompleteFromConfiguration = null === $this->failOnIncomplete;
+        $this->failOnIncomplete ??= $auditCommandDefaults->failOnIncomplete;
+        $this->output ??= $this->noOutput || $this->dryRun || '' === $auditCommandDefaults->output ? null : $auditCommandDefaults->output;
+        $this->format = $this->givenFormat ?? $auditCommandDefaults->format;
+    }
+
+    public function failsOnIncomplete(): bool
+    {
+        return true === $this->failOnIncomplete;
+    }
+
+    /**
+     * What decides whether an incomplete run fails: the flag, or — when the
+     * command line left it unset — the configuration key.
+     */
+    public function failOnIncompleteSetting(): string
+    {
+        return $this->failOnIncompleteFromConfiguration ? 'audit.fail_on_incomplete' : '--fail-on-incomplete';
+    }
 
     /**
      * @param ?callable(): (string|false) $cwdResolver defaults to PHP's getcwd; tests inject a stub
@@ -81,7 +122,7 @@ final class AuditCommandInput
      */
     public function resolvedProjectPath(?callable $cwdResolver = null): string
     {
-        $trimmedPath = u($this->projectPath ?? '')->trim()->toString();
+        $trimmedPath = PathText::of($this->projectPath ?? '')->trim()->toString();
         if (Path::isAbsolute($trimmedPath)) {
             return Path::canonicalize($trimmedPath);
         }
@@ -102,7 +143,7 @@ final class AuditCommandInput
     {
         $normalized = [];
         foreach ($this->paths as $path) {
-            $trimmed = $this->stripLeadingCurrentDirSegment(u($path)->trim()->trimEnd('/'));
+            $trimmed = $this->stripLeadingCurrentDirSegment(PathText::of($path)->trim()->trimEnd('/'));
             if ($trimmed->isEmpty()) {
                 continue;
             }
@@ -120,25 +161,29 @@ final class AuditCommandInput
      * real relative path — silently scanning zero files instead of the
      * intended subdirectory (or, for a bare `.`, the whole project).
      */
-    private function stripLeadingCurrentDirSegment(UnicodeString $unicodeString): UnicodeString
+    private function stripLeadingCurrentDirSegment(AbstractString $abstractString): AbstractString
     {
-        while ($unicodeString->startsWith('./')) {
-            $unicodeString = $unicodeString->after('/')->trimStart('/');
+        while ($abstractString->startsWith('./')) {
+            $abstractString = $abstractString->after('/')->trimStart('/');
         }
 
-        return '.' === $unicodeString->toString() ? u('') : $unicodeString;
+        return '.' === $abstractString->toString() ? u('') : $abstractString;
     }
 
     /**
-     * `--generate-baseline` requires a real audit run to have real findings
-     * to write to the baseline file, but `--dry-run` and `--show-scanned`
-     * both exit before the LLM is ever invoked — combined, one silently wins
-     * over the other with no file written and no diagnostic.
+     * `--output` with `--no-output` asks for opposite things, and
+     * `--generate-baseline` needs a real audit run while `--dry-run` and
+     * `--show-scanned` exit before the LLM is ever invoked — combined, one
+     * silently wins over the other with no file written and no diagnostic.
      *
      * @throws ConflictingCommandOptionsException
      */
     public function assertNoConflictingOptions(): void
     {
+        if ($this->noOutput && null !== $this->output) {
+            throw ConflictingCommandOptionsException::forOutputWithNoOutput();
+        }
+
         if (null === $this->generateBaseline) {
             return;
         }
@@ -150,6 +195,25 @@ final class AuditCommandInput
         if ($this->showScanned) {
             throw ConflictingCommandOptionsException::forGenerateBaselineWithPreviewFlag('--show-scanned');
         }
+    }
+
+    /**
+     * `--min-score` gates on the normalized score, which only spans 0 to 100: a
+     * value below it gates none. It is honored all the same, as it always was,
+     * so the caller says so instead of refusing it.
+     */
+    public function minScoreBelowRange(): ?int
+    {
+        return null !== $this->minScore && $this->minScore < self::LOWEST_MIN_SCORE ? $this->minScore : null;
+    }
+
+    /**
+     * A value above the normalized score range fails every run, and is honored
+     * as such.
+     */
+    public function minScoreAboveRange(): ?int
+    {
+        return null !== $this->minScore && $this->minScore > self::HIGHEST_MIN_SCORE ? $this->minScore : null;
     }
 
     /**

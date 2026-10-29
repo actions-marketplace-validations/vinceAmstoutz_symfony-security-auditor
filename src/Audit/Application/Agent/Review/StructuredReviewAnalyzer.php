@@ -15,6 +15,7 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Review;
 
 use Psr\Log\LoggerInterface;
 use Throwable;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\RecordingToolClients;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\RecordReviewToolFactoryInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\Exception\BudgetExceededException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidToolRegistryException;
@@ -29,7 +30,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ReviewerPromptBuilder
 
 /**
  * Reviews findings one at a time, collecting each verdict through a
- * schema-enforced `record_review` tool call. Cache hits short-circuit the LLM.
+ * schema-enforced `record_review` tool call — or reading it from the answer, as
+ * the JSON path does, when the client never offered the tool. Cache hits
+ * short-circuit the LLM.
  *
  * A finding the model cannot review with its whole file in the prompt is
  * recorded as errored and the review goes on with the next one.
@@ -46,6 +49,7 @@ final readonly class StructuredReviewAnalyzer
         private RecordReviewToolFactoryInterface $recordReviewToolFactory,
         private LoggerInterface $logger,
         private int $maxToolIterations,
+        private RecordingToolClients $recordingToolClients,
     ) {}
 
     /**
@@ -117,6 +121,11 @@ final readonly class StructuredReviewAnalyzer
         try {
             $llmResponse = $this->llmClient->completeWithTools($systemPrompt, $userMessage, $structuredReviewCollectionSession->toolRegistry, $this->maxToolIterations);
 
+            $this->recordingToolClients->note($this->llmClient, $structuredReviewCollectionSession->recordingToolReached());
+            if ($this->recordingToolClients->ignoresTools($this->llmClient)) {
+                return $this->reviewOutcomeRecorder->applyResponse($vulnerability, $llmResponse, $coverageRecorder, $codeContextForCache);
+            }
+
             $verdicts = $structuredReviewCollectionSession->drain();
 
             return $this->recordDrainedVerdict($vulnerability, $llmResponse, array_pop($verdicts), $codeContextForCache, $coverageRecorder);
@@ -140,7 +149,8 @@ final readonly class StructuredReviewAnalyzer
      * A conversation cut short (tool-loop cap, token limit, content filter,
      * no content) that recorded no verdict is an error, not a rejection: the
      * finding is recorded as errored and left out of the cache. A verdict the
-     * model did record before the cut-off is genuine and applied as usual.
+     * model did record before the cut-off is genuine and applied as usual,
+     * though one given at the tool-call limit is not cached.
      *
      * @param array<string, mixed>|null $verdict
      */
@@ -150,11 +160,12 @@ final readonly class StructuredReviewAnalyzer
             return $this->reviewOutcomeRecorder->recordIncompleteResponse($vulnerability, $llmResponse, $coverageRecorder);
         }
 
-        if (null !== $codeContextForCache) {
-            $this->reviewerVerdictCache->store($vulnerability, $codeContextForCache, $verdict);
+        $cacheContext = ReviewerVerdictCache::contextFor($llmResponse, $codeContextForCache);
+        if (null !== $cacheContext) {
+            $this->reviewerVerdictCache->store($vulnerability, $cacheContext, $verdict);
         }
 
-        return $this->reviewOutcomeRecorder->recordVerdict($vulnerability, $verdict, $coverageRecorder);
+        return $this->reviewOutcomeRecorder->recordVerdict($vulnerability, $verdict, $coverageRecorder, $llmResponse->reachedToolCap());
     }
 
     private function recordAbortOrRecoveredVerdict(Vulnerability $vulnerability, StructuredReviewCollectionSession $structuredReviewCollectionSession, string $status, CoverageRecorderInterface $coverageRecorder, ?string $codeContextForCache): void

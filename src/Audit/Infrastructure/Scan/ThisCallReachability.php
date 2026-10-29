@@ -13,6 +13,7 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan;
 
+use Closure;
 use PhpParser\Node;
 use PhpParser\Node\Expr\MethodCall;
 use PhpParser\Node\Expr\NullsafeMethodCall;
@@ -76,13 +77,34 @@ final readonly class ThisCallReachability
                 $result[] = $statement;
             }
 
-            $helperMethods = $this->helperMethodsCalledBy($ownBody, $methodsByName);
-            for ($i = \count($helperMethods) - 1; $i >= 0; --$i) {
-                $stack[] = $helperMethods[$i];
+            foreach (array_reverse($this->helperMethodsCalledBy($ownBody, $methodsByName)) as $helperMethod) {
+                $stack[] = $helperMethod;
             }
         }
 
         return $result;
+    }
+
+    /**
+     * Indexes, once for the whole class, which of its methods call which, and
+     * the calls each method holds that `$isRelevant` accepts — so asking every
+     * public action for the relevant calls it reaches no longer walks the
+     * syntax tree of every helper again for each one of them.
+     *
+     * @param array<string, ClassMethod>                              $methodsByName
+     * @param Closure(MethodCall|NullsafeMethodCall|StaticCall): bool $isRelevant
+     */
+    public function indexCalls(array $methodsByName, Closure $isRelevant): ReachableCallIndex
+    {
+        $helpersByMethod = [];
+        $relevantCallsByMethod = [];
+        foreach ($methodsByName as $name => $classMethod) {
+            $calls = $this->callsIn($classMethod->stmts ?? []);
+            $helpersByMethod[$name] = $this->helperNamesCalledBy($calls, $methodsByName);
+            $relevantCallsByMethod[$name] = array_filter($calls, $isRelevant);
+        }
+
+        return new ReachableCallIndex($helpersByMethod, $relevantCallsByMethod);
     }
 
     /**
@@ -93,21 +115,43 @@ final readonly class ThisCallReachability
      */
     private function helperMethodsCalledBy(array $ownBody, array $methodsByName): array
     {
-        $methodCalls = [
-            ...$this->nodeFinder->findInstanceOf($ownBody, MethodCall::class),
-            ...$this->nodeFinder->findInstanceOf($ownBody, NullsafeMethodCall::class),
-            ...$this->nodeFinder->findInstanceOf($ownBody, StaticCall::class),
-        ];
+        return array_map(
+            static fn (string $name): ClassMethod => $methodsByName[$name],
+            $this->helperNamesCalledBy($this->callsIn($ownBody), $methodsByName),
+        );
+    }
 
-        $helperMethods = [];
+    /**
+     * @param array<Node> $nodes
+     *
+     * @return array<MethodCall|NullsafeMethodCall|StaticCall>
+     */
+    private function callsIn(array $nodes): array
+    {
+        return [
+            ...$this->nodeFinder->findInstanceOf($nodes, MethodCall::class),
+            ...$this->nodeFinder->findInstanceOf($nodes, NullsafeMethodCall::class),
+            ...$this->nodeFinder->findInstanceOf($nodes, StaticCall::class),
+        ];
+    }
+
+    /**
+     * @param array<MethodCall|NullsafeMethodCall|StaticCall> $methodCalls
+     * @param array<string, ClassMethod>                      $methodsByName
+     *
+     * @return list<string>
+     */
+    private function helperNamesCalledBy(array $methodCalls, array $methodsByName): array
+    {
+        $helperNames = [];
         foreach ($methodCalls as $methodCall) {
             $calledName = $this->calledMethodName($methodCall);
             if (null !== $calledName && \array_key_exists($calledName, $methodsByName)) {
-                $helperMethods[] = $methodsByName[$calledName];
+                $helperNames[] = $calledName;
             }
         }
 
-        return $helperMethods;
+        return $helperNames;
     }
 
     private function calledMethodName(MethodCall|NullsafeMethodCall|StaticCall $call): ?string

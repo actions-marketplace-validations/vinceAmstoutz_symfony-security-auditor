@@ -15,14 +15,20 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Command;
 
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\EchoedFilePath;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Scan\ScanPathFilter;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AnalyzedFiles;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ScanSkippedFiles;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\UnanalyzedFiles;
 
 /**
- * What a JSON audit report tells a comparison: its findings, the files it
- * could not fully analyze, and — when it carries a coverage ledger — the files
- * its attacker analyzed or served from its cache, the files its ledger names
- * at all, and the scan scope of a complete run over the whole history. Only in
- * the files it analyzed, or in a file such a run no longer lists, can the
- * absence of a finding prove anything.
+ * What a JSON audit report tells a comparison: its findings, the fingerprints
+ * of the findings it left out because the baseline accepted them or their type
+ * is muted, the files it could not fully analyze, and — when it carries a
+ * coverage ledger — the files its attacker analyzed or served from its cache,
+ * the files its ledger names at all, and the scan scope of a complete run over
+ * the whole history. Only in the files it analyzed, or in a file such a run no
+ * longer lists, can the absence of a finding prove anything. A file the scan
+ * left out is listed for information only ({@see ScanSkippedFiles}): the
+ * ledger does not name it, as the ledger of a scan that listed nothing did not.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -37,25 +43,35 @@ final readonly class LoadedReport
     /** @var array<string, int> */
     private array $ledger;
 
+    /** @var list<string> one entry per occurrence the report left out, under the fingerprint a report lists the finding under */
+    public array $suppressedFingerprints;
+
+    /** @var list<string> the baseline fingerprint that left out each of `$suppressedFingerprints`, in the same order */
+    public array $suppressedBaselineFingerprints;
+
     /**
-     * @param list<DiffFinding> $findings
-     * @param list<string>      $unanalyzedFiles
-     * @param list<string>|null $analyzedFiles        null for a report written before the coverage ledger existed
-     * @param list<string>      $ledgerFiles          every file the ledger names, whatever its stage or status
-     * @param list<string>|null $completeRunScanPaths the `--path` scopes of a complete run over the whole history
-     *                                                (no `--since`); null when the report records no scope or ran
-     *                                                otherwise
+     * @param list<DiffFinding>                                             $findings
+     * @param list<array{stage: string, file: string, status: string}>|null $coverage             null for a report written before the coverage ledger existed
+     * @param list<string>|null                                             $completeRunScanPaths the `--path` scopes of a complete run over the whole history
+     *                                                                                            (no `--since`); null when the report records no scope or ran
+     *                                                                                            otherwise
+     * @param string|null                                                   $projectPath          the folder the run audited, which an absolute path inside it is
+     *                                                                                            read against; null for a report written before 1.22, which
+     *                                                                                            lists no `suppressed_fingerprints` and names each finding as
+     *                                                                                            the model did, not by its project file
      */
     public function __construct(
         public array $findings,
-        public array $unanalyzedFiles = [],
-        public ?array $analyzedFiles = null,
-        array $ledgerFiles = [],
+        SuppressedFingerprintLists $suppressedFingerprintLists,
+        ?array $coverage = null,
         private ?array $completeRunScanPaths = null,
+        public ?string $projectPath = null,
     ) {
-        $this->unanalyzed = array_flip(array_map(EchoedFilePath::normalize(...), $unanalyzedFiles));
-        $this->analyzed = null === $analyzedFiles ? null : array_flip(array_map(EchoedFilePath::normalize(...), $analyzedFiles));
-        $this->ledger = array_flip(array_map(EchoedFilePath::normalize(...), $ledgerFiles));
+        $this->suppressedFingerprints = $suppressedFingerprintLists->listed;
+        $this->suppressedBaselineFingerprints = $suppressedFingerprintLists->baseline;
+        $this->unanalyzed = array_flip(array_map(EchoedFilePath::normalize(...), UnanalyzedFiles::in($coverage ?? [])));
+        $this->analyzed = null === $coverage ? null : array_flip(array_map(EchoedFilePath::normalize(...), AnalyzedFiles::in($coverage)));
+        $this->ledger = array_flip(array_map(EchoedFilePath::normalize(...), array_column(ScanSkippedFiles::without($coverage ?? []), 'file')));
     }
 
     /**

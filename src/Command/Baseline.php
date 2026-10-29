@@ -20,11 +20,14 @@ use Symfony\Component\Filesystem\Filesystem;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AcceptedFindingFeedback;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ReviewerFeedback;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemTriageMemoryStore;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\BoundedFileReader;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\Exception\UnreadableInputFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\SymlinkGuard;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\BaselineWriteFailedException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\MalformedBaselineFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\UnsafeBaselineWriteException;
 
+use function Symfony\Component\String\b;
 use function Symfony\Component\String\u;
 
 /**
@@ -39,6 +42,8 @@ final readonly class Baseline implements BaselineInterface
     private const int MAX_FEEDBACK_FILE_LENGTH = 512;
 
     private const int MAX_FEEDBACK_TITLE_LENGTH = 300;
+
+    private const string INVISIBLE_FORMAT_CHARACTERS = '/[\x{061C}\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{FEFF}\x{E0000}-\x{E007F}]/u';
 
     public function __construct(
         private Filesystem $filesystem = new Filesystem(),
@@ -108,11 +113,11 @@ final readonly class Baseline implements BaselineInterface
         }
 
         try {
-            $decoded = json_decode($this->filesystem->readFile($path), true, flags: \JSON_THROW_ON_ERROR);
+            $decoded = json_decode(BoundedFileReader::read($path), true, flags: \JSON_THROW_ON_ERROR);
         } catch (JsonException $jsonException) {
             throw MalformedBaselineFileException::fromJsonException($path, $jsonException);
-        } catch (IOException $ioException) {
-            throw MalformedBaselineFileException::fromIOException($path, $ioException);
+        } catch (UnreadableInputFileException $unreadableInputFileException) {
+            throw MalformedBaselineFileException::fromIOException($path, $unreadableInputFileException);
         }
 
         if (!\is_array($decoded) || !array_is_list($decoded)) {
@@ -215,15 +220,24 @@ final readonly class Baseline implements BaselineInterface
         $this->assertSafeToWrite($path, $projectPath);
 
         try {
-            $this->filesystem->dumpFile(
-                $path,
-                json_encode($entries, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR).\PHP_EOL,
-            );
+            WritableFilePath::dump($this->filesystem, $path, $this->encode($entries).\PHP_EOL);
         } catch (JsonException $jsonException) {
             throw MalformedBaselineFileException::fromEncodingException($path, $jsonException);
         } catch (IOException $ioException) {
             throw MalformedBaselineFileException::fromIOException($path, $ioException);
         }
+    }
+
+    /**
+     * @param list<array<array-key, mixed>|string> $entries
+     *
+     * @throws JsonException
+     */
+    private function encode(array $entries): string
+    {
+        return b(json_encode($entries, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR))
+            ->replaceMatches(self::INVISIBLE_FORMAT_CHARACTERS, static fn (array $match): string => substr(json_encode($match[0], \JSON_THROW_ON_ERROR), 1, -1))
+            ->toString();
     }
 
     /**

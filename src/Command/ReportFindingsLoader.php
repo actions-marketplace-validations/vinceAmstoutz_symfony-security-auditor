@@ -59,15 +59,51 @@ final readonly class ReportFindingsLoader implements ReportFindingsLoaderInterfa
         }
 
         $coverage = $this->coverageIn($decoded);
-        $analyzedFiles = null === $coverage ? null : AnalyzedFiles::in($coverage);
 
         return new LoadedReport(
             $findings,
-            UnanalyzedFiles::in($coverage ?? []),
-            $analyzedFiles,
-            array_column($coverage ?? [], 'file'),
-            $this->completeRunScanPathsIn($decoded, $analyzedFiles ?? []),
+            new SuppressedFingerprintLists(
+                $this->stringsIn($decoded['suppressed_fingerprints'] ?? null),
+                $this->stringsIn($decoded['suppressed_baseline_fingerprints'] ?? $decoded['suppressed_fingerprints'] ?? null),
+            ),
+            $coverage,
+            $this->completeRunScanPathsIn($decoded, AnalyzedFiles::in($coverage ?? [])),
+            $this->projectPathIn($decoded),
         );
+    }
+
+    /**
+     * The strings of a list the report holds: the fingerprints of the findings
+     * the run found and its report leaves out — accepted by the baseline or
+     * muted by type — under `suppressed_fingerprints`, the baseline
+     * fingerprints that left them out under `suppressed_baseline_fingerprints`.
+     * A report written before that key existed lists the baseline fingerprints
+     * under `suppressed_fingerprints`, and one written before both lists none.
+     *
+     * @return list<string>
+     */
+    private function stringsIn(mixed $fingerprints): array
+    {
+        return \is_array($fingerprints) ? array_values(array_filter($fingerprints, \is_string(...))) : [];
+    }
+
+    /**
+     * The folder the run audited, from a report that names each finding by
+     * its project file — one written since it lists `suppressed_fingerprints`.
+     * Null for a report written before, whose findings keep the paths the
+     * model echoed.
+     *
+     * @param array<array-key, mixed> $decoded
+     */
+    private function projectPathIn(array $decoded): ?string
+    {
+        if (!\array_key_exists('suppressed_fingerprints', $decoded)) {
+            return null;
+        }
+
+        $project = $decoded['project'] ?? null;
+
+        return \is_string($project) ? $project : '';
     }
 
     /**

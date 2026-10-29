@@ -23,14 +23,18 @@ use Symfony\AI\Platform\Exception\ContentFilterException;
 use Symfony\AI\Platform\Exception\MalformedToolCallException;
 use Symfony\AI\Platform\Exception\MaxOutputTokensException;
 use Symfony\AI\Platform\Exception\RuntimeException as PlatformRuntimeException;
+use Symfony\AI\Platform\FinishReason\FinishReason;
+use Symfony\AI\Platform\FinishReason\FinishReasonCase;
 use Symfony\AI\Platform\PlainConverter;
 use Symfony\AI\Platform\PlatformInterface;
 use Symfony\AI\Platform\Result\DeferredResult;
 use Symfony\AI\Platform\Result\InMemoryRawResult;
 use Symfony\AI\Platform\Result\RawHttpResult;
 use Symfony\AI\Platform\Result\TextResult;
+use Symfony\AI\Platform\Result\ThinkingResult;
 use Symfony\AI\Platform\Result\ToolCall;
 use Symfony\AI\Platform\Result\ToolCallResult;
+use Symfony\AI\Platform\TokenUsage\TokenUsage;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 use Throwable;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunk\StructuredVulnerabilityCollectionSession;
@@ -108,6 +112,70 @@ final class SymfonyAiLLMClientDegradedOutcomeTest extends TestCase
             ['LLM returned a response with no content blocks', ['stop_reason' => 'length', 'error' => 'LLM returned a response with no content: The response hit the output token limit']],
             $messageCollectingLogger->records,
         );
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidAuditBudgetException
+     * @throws InvalidTokenUsageException
+     * @throws LLMProviderException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     */
+    public function test_complete_answers_a_thinking_only_answer_cut_off_by_the_output_limit_as_a_length_response_and_books_it(): void
+    {
+        $scriptedTokenUsagePlatform = new ScriptedTokenUsagePlatform([$this->thinkingCutOffByTheOutputLimit()], [new TokenUsage(promptTokens: 20000, completionTokens: 8192)]);
+        $fakeRateLimiter = new FakeRateLimiter();
+        $budgetTracker = new BudgetTracker(AuditBudget::unlimited(), new CostCalculator($this->freePricing()));
+        $tokenUsageRecorder = new TokenUsageRecorder();
+        $symfonyAiLLMClient = new SymfonyAiLLMClient(
+            new PlatformBinding($scriptedTokenUsagePlatform, 'm', new NullLogger()),
+            platformResilienceConfig: new PlatformResilienceConfig(sleeper: new FakeSleeper(), rateLimiter: $fakeRateLimiter),
+            platformAccountingConfig: new PlatformAccountingConfig($tokenUsageRecorder, $budgetTracker),
+        );
+
+        $llmResponse = $symfonyAiLLMClient->complete('sys', 'usr');
+
+        self::assertSame('length', $llmResponse->stopReason());
+        self::assertSame('', $llmResponse->content());
+        self::assertTrue($llmResponse->isDegraded());
+        self::assertSame([20000, 8192], [$llmResponse->inputTokens(), $llmResponse->outputTokens()]);
+        self::assertSame(1, $scriptedTokenUsagePlatform->invocations);
+        self::assertSame(28192, $budgetTracker->tokensUsed());
+        self::assertSame([20000, 8192], [$tokenUsageRecorder->snapshot()->inputTokens(), $tokenUsageRecorder->snapshot()->outputTokens()]);
+        self::assertSame([[20000, 8192]], $fakeRateLimiter->recorded);
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws InvalidAuditBudgetException
+     * @throws InvalidTokenUsageException
+     * @throws LLMProviderException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     */
+    public function test_complete_batch_answers_a_thinking_only_answer_cut_off_by_the_output_limit_without_sending_it_again_or_losing_its_sibling(): void
+    {
+        $scriptedTokenUsagePlatform = new ScriptedTokenUsagePlatform(
+            [$this->thinkingCutOffByTheOutputLimit(), new TextResult('sibling answer')],
+            [new TokenUsage(promptTokens: 20000, completionTokens: 8192), new TokenUsage(promptTokens: 10, completionTokens: 5)],
+        );
+        $budgetTracker = new BudgetTracker(AuditBudget::unlimited(), new CostCalculator($this->freePricing()));
+        $symfonyAiLLMClient = new SymfonyAiLLMClient(
+            new PlatformBinding($scriptedTokenUsagePlatform, 'm', new NullLogger()),
+            platformResilienceConfig: new PlatformResilienceConfig(sleeper: new FakeSleeper()),
+            platformAccountingConfig: new PlatformAccountingConfig(budgetTracker: $budgetTracker),
+        );
+
+        $responses = $symfonyAiLLMClient->completeBatch([['system' => 's', 'user' => 'thinking'], ['system' => 's', 'user' => 'sibling']], 2);
+
+        self::assertCount(2, $responses);
+        self::assertSame(['length', ''], [$responses[0]->stopReason(), $responses[0]->content()]);
+        self::assertSame([20000, 8192], [$responses[0]->inputTokens(), $responses[0]->outputTokens()]);
+        self::assertSame(['end_turn', 'sibling answer'], [$responses[1]->stopReason(), $responses[1]->content()]);
+        self::assertSame([10, 5], [$responses[1]->inputTokens(), $responses[1]->outputTokens()]);
+        self::assertSame(2, $scriptedTokenUsagePlatform->invocations);
+        self::assertSame(28207, $budgetTracker->tokensUsed());
     }
 
     /**
@@ -235,7 +303,7 @@ final class SymfonyAiLLMClientDegradedOutcomeTest extends TestCase
         $scriptedTokenUsagePlatform = new ScriptedTokenUsagePlatform([
             new ToolCallResult([new ToolCall('call-1', 'record_vulnerability', $this->finding())]),
             new MaxOutputTokensException('cut off'),
-        ], []);
+        ], [new TokenUsage(promptTokens: 7, completionTokens: 3)]);
         $messageCollectingLogger = new MessageCollectingLogger();
 
         $llmResponse = $this->client($scriptedTokenUsagePlatform, $messageCollectingLogger)->completeWithTools('sys', 'usr', StructuredVulnerabilityCollectionSession::begin(new RecordVulnerabilityToolFactory(), new NullLogger(), [])->toolRegistry, 3);
@@ -243,7 +311,7 @@ final class SymfonyAiLLMClientDegradedOutcomeTest extends TestCase
         self::assertSame('length', $llmResponse->stopReason());
         self::assertSame(2, $scriptedTokenUsagePlatform->invocations);
         self::assertContains(
-            ['Tool-using loop ended with empty content response', ['iterations' => 1, 'stop_reason' => 'length', 'input_tokens' => 0, 'output_tokens' => 0, 'error' => 'LLM returned a response with no content: cut off']],
+            ['Tool-using loop ended with empty content response', ['iterations' => 1, 'stop_reason' => 'length', 'input_tokens' => 7, 'output_tokens' => 3, 'error' => 'LLM returned a response with no content: cut off']],
             $messageCollectingLogger->records,
         );
     }
@@ -492,8 +560,10 @@ final class SymfonyAiLLMClientDegradedOutcomeTest extends TestCase
         $consumed->method('cancel')->willReturnCallback(static function () use (&$cancelled): void {
             $cancelled[] = 'consumed';
         });
+        $deferredResult = new DeferredResult(new PlainConverter(new TextResult('ok')), new RawHttpResult($consumed), []);
+        $deferredResult->getMetadata()->add('token_usage', new TokenUsage(promptTokens: 4, completionTokens: 1));
         $scriptedDeferredPlatform = new ScriptedDeferredPlatform([
-            new DeferredResult(new PlainConverter(new TextResult('ok')), new RawHttpResult($consumed), []),
+            $deferredResult,
             new DeferredResult(new ThrowingConverter(new RuntimeException('HTTP 401 Unauthorized')), new RawHttpResult($refused), []),
             new RuntimeException('dispatch blip'),
             new DeferredResult(new PlainConverter(new TextResult('never read')), new RawHttpResult($abandoned), []),
@@ -525,9 +595,9 @@ final class SymfonyAiLLMClientDegradedOutcomeTest extends TestCase
         self::assertInstanceOf(NonTransientLLMFailureException::class, $caught);
         self::assertSame(['refused', 'abandoned'], $cancelled);
         self::assertSame([10, 0], end($fakeRateLimiter->recorded));
-        self::assertSame(10, $budgetTracker->tokensUsed());
-        self::assertSame(10, $tokenUsageRecorder->snapshot()->inputTokens());
-        self::assertSame(0, $tokenUsageRecorder->snapshot()->outputTokens());
+        self::assertSame(15, $budgetTracker->tokensUsed());
+        self::assertSame(14, $tokenUsageRecorder->snapshot()->inputTokens());
+        self::assertSame(1, $tokenUsageRecorder->snapshot()->outputTokens());
         self::assertContains(
             ['Cancelled a request still in flight; its estimated input tokens are booked as spent since the provider bills a request it accepted', ['estimated_input_tokens' => 10]],
             $messageCollectingLogger->records,
@@ -819,6 +889,14 @@ final class SymfonyAiLLMClientDegradedOutcomeTest extends TestCase
                 return \strlen($text);
             }
         };
+    }
+
+    private function thinkingCutOffByTheOutputLimit(): ThinkingResult
+    {
+        $thinkingResult = new ThinkingResult('let me think about this controller', 'signature');
+        $thinkingResult->getMetadata()->add('finish_reason', new FinishReason(FinishReasonCase::LENGTH, 'max_tokens'));
+
+        return $thinkingResult;
     }
 
     private function freePricing(): PricingProviderInterface
