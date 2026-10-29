@@ -27,16 +27,28 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
  */
 final readonly class AttackerAnalysisRequest
 {
+    private KnownFiles $knownFiles;
+
     /**
      * @param list<ProjectFile>   $files
-     * @param list<Vulnerability> $previousFindings findings already validated by the
-     *                                              reviewer in earlier iterations, injected
-     *                                              into the prompt so the LLM generalizes
-     *                                              them to files not yet covered
-     * @param list<Vulnerability> $rejectedFindings findings the reviewer rejected in earlier
-     *                                              iterations, injected so the LLM stops
-     *                                              re-reporting them (saving tool-call and
-     *                                              reviewer budget)
+     * @param list<Vulnerability> $previousFindings  findings already validated by the
+     *                                               reviewer in earlier iterations, injected
+     *                                               into the prompt so the LLM generalizes
+     *                                               them to files not yet covered
+     * @param list<Vulnerability> $rejectedFindings  findings the reviewer rejected in earlier
+     *                                               iterations, injected so the LLM stops
+     *                                               re-reporting them (saving tool-call and
+     *                                               reviewer budget)
+     * @param list<Vulnerability> $candidateFindings findings a cheaper first-pass model reported on
+     *                                               these files, injected so the LLM confirms,
+     *                                               refines or discards each one — unlike
+     *                                               previousFindings they are unvalidated and
+     *                                               must be re-reported when confirmed
+     * @param ?list<ProjectFile>  $toolFiles         the files the investigation tools may open when they
+     *                                               are not the files to analyze — every scanned file on a
+     *                                               run narrowed by `--since`, `--path` or the escalation
+     *                                               deep pass, with `audit.tools_scope: scanned`; null
+     *                                               means `files`, those of the deep pass included
      */
     public function __construct(
         public array $files,
@@ -44,14 +56,38 @@ final readonly class AttackerAnalysisRequest
         public bool $bypassCache = false,
         public array $previousFindings = [],
         public array $rejectedFindings = [],
-    ) {}
+        public array $candidateFindings = [],
+        public ?array $toolFiles = null,
+    ) {
+        $this->knownFiles = new KnownFiles($this->filesForTools());
+    }
+
+    /**
+     * @return list<ProjectFile>
+     */
+    public function filesForTools(): array
+    {
+        return $this->toolFiles ?? $this->files;
+    }
+
+    /**
+     * The files a finding reported on `$chunk` is named by: the chunk's own,
+     * then every file the investigation tools may open, so a finding another
+     * chunk's file was reported under is named by that file too.
+     *
+     * @param list<ProjectFile> $chunk
+     */
+    public function knownFilesFor(array $chunk): KnownFiles
+    {
+        return new KnownFiles($chunk, $this->knownFiles);
+    }
 
     /**
      * @param list<ProjectFile>   $files
-     * @param list<Vulnerability> $previousFindings
+     * @param list<Vulnerability> $candidateFindings
      */
-    public function withFilesAndFindings(array $files, array $previousFindings): self
+    public function withFilesAndCandidateFindings(array $files, array $candidateFindings): self
     {
-        return new self($files, $this->symfonyMapping, $this->bypassCache, $previousFindings, $this->rejectedFindings);
+        return new self($files, $this->symfonyMapping, $this->bypassCache, $this->previousFindings, $this->rejectedFindings, $candidateFindings, $this->toolFiles);
     }
 }

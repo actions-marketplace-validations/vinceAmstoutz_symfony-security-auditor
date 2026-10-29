@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # A newer push to the same branch supersedes the run of the commit before it; pull request and manual runs are never cancelled.
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 env:
   # Pin the root package version instead of letting Composer guess it. The guess
   # depends on the checked-out branch name and on tags being present, neither of
@@ -32,7 +37,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
@@ -89,7 +94,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.3'
           coverage: none
@@ -163,6 +168,15 @@ jobs:
       - name: Install script tests
         run: sh tests/Shell/install_script_test.sh
 
+      - name: Pull request check tests
+        run: sh tests/Shell/pull_request_check_test.sh
+
+      - name: Changelog check tests
+        run: sh tests/Shell/changelog_check_test.sh
+
+      - name: Changelog check
+        run: sh .github/scripts/check-changelog.sh CHANGELOG.md
+
   zizmor:
     name: zizmor (GitHub Actions security scan)
     runs-on: ubuntu-latest
@@ -177,7 +191,7 @@ jobs:
           persist-credentials: false
 
       - name: Run zizmor
-        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
 
   tests:
     name: Tests + Mutation (PHP ${{ matrix.php }}, Symfony ${{ matrix.symfony }})
@@ -186,9 +200,14 @@ jobs:
       fail-fast: false
       matrix:
         php: ['8.3', '8.4', '8.5']
-        symfony: ['^7.4', '^8.0', '^8.1']
+        # Symfony 8.0 is end of life and Composer refuses its releases for their open security advisories.
+        symfony: ['7.4', '8.1']
+        exclude:
+          # Symfony 8 requires PHP 8.4.
+          - php: '8.3'
+            symfony: '8.1'
     env:
-      SYMFONY_REQUIRE: ${{ matrix.symfony }}
+      SYMFONY_REQUIRE: ${{ matrix.symfony }}.*
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -196,10 +215,12 @@ jobs:
           persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php }}
           coverage: pcov
+          # symfony/flex makes `composer update` honour SYMFONY_REQUIRE, which pins the leg's Symfony version.
+          tools: flex
 
       - name: Cache Composer dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -226,8 +247,8 @@ jobs:
             --log-junit=build/coverage/junit.xml \
 
       - name: Upload coverage to Codecov
-        if: matrix.php == '8.3' && matrix.symfony == '^7.4'
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        if: matrix.php == '8.3' && matrix.symfony == '7.4'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: build/coverage/clover.xml
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -244,4 +265,110 @@ jobs:
             git fetch --depth=1 origin "$BASE_REF"
             ARGS="$ARGS --git-diff-lines --git-diff-base=origin/$BASE_REF --ignore-msi-with-no-mutations"
           fi
-          php -d memory_limit=2G bin/infection $ARGS
+          php -d memory_limit=4G bin/infection $ARGS
+
+      - name: Show the escaped and timed-out mutants
+        if: failure()
+        run: |
+          if [ -f infection/infection.log ]; then
+            sed -n '/^Escaped mutants:$/,/^Skipped mutants:$/p' infection/infection.log | head -n 2000
+          fi
+
+      - name: Upload Infection logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: infection-logs-php${{ matrix.php }}-symfony${{ matrix.symfony }}
+          path: infection/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  compat:
+    name: Compatibility (with the last release)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vendor
+          key: composer-compat-${{ hashFiles('tests/Phpunit/Compat/composer.lock') }}
+
+      - name: Install the locked dependencies the recordings replay on
+        run: |
+          cp tests/Phpunit/Compat/composer.lock composer.lock
+          composer validate --no-check-publish --no-check-all
+          composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Compare with the fixtures recorded from the last release
+        run: vendor/bin/phpunit -c phpunit.compat.xml
+
+  api-bc:
+    name: API compatibility (roave/backward-compatibility-check)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: bcmath, intl
+          coverage: none
+
+      - name: Install roave/backward-compatibility-check
+        run: composer install --working-dir=tools/bc-check --no-interaction --prefer-dist --no-progress
+
+      - name: Find the last release of the line this change is headed for
+        id: release
+        env:
+          BASE_BRANCH: ${{ github.base_ref || github.ref_name }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          # A release branch names its line; a stacked pull request names it with the release branch ticked in its description, else the release branch it is closest to.
+          line=''
+          case "$BASE_BRANCH" in
+            [0-9]*.x) line="${BASE_BRANCH%.x}" ;;
+            main) ;;
+            *)
+              line="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' | sed -n 's/^- \[[xX]\] `\([0-9][0-9]*\)\.x`.*/\1/p' | head -n 1)"
+              if [ -z "$line" ]; then
+                closest=''
+                for branch in $(git for-each-ref --format='%(refname:lstrip=3)' refs/remotes/origin/); do
+                  case "$branch" in [0-9]*.x) ;; *) continue ;; esac
+                  ahead="$(git rev-list --count "origin/$branch..HEAD")"
+                  if [ -z "$closest" ] || [ "$ahead" -lt "$closest" ]; then
+                    closest="$ahead"
+                    line="${branch%.x}"
+                  fi
+                done
+              fi
+              ;;
+          esac
+          if [ -n "$line" ]; then pattern="$line.*.*"; else pattern='*.*.*'; fi
+          tag="$(git tag --list "$pattern" --sort=-v:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -z "$tag" ]; then
+            echo "::notice::No release of ${line:+line $line.x}${line:-any line} yet: there is no public API to compare with."
+          fi
+
+      - name: Compare the public API with that release
+        if: steps.release.outputs.tag != ''
+        env:
+          LAST_RELEASE: ${{ steps.release.outputs.tag }}
+        run: var/bc-check/vendor/bin/roave-backward-compatibility-check --from="$LAST_RELEASE" --format=github-actions

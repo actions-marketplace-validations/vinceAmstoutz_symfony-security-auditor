@@ -23,9 +23,12 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AcceptedFindingFeedb
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\AuditedProjectPathHolder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\Exception\InvalidCacheConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemTriageMemoryStore;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\FileSystem\Fixture\AssertsOwnerOnlyAccessTrait;
 
 final class FilesystemTriageMemoryStoreTest extends TestCase
 {
+    use AssertsOwnerOnlyAccessTrait;
+
     private const string PROJECT_PATH = '/project/alpha';
 
     private string $directory;
@@ -388,6 +391,61 @@ final class FilesystemTriageMemoryStoreTest extends TestCase
         $reviewerFeedback = (new FilesystemTriageMemoryStore($this->directory, $this->filesystem(), new NullLogger(), $projectB))->feedback();
 
         self::assertTrue($reviewerFeedback->isEmpty());
+    }
+
+    /**
+     * @throws InvalidCacheConfigurationException
+     */
+    public function test_it_still_remembers_when_a_directory_above_the_memory_is_a_symlink(): void
+    {
+        $base = sys_get_temp_dir().'/triage_memory_symlinked_parent_'.uniqid('', true);
+        mkdir($base.'/real', recursive: true);
+        symlink($base.'/real', $base.'/link');
+        $filesystemTriageMemoryStore = new FilesystemTriageMemoryStore($base.'/link/memory', $this->filesystem(), new NullLogger(), $this->projectPathHolder());
+        $workingDirectory = getcwd();
+        self::assertIsString($workingDirectory);
+
+        chdir($base);
+        try {
+            $filesystemTriageMemoryStore->record('sql_injection', 'src/A.php', 'Injectable query', 10, 'bound parameters');
+
+            self::assertCount(1, $filesystemTriageMemoryStore->feedback()->entries);
+        } finally {
+            chdir($workingDirectory);
+            (new Filesystem())->remove($base);
+        }
+    }
+
+    /**
+     * @throws InvalidCacheConfigurationException
+     */
+    public function test_it_refuses_its_own_directory_below_the_cache_root_when_that_is_a_symlink(): void
+    {
+        $base = sys_get_temp_dir().'/triage_memory_symlinked_self_'.uniqid('', true);
+        mkdir($base.'/elsewhere', recursive: true);
+        mkdir($base.'/cache');
+        symlink($base.'/elsewhere', $base.'/cache/triage-memory');
+        $filesystemTriageMemoryStore = new FilesystemTriageMemoryStore($base.'/cache/triage-memory', $this->filesystem(), new NullLogger(), $this->projectPathHolder());
+
+        try {
+            $filesystemTriageMemoryStore->record('sql_injection', 'src/A.php', 'Injectable query', 10, 'bound parameters');
+
+            self::assertSame(['.', '..'], scandir($base.'/elsewhere'));
+            self::assertTrue($filesystemTriageMemoryStore->feedback()->isEmpty());
+        } finally {
+            (new Filesystem())->remove($base);
+        }
+    }
+
+    /**
+     * @throws InvalidCacheConfigurationException
+     */
+    public function test_the_memory_file_and_the_directory_made_for_it_are_owner_only(): void
+    {
+        $this->filesystemTriageMemoryStore->record('sql_injection', 'src/A.php', 'Injectable query', 10, 'input is bound via a prepared statement');
+
+        self::assertOwnerOnlyFile($this->memoryPath);
+        self::assertOwnerOnlyDirectory($this->directory);
     }
 
     /**

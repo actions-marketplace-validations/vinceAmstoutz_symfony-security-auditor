@@ -16,19 +16,34 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\LLM;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
+use Symfony\AI\Platform\Exception\BadRequestException;
 use Symfony\AI\Platform\FinishReason\FinishReason;
 use Symfony\AI\Platform\FinishReason\FinishReasonCase;
 use Symfony\AI\Platform\PlainConverter;
 use Symfony\AI\Platform\Result\DeferredResult;
 use Symfony\AI\Platform\Result\InMemoryRawResult;
+use Symfony\AI\Platform\Result\MultiPartResult;
+use Symfony\AI\Platform\Result\RawHttpResult;
+use Symfony\AI\Platform\Result\RawResultInterface;
 use Symfony\AI\Platform\Result\TextResult;
+use Symfony\AI\Platform\Result\ToolCall;
+use Symfony\AI\Platform\Result\ToolCallResult;
 use Symfony\AI\Platform\TokenUsage\TokenUsage;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\NegativeTokenCountException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Telemetry\TokenUsageRecorder;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidTokenUsageException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\TokenUsageSnapshot;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMResponse;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\PlatformAccountingConfig;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\PlatformResultExtractor;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\LLM\Fixture\FailingResultConverter;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\LLM\Fixture\ReportedUsageExtractor;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\LLM\Fixture\UnreadableResponse;
 
 final class PlatformResultExtractorTest extends TestCase
 {
+    private const int ESTIMATED_INPUT_TOKENS = 999;
+
     /**
      * @throws NegativeTokenCountException
      */
@@ -38,9 +53,184 @@ final class PlatformResultExtractorTest extends TestCase
 
         $tokens = $platformResultExtractor->extractTokens(
             $this->deferredResultWithTokenUsage(new TokenUsage(promptTokens: 10, completionTokens: 5, cacheCreationTokens: 2, cacheReadTokens: 3)),
+            self::ESTIMATED_INPUT_TOKENS,
         );
 
         self::assertSame([10, 5, 3, 2], $tokens);
+    }
+
+    /**
+     * @param array{int, int, int, int} $expectedTokens input, output, cache read, cache creation
+     *
+     * @throws NegativeTokenCountException
+     */
+    #[DataProvider('cachedInputCases')]
+    public function test_it_books_cached_input_apart_from_the_input_whatever_the_providers_convention(TokenUsage $tokenUsage, array $expectedTokens): void
+    {
+        $platformResultExtractor = new PlatformResultExtractor(null);
+
+        self::assertSame($expectedTokens, $platformResultExtractor->extractTokens($this->deferredResultWithTokenUsage($tokenUsage), self::ESTIMATED_INPUT_TOKENS));
+    }
+
+    /** @return iterable<string, array{TokenUsage, array{int, int, int, int}}> */
+    public static function cachedInputCases(): iterable
+    {
+        yield 'cached tokens an OpenAI-style provider counts inside the prompt' => [new TokenUsage(promptTokens: 10000, completionTokens: 200, cachedTokens: 9000, totalTokens: 10200), [1000, 200, 9000, 0]];
+        yield 'cached tokens a gateway reports as cache reads inside the prompt' => [new TokenUsage(promptTokens: 10000, completionTokens: 200, cachedTokens: 9000, cacheReadTokens: 9000, totalTokens: 10200), [1000, 200, 9000, 0]];
+        yield 'cache reads win over a differing aggregate of cached tokens' => [new TokenUsage(promptTokens: 10000, completionTokens: 200, cachedTokens: 9500, cacheReadTokens: 9000, totalTokens: 10200), [1000, 200, 9000, 0]];
+        yield 'a prompt that is entirely cached' => [new TokenUsage(promptTokens: 9000, completionTokens: 200, cachedTokens: 9000, totalTokens: 9200), [0, 200, 9000, 0]];
+        yield 'cached tokens that cannot fit inside the prompt' => [new TokenUsage(promptTokens: 8999, completionTokens: 200, cachedTokens: 9000, totalTokens: 9199), [8999, 200, 0, 0]];
+        yield 'no cached tokens' => [new TokenUsage(promptTokens: 10000, completionTokens: 200, totalTokens: 10200), [10000, 200, 0, 0]];
+        yield 'cache reads and writes counted apart from the prompt' => [new TokenUsage(promptTokens: 1000, completionTokens: 200, cachedTokens: 9000, cacheCreationTokens: 0, cacheReadTokens: 9000), [1000, 200, 9000, 0]];
+        yield 'cache reads and writes counted apart from the prompt with a total' => [new TokenUsage(promptTokens: 10000, completionTokens: 200, cachedTokens: 9300, cacheCreationTokens: 300, cacheReadTokens: 9000, totalTokens: 19500), [10000, 200, 9000, 300]];
+        yield 'cache reads with no total to show they sit inside the prompt' => [new TokenUsage(promptTokens: 10000, completionTokens: 200, cachedTokens: 9000, cacheReadTokens: 9000), [10000, 200, 9000, 0]];
+    }
+
+    /**
+     * @throws NegativeTokenCountException
+     * @throws InvalidTokenUsageException
+     */
+    public function test_it_books_the_estimated_input_tokens_when_the_provider_reports_no_usage(): void
+    {
+        $tokenUsageRecorder = new TokenUsageRecorder();
+        $platformResultExtractor = new PlatformResultExtractor($tokenUsageRecorder);
+
+        $tokens = $platformResultExtractor->extractTokens($this->deferredResult(), 1234);
+
+        self::assertSame([1234, 0, 0, 0], $tokens);
+        self::assertSame([1234, 0, 0, 0], [$tokenUsageRecorder->snapshot()->inputTokens(), $tokenUsageRecorder->snapshot()->outputTokens(), $tokenUsageRecorder->snapshot()->cacheReadTokens(), $tokenUsageRecorder->snapshot()->cacheCreationTokens()]);
+    }
+
+    /**
+     * @param array{int, int, int, int} $expectedTokens input, output, cache read, cache creation
+     *
+     * @throws NegativeTokenCountException
+     */
+    #[DataProvider('usageWithoutPromptTokensCases')]
+    public function test_it_books_the_estimated_input_tokens_when_the_usage_reports_no_prompt_tokens(TokenUsage $tokenUsage, array $expectedTokens): void
+    {
+        $platformResultExtractor = new PlatformResultExtractor(null);
+
+        self::assertSame($expectedTokens, $platformResultExtractor->extractTokens($this->deferredResultWithTokenUsage($tokenUsage), self::ESTIMATED_INPUT_TOKENS));
+    }
+
+    /** @return iterable<string, array{TokenUsage, array{int, int, int, int}}> */
+    public static function usageWithoutPromptTokensCases(): iterable
+    {
+        yield 'an empty usage object' => [new TokenUsage(), [self::ESTIMATED_INPUT_TOKENS, 0, 0, 0]];
+        yield 'a completion count alone' => [new TokenUsage(completionTokens: 40), [self::ESTIMATED_INPUT_TOKENS, 40, 0, 0]];
+        yield 'a completion and cache reads without the prompt' => [new TokenUsage(completionTokens: 40, cacheReadTokens: 100), [self::ESTIMATED_INPUT_TOKENS, 40, 100, 0]];
+        yield 'a prompt of zero beside a completion of zero' => [new TokenUsage(promptTokens: 0, completionTokens: 0), [self::ESTIMATED_INPUT_TOKENS, 0, 0, 0]];
+        yield 'a prompt of zero beside a completion' => [new TokenUsage(promptTokens: 0, completionTokens: 40), [self::ESTIMATED_INPUT_TOKENS, 40, 0, 0]];
+        yield 'a prompt of zero beside cache counts of zero' => [new TokenUsage(promptTokens: 0, completionTokens: 40, cacheCreationTokens: 0, cacheReadTokens: 0), [self::ESTIMATED_INPUT_TOKENS, 40, 0, 0]];
+        yield 'thinking tokens a total without the prompt has room for' => [new TokenUsage(completionTokens: 10, thinkingTokens: 5, totalTokens: 15), [self::ESTIMATED_INPUT_TOKENS, 15, 0, 0]];
+        yield 'thinking tokens a total without the prompt leaves no room for' => [new TokenUsage(completionTokens: 10, thinkingTokens: 5, totalTokens: 14), [self::ESTIMATED_INPUT_TOKENS, 10, 0, 0]];
+    }
+
+    /**
+     * @param array{int, int, int, int} $expectedTokens input, output, cache read, cache creation
+     *
+     * @throws NegativeTokenCountException
+     */
+    #[DataProvider('uncachedInputOfZeroCases')]
+    public function test_it_books_an_input_of_zero_when_the_cache_counts_account_for_the_prompt(TokenUsage $tokenUsage, array $expectedTokens): void
+    {
+        $platformResultExtractor = new PlatformResultExtractor(null);
+
+        self::assertSame($expectedTokens, $platformResultExtractor->extractTokens($this->deferredResultWithTokenUsage($tokenUsage), self::ESTIMATED_INPUT_TOKENS));
+    }
+
+    /** @return iterable<string, array{TokenUsage, array{int, int, int, int}}> */
+    public static function uncachedInputOfZeroCases(): iterable
+    {
+        yield 'a prompt read entirely from the cache and counted apart' => [new TokenUsage(promptTokens: 0, completionTokens: 200, cacheReadTokens: 9000), [0, 200, 9000, 0]];
+        yield 'a prompt written entirely to the cache and counted apart' => [new TokenUsage(promptTokens: 0, completionTokens: 200, cacheCreationTokens: 9000, cacheReadTokens: 0), [0, 200, 0, 9000]];
+        yield 'a prompt of one token' => [new TokenUsage(promptTokens: 1, completionTokens: 200), [1, 200, 0, 0]];
+    }
+
+    /**
+     * @throws NegativeTokenCountException
+     * @throws InvalidTokenUsageException
+     */
+    public function test_it_books_the_estimated_input_tokens_beside_the_completion_the_provider_reported(): void
+    {
+        $tokenUsageRecorder = new TokenUsageRecorder();
+        $platformResultExtractor = new PlatformResultExtractor($tokenUsageRecorder);
+
+        $platformResultExtractor->extractTokens($this->deferredResultWithTokenUsage(new TokenUsage(completionTokens: 40)), 1234);
+
+        self::assertSame([1234, 40, 0, 0], [$tokenUsageRecorder->snapshot()->inputTokens(), $tokenUsageRecorder->snapshot()->outputTokens(), $tokenUsageRecorder->snapshot()->cacheReadTokens(), $tokenUsageRecorder->snapshot()->cacheCreationTokens()]);
+    }
+
+    /**
+     * @throws NegativeTokenCountException
+     */
+    public function test_it_says_in_the_debug_log_that_the_input_it_books_is_estimated_because_the_usage_has_no_prompt_tokens(): void
+    {
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('debug')
+            ->with('The provider reported no prompt tokens for an answer; its input is booked at the estimated input tokens, since the provider bills the request it accepted', ['estimated_input_tokens' => 1234]);
+
+        (new PlatformResultExtractor(null, $logger))->extractTokens($this->deferredResultWithTokenUsage(new TokenUsage(promptTokens: 0, completionTokens: 40)), 1234);
+    }
+
+    /**
+     * @throws NegativeTokenCountException
+     */
+    public function test_it_says_in_the_debug_log_that_the_usage_it_books_is_estimated(): void
+    {
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('debug')
+            ->with('The provider reported no token usage for an answer; it is booked at its estimated input tokens, since the provider bills the request it accepted', ['estimated_input_tokens' => 1234]);
+
+        (new PlatformResultExtractor(null, $logger))->extractTokens($this->deferredResult(), 1234);
+    }
+
+    /**
+     * @throws NegativeTokenCountException
+     * @throws InvalidTokenUsageException
+     */
+    public function test_it_books_the_usage_the_provider_reported_and_not_the_estimate(): void
+    {
+        $tokenUsageRecorder = new TokenUsageRecorder();
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::never())->method('debug');
+        $platformResultExtractor = new PlatformResultExtractor($tokenUsageRecorder, $logger);
+
+        $tokens = $platformResultExtractor->extractTokens($this->deferredResultWithTokenUsage(new TokenUsage(promptTokens: 10, completionTokens: 5)), 1234);
+
+        self::assertSame([10, 5, 0, 0], $tokens);
+        self::assertSame([10, 5], [$tokenUsageRecorder->snapshot()->inputTokens(), $tokenUsageRecorder->snapshot()->outputTokens()]);
+    }
+
+    /**
+     * @param array{int, int, int, int} $expectedTokens input, output, cache read, cache creation
+     *
+     * @throws NegativeTokenCountException
+     */
+    #[DataProvider('thinkingTokenCases')]
+    public function test_it_books_thinking_tokens_as_output_only_when_the_provider_counts_them_apart_from_the_completion(TokenUsage $tokenUsage, array $expectedTokens): void
+    {
+        $platformResultExtractor = new PlatformResultExtractor(null);
+
+        self::assertSame($expectedTokens, $platformResultExtractor->extractTokens($this->deferredResultWithTokenUsage($tokenUsage), 0));
+    }
+
+    /** @return iterable<string, array{TokenUsage, array{int, int, int, int}}> */
+    public static function thinkingTokenCases(): iterable
+    {
+        yield 'thought tokens a Gemini-style provider counts apart from the candidates' => [new TokenUsage(promptTokens: 20000, completionTokens: 1000, thinkingTokens: 4000, totalTokens: 25000), [20000, 5000, 0, 0]];
+        yield 'thought tokens next to tool-use prompt tokens the total also counts' => [new TokenUsage(promptTokens: 20000, completionTokens: 1000, thinkingTokens: 4000, toolTokens: 300, totalTokens: 25300), [20000, 5000, 0, 0]];
+        yield 'reasoning tokens an OpenAI-style provider counts inside the completion' => [new TokenUsage(promptTokens: 20000, completionTokens: 5000, thinkingTokens: 4000, totalTokens: 25000), [20000, 5000, 0, 0]];
+        yield 'a thinking token the total leaves no room for' => [new TokenUsage(promptTokens: 20000, completionTokens: 5000, thinkingTokens: 1, totalTokens: 25000), [20000, 5000, 0, 0]];
+        yield 'a thinking token the total has room for' => [new TokenUsage(promptTokens: 20000, completionTokens: 5000, thinkingTokens: 1, totalTokens: 25001), [20000, 5001, 0, 0]];
+        yield 'thinking tokens with no total to show where they sit' => [new TokenUsage(promptTokens: 20000, completionTokens: 5000, thinkingTokens: 4000), [20000, 5000, 0, 0]];
+        yield 'no thinking tokens' => [new TokenUsage(promptTokens: 20000, completionTokens: 5000, totalTokens: 25000), [20000, 5000, 0, 0]];
+        yield 'no thinking tokens next to a total with room to spare' => [new TokenUsage(promptTokens: 20000, completionTokens: 5000, totalTokens: 26000), [20000, 5000, 0, 0]];
+        yield 'reasoning tokens next to cached tokens inside the prompt' => [new TokenUsage(promptTokens: 20000, completionTokens: 5000, thinkingTokens: 4000, cachedTokens: 15000, totalTokens: 25000), [5000, 5000, 15000, 0]];
+        yield 'thought tokens next to cached tokens inside the prompt' => [new TokenUsage(promptTokens: 20000, completionTokens: 1000, thinkingTokens: 4000, cachedTokens: 15000, totalTokens: 25000), [5000, 5000, 15000, 0]];
     }
 
     /**
@@ -62,7 +252,7 @@ final class PlatformResultExtractorTest extends TestCase
         $this->expectException(NegativeTokenCountException::class);
         $this->expectExceptionMessage($expectedMessage);
 
-        $platformResultExtractor->extractTokens($this->deferredResultWithTokenUsage($tokenUsage));
+        $platformResultExtractor->extractTokens($this->deferredResultWithTokenUsage($tokenUsage), self::ESTIMATED_INPUT_TOKENS);
     }
 
     /** @return iterable<string, array{TokenUsage, string}> */
@@ -82,7 +272,117 @@ final class PlatformResultExtractorTest extends TestCase
         return $deferredResult;
     }
 
-    public function test_it_extracts_the_raw_provider_stop_reason(): void
+    /**
+     * @throws InvalidTokenUsageException
+     */
+    public function test_it_reads_the_usage_a_provider_reported_in_an_answer_its_bridge_failed_to_convert(): void
+    {
+        $tokenUsageRecorder = new TokenUsageRecorder();
+        $platformResultExtractor = new PlatformResultExtractor($tokenUsageRecorder);
+
+        $billedUsage = $platformResultExtractor->extractBilledUsage(self::unconvertedAnswer(new InMemoryRawResult(['usage' => []]), new TokenUsage(promptTokens: 10, completionTokens: 5, cacheCreationTokens: 2, cacheReadTokens: 3)), self::ESTIMATED_INPUT_TOKENS);
+
+        self::assertInstanceOf(TokenUsageSnapshot::class, $billedUsage);
+        self::assertSame([10, 5, 3, 2], [$billedUsage->inputTokens(), $billedUsage->outputTokens(), $billedUsage->cacheReadTokens(), $billedUsage->cacheCreationTokens()]);
+        self::assertSame(0, $tokenUsageRecorder->snapshot()->totalTokens());
+    }
+
+    /**
+     * @throws InvalidTokenUsageException
+     */
+    public function test_it_reads_the_thinking_tokens_of_an_answer_its_bridge_failed_to_convert_as_output(): void
+    {
+        $billedUsage = (new PlatformResultExtractor(null))->extractBilledUsage(self::unconvertedAnswer(new InMemoryRawResult(['usage' => []]), new TokenUsage(promptTokens: 10, completionTokens: 5, thinkingTokens: 4, totalTokens: 19)), self::ESTIMATED_INPUT_TOKENS);
+
+        self::assertInstanceOf(TokenUsageSnapshot::class, $billedUsage);
+        self::assertSame([10, 9], [$billedUsage->inputTokens(), $billedUsage->outputTokens()]);
+    }
+
+    /**
+     * @param array{int, int, int, int} $expectedTokens input, output, cache read, cache creation
+     *
+     * @throws InvalidTokenUsageException
+     */
+    #[DataProvider('usageWithoutPromptTokensCases')]
+    public function test_it_reads_the_estimated_input_tokens_as_the_input_of_an_answer_its_bridge_failed_to_convert_when_the_usage_reports_no_prompt_tokens(TokenUsage $tokenUsage, array $expectedTokens): void
+    {
+        $billedUsage = (new PlatformResultExtractor(null))->extractBilledUsage(self::unconvertedAnswer(new InMemoryRawResult(['usage' => []]), $tokenUsage), self::ESTIMATED_INPUT_TOKENS);
+
+        self::assertInstanceOf(TokenUsageSnapshot::class, $billedUsage);
+        self::assertSame($expectedTokens, [$billedUsage->inputTokens(), $billedUsage->outputTokens(), $billedUsage->cacheReadTokens(), $billedUsage->cacheCreationTokens()]);
+    }
+
+    #[DataProvider('answersReportingNoBilledUsageCases')]
+    public function test_it_reads_no_billed_usage_from_an_answer_that_reports_none_it_can_trust(DeferredResult $deferredResult): void
+    {
+        self::assertNull((new PlatformResultExtractor(null))->extractBilledUsage($deferredResult, self::ESTIMATED_INPUT_TOKENS));
+    }
+
+    /** @return iterable<string, array{DeferredResult}> */
+    public static function answersReportingNoBilledUsageCases(): iterable
+    {
+        yield 'a bridge with no usage extractor' => [new DeferredResult(new FailingResultConverter(new BadRequestException('Bad Request')), new InMemoryRawResult(['usage' => []]))];
+        yield 'an answer without a usage entry' => [self::unconvertedAnswer(new InMemoryRawResult(['error' => ['message' => 'Bad Request']]), new TokenUsage(promptTokens: 10, completionTokens: 5))];
+        yield 'an answer reporting a negative count' => [self::unconvertedAnswer(new InMemoryRawResult(['usage' => []]), new TokenUsage(promptTokens: -1, completionTokens: 5))];
+        yield 'an answer that cannot be read' => [self::unconvertedAnswer(new RawHttpResult(new UnreadableResponse()), new TokenUsage(promptTokens: 10, completionTokens: 5))];
+    }
+
+    private static function unconvertedAnswer(RawResultInterface $rawResult, TokenUsage $tokenUsage): DeferredResult
+    {
+        return new DeferredResult(new FailingResultConverter(new BadRequestException('Bad Request'), new ReportedUsageExtractor($tokenUsage)), $rawResult);
+    }
+
+    #[DataProvider('oneHourCacheWriteCases')]
+    public function test_it_reads_the_share_of_the_booked_cache_writes_an_anthropic_answer_reports_as_kept_for_an_hour(int $reportedOneHourWrites, int $bookedCacheWrites, int $expectedOneHourWrites): void
+    {
+        $deferredResult = new DeferredResult(new PlainConverter(new TextResult('ok')), new InMemoryRawResult(['usage' => ['cache_creation_input_tokens' => 40000, 'cache_creation' => ['ephemeral_5m_input_tokens' => 40000 - $reportedOneHourWrites, 'ephemeral_1h_input_tokens' => $reportedOneHourWrites]]]));
+
+        self::assertSame($expectedOneHourWrites, (new PlatformResultExtractor(null))->extractOneHourCacheCreationTokens($deferredResult, $bookedCacheWrites));
+    }
+
+    /** @return iterable<string, array{int, int, int}> */
+    public static function oneHourCacheWriteCases(): iterable
+    {
+        yield 'every write kept for an hour' => [40000, 40000, 40000];
+        yield 'part of the writes kept for an hour' => [30000, 40000, 30000];
+        yield 'every write kept for five minutes' => [0, 40000, 0];
+        yield 'more one-hour writes than the call is booked with' => [40000, 39999, 39999];
+        yield 'a call booked with no cache write' => [40000, 0, 0];
+    }
+
+    #[DataProvider('answersReportingNoOneHourCacheWriteCases')]
+    public function test_it_reads_no_one_hour_cache_write_from_an_answer_that_does_not_report_one(RawResultInterface $rawResult): void
+    {
+        self::assertSame(0, (new PlatformResultExtractor(null))->extractOneHourCacheCreationTokens(new DeferredResult(new PlainConverter(new TextResult('ok')), $rawResult), 40000));
+    }
+
+    /** @return iterable<string, array{RawResultInterface}> */
+    public static function answersReportingNoOneHourCacheWriteCases(): iterable
+    {
+        yield 'an answer that does not split its writes' => [new InMemoryRawResult(['usage' => ['cache_creation_input_tokens' => 40000]])];
+        yield 'an answer without a usage entry' => [new InMemoryRawResult(['choices' => []])];
+        yield 'a one-hour count that is not a number' => [new InMemoryRawResult(['usage' => ['cache_creation' => ['ephemeral_1h_input_tokens' => '40000']]])];
+        yield 'an answer that cannot be read' => [new RawHttpResult(new UnreadableResponse())];
+    }
+
+    #[DataProvider('reportedModelCases')]
+    public function test_it_extracts_the_model_the_provider_reports(?TokenUsage $tokenUsage, ?string $expectedModel): void
+    {
+        $deferredResult = $tokenUsage instanceof TokenUsage ? $this->deferredResultWithTokenUsage($tokenUsage) : $this->deferredResult();
+
+        self::assertSame($expectedModel, (new PlatformResultExtractor(null))->extractReportedModel($deferredResult));
+    }
+
+    /** @return iterable<string, array{?TokenUsage, ?string}> */
+    public static function reportedModelCases(): iterable
+    {
+        yield 'a reported model' => [new TokenUsage(promptTokens: 1, completionTokens: 1, model: 'claude-opus-4-8-20260101'), 'claude-opus-4-8-20260101'];
+        yield 'token usage naming no model' => [new TokenUsage(promptTokens: 1, completionTokens: 1), null];
+        yield 'token usage naming an empty model' => [new TokenUsage(promptTokens: 1, completionTokens: 1, model: ''), null];
+        yield 'no token usage at all' => [null, null];
+    }
+
+    public function test_it_keeps_the_provider_word_for_a_stop_reason_that_is_not_degraded(): void
     {
         $platformResultExtractor = new PlatformResultExtractor(null);
 
@@ -116,7 +416,7 @@ final class PlatformResultExtractorTest extends TestCase
             $this->deferredResultWithFinishReason(new FinishReason(FinishReasonCase::LENGTH, 'max_tokens')),
         );
 
-        self::assertSame('max_tokens', $stopReason);
+        self::assertSame('length', $stopReason);
     }
 
     public function test_it_warns_when_the_response_was_suppressed_by_the_content_filter(): void
@@ -135,7 +435,7 @@ final class PlatformResultExtractorTest extends TestCase
             $this->deferredResultWithFinishReason(new FinishReason(FinishReasonCase::CONTENT_FILTER, 'content_filtered')),
         );
 
-        self::assertSame('content_filtered', $stopReason);
+        self::assertSame('content-filter', $stopReason);
     }
 
     public function test_it_does_not_warn_on_a_normal_stop(): void
@@ -152,10 +452,149 @@ final class PlatformResultExtractorTest extends TestCase
         self::assertSame('tool_use', $stopReason);
     }
 
+    #[DataProvider('abnormalEndsWithNothingInThem')]
+    public function test_it_reads_an_answer_that_ended_abnormally_with_nothing_in_it_as_empty_content(string $rawFinishReason, string $text): void
+    {
+        $platformResultExtractor = new PlatformResultExtractor(null);
+
+        $stopReason = $platformResultExtractor->extractStopReason(
+            $this->deferredResultAnswering(new TextResult($text), new FinishReason(FinishReasonCase::OTHER, $rawFinishReason)),
+        );
+
+        self::assertSame('empty_content', $stopReason);
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function abnormalEndsWithNothingInThem(): iterable
+    {
+        yield 'Gemini malformed function call' => ['MALFORMED_FUNCTION_CALL', ''];
+        yield 'Vertex AI recitation' => ['RECITATION', ''];
+        yield 'Gemini other, whitespace only' => ['OTHER', " \n "];
+        yield 'Gemini unspecified' => ['FINISH_REASON_UNSPECIFIED', ''];
+        yield 'Gemini language' => ['LANGUAGE', ''];
+        yield 'Gemini unexpected tool call' => ['UNEXPECTED_TOOL_CALL', ''];
+        yield 'Gemini too many tool calls' => ['TOO_MANY_TOOL_CALLS', ''];
+        yield 'Gemini missing thought signature' => ['MISSING_THOUGHT_SIGNATURE', ''];
+        yield 'Gemini image prohibited content' => ['IMAGE_PROHIBITED_CONTENT', ''];
+        yield 'Gemini image recitation' => ['IMAGE_RECITATION', ''];
+        yield 'Gemini image other' => ['IMAGE_OTHER', ''];
+        yield 'Gemini no image' => ['NO_IMAGE', ''];
+        yield 'Vertex AI model armor' => ['MODEL_ARMOR', ''];
+        yield 'whatever its case' => ['malformed_function_call', ''];
+    }
+
+    /**
+     * @throws InvalidTokenUsageException
+     */
+    #[DataProvider('unmappedNormalEndsWithNothingInThem')]
+    public function test_it_keeps_the_provider_word_for_an_end_symfony_ai_does_not_map_that_gemini_does_not_name_abnormal(string $rawFinishReason): void
+    {
+        $platformResultExtractor = new PlatformResultExtractor(null);
+
+        $stopReason = $platformResultExtractor->extractStopReason(
+            $this->deferredResultAnswering(new TextResult(''), new FinishReason(FinishReasonCase::OTHER, $rawFinishReason)),
+        );
+
+        self::assertSame($rawFinishReason, $stopReason);
+        self::assertFalse(LLMResponse::of('', 'm', $stopReason, TokenUsageSnapshot::of(0, 0))->isDegraded());
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function unmappedNormalEndsWithNothingInThem(): iterable
+    {
+        yield 'a text-generation-inference end of sequence' => ['eos_token'];
+        yield 'a word no provider documents' => ['finished_quietly'];
+    }
+
+    public function test_it_keeps_the_provider_word_for_an_abnormal_end_that_carries_text(): void
+    {
+        $platformResultExtractor = new PlatformResultExtractor(null);
+
+        $stopReason = $platformResultExtractor->extractStopReason(
+            $this->deferredResultAnswering(new TextResult('[]'), new FinishReason(FinishReasonCase::OTHER, 'RECITATION')),
+        );
+
+        self::assertSame('RECITATION', $stopReason);
+    }
+
+    public function test_it_keeps_the_provider_word_for_a_normal_stop_with_nothing_in_it(): void
+    {
+        $platformResultExtractor = new PlatformResultExtractor(null);
+
+        $stopReason = $platformResultExtractor->extractStopReason(
+            $this->deferredResultAnswering(new TextResult(''), new FinishReason(FinishReasonCase::STOP, 'STOP')),
+        );
+
+        self::assertSame('STOP', $stopReason);
+    }
+
+    public function test_it_warns_that_an_answer_that_ended_abnormally_with_nothing_in_it_is_no_verdict(): void
+    {
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('warning')
+            ->with(
+                'LLM response ended abnormally with no content — it is no verdict on the prompt and is answered as empty_content',
+                ['finish_reason' => 'MALFORMED_FUNCTION_CALL'],
+            );
+
+        $platformResultExtractor = new PlatformResultExtractor(null, $logger);
+
+        $stopReason = $platformResultExtractor->extractStopReason(
+            $this->deferredResultAnswering(new TextResult(''), new FinishReason(FinishReasonCase::OTHER, 'MALFORMED_FUNCTION_CALL')),
+        );
+
+        self::assertSame('empty_content', $stopReason);
+    }
+
+    public function test_it_joins_the_tool_calls_of_every_tool_call_part_of_a_multi_part_result(): void
+    {
+        $multiPartResult = new MultiPartResult([
+            new TextResult('thinking'),
+            new ToolCallResult([new ToolCall('call-1', 'record_vulnerability', ['n' => 1])]),
+            new ToolCallResult([new ToolCall('call-2', 'record_vulnerability', ['n' => 2]), new ToolCall('call-3', 'lookup', [])]),
+            new ToolCallResult([new ToolCall('call-4', 'record_vulnerability', ['n' => 4])]),
+        ]);
+
+        $toolCalls = (new PlatformResultExtractor(null))->extractToolCalls($multiPartResult);
+
+        self::assertSame(['call-1', 'call-2', 'call-3', 'call-4'], array_map(static fn (ToolCall $toolCall): string => $toolCall->getId(), $toolCalls));
+    }
+
+    public function test_it_returns_the_tool_calls_of_a_plain_tool_call_result(): void
+    {
+        $toolCallResult = new ToolCallResult([new ToolCall('call-1', 'lookup', []), new ToolCall('call-2', 'lookup', [])]);
+
+        $toolCalls = (new PlatformResultExtractor(null))->extractToolCalls($toolCallResult);
+
+        self::assertSame(['call-1', 'call-2'], array_map(static fn (ToolCall $toolCall): string => $toolCall->getId(), $toolCalls));
+    }
+
+    public function test_it_returns_no_tool_call_for_a_result_without_one(): void
+    {
+        $platformResultExtractor = new PlatformResultExtractor(null);
+
+        self::assertSame([], $platformResultExtractor->extractToolCalls(new TextResult('done')));
+        self::assertSame([], $platformResultExtractor->extractToolCalls(new MultiPartResult([new TextResult('done')])));
+    }
+
     private function deferredResultWithFinishReason(FinishReason $finishReason): DeferredResult
     {
         $deferredResult = $this->deferredResult();
         $deferredResult->getMetadata()->add('finish_reason', $finishReason);
+
+        return $deferredResult;
+    }
+
+    private function deferredResultAnswering(TextResult $textResult, FinishReason $finishReason): DeferredResult
+    {
+        $textResult->getMetadata()->add('finish_reason', $finishReason);
+        $deferredResult = new DeferredResult(new PlainConverter($textResult), new InMemoryRawResult([], [], (object) []));
+        $deferredResult->getResult();
 
         return $deferredResult;
     }

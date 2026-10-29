@@ -13,6 +13,8 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan;
 
+use Generator;
+use LimitIterator;
 use Override;
 use PhpParser\Node;
 use PhpParser\Node\Arg;
@@ -50,14 +52,18 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\FormBindingParserInte
  */
 final readonly class PhpParserFormBindingParser implements FormBindingParserInterface
 {
+    private const int MAX_BINDINGS_PER_FILE = 500;
+
     public function __construct(
         private ThisCallReachability $thisCallReachability = new ThisCallReachability(),
+        private NodeFinder $nodeFinder = new NodeFinder(),
+        private NestingDepthGuard $nestingDepthGuard = new NestingDepthGuard(),
     ) {}
 
     #[Override]
     public function parse(ProjectFile $projectFile): array
     {
-        if (!$projectFile->fileType()->isControllerLike()) {
+        if (!$projectFile->fileType()->isControllerLike() || !$this->nestingDepthGuard->admits($projectFile)) {
             return [];
         }
 
@@ -66,10 +72,9 @@ final readonly class PhpParserFormBindingParser implements FormBindingParserInte
             return [];
         }
 
-        $nodeFinder = new NodeFinder();
-        $classes = $nodeFinder->findInstanceOf($ast, Class_::class);
+        $classes = $this->nodeFinder->findInstanceOf($ast, Class_::class);
 
-        return $this->bindingsForClasses($projectFile->relativePath(), $classes, $nodeFinder);
+        return $this->bindingsForClasses($projectFile->relativePath(), $classes);
     }
 
     /**
@@ -96,33 +101,35 @@ final readonly class PhpParserFormBindingParser implements FormBindingParserInte
      *
      * @return list<FormBinding>
      */
-    private function bindingsForClasses(string $filePath, array $classes, NodeFinder $nodeFinder): array
+    private function bindingsForClasses(string $filePath, array $classes): array
     {
-        $bindings = [];
-        foreach ($classes as $class) {
-            $bindings = [...$bindings, ...$this->bindingsForPublicMethods($filePath, $class, $nodeFinder)];
-        }
-
-        return $bindings;
+        return iterator_to_array(new LimitIterator($this->allBindings($filePath, $classes), 0, self::MAX_BINDINGS_PER_FILE), false);
     }
 
     /**
-     * @return list<FormBinding>
+     * @param array<Class_> $classes
+     *
+     * @return Generator<FormBinding>
      */
-    private function bindingsForPublicMethods(string $filePath, Class_ $class, NodeFinder $nodeFinder): array
+    private function allBindings(string $filePath, array $classes): Generator
     {
-        $methodsByName = $this->methodsByName($class);
-
-        $bindings = [];
-        foreach ($class->getMethods() as $classMethod) {
-            if (!$classMethod->isPublic()) {
-                continue;
-            }
-
-            $bindings = [...$bindings, ...$this->bindingsForMethod($filePath, $classMethod, $methodsByName, $nodeFinder)];
+        foreach ($classes as $class) {
+            yield from $this->bindingsForPublicMethods($filePath, $class);
         }
+    }
 
-        return $bindings;
+    /**
+     * @return Generator<FormBinding>
+     */
+    private function bindingsForPublicMethods(string $filePath, Class_ $class): Generator
+    {
+        $reachableCallIndex = $this->thisCallReachability->indexCalls($this->methodsByName($class), $this->isCreateFormCall(...));
+
+        foreach ($class->getMethods() as $classMethod) {
+            if ($classMethod->isPublic()) {
+                yield from $this->bindingsForMethod($filePath, $classMethod, $reachableCallIndex);
+            }
+        }
     }
 
     /**
@@ -139,52 +146,30 @@ final readonly class PhpParserFormBindingParser implements FormBindingParserInte
     }
 
     /**
-     * @param array<string, ClassMethod> $methodsByName
-     *
-     * @return list<FormBinding>
+     * @return array<string, FormBinding>
      */
-    private function bindingsForMethod(string $filePath, ClassMethod $classMethod, array $methodsByName, NodeFinder $nodeFinder): array
+    private function bindingsForMethod(string $filePath, ClassMethod $classMethod, ReachableCallIndex $reachableCallIndex): array
     {
-        $body = $this->thisCallReachability->reachableBody($classMethod, $methodsByName);
-
         $bindings = [];
-        foreach ($this->createFormCallSites($body, $nodeFinder) as $call) {
-            if (!$this->isCreateFormCall($call)) {
-                continue;
-            }
-
+        foreach ($this->inSourceOrder($reachableCallIndex->callsFrom($classMethod)) as $call) {
             $formClass = $this->resolveFirstArgumentClassName($call);
             if (null === $formClass) {
                 continue;
             }
 
-            $bindings[] = new FormBinding($filePath, $classMethod->name->toString(), $formClass);
+            $bindings[$formClass] = new FormBinding($filePath, $classMethod->name->toString(), $formClass);
         }
 
         return $bindings;
     }
 
     /**
-     * Deduplicates by node identity: a diamond-shaped helper call graph (two
-     * reachable methods both calling a shared third helper) can otherwise
-     * surface the same call site twice via {@see ThisCallReachability}.
-     *
-     * @param array<Node> $body
+     * @param list<MethodCall|NullsafeMethodCall|StaticCall> $calls
      *
      * @return list<MethodCall|NullsafeMethodCall|StaticCall>
      */
-    private function createFormCallSites(array $body, NodeFinder $nodeFinder): array
+    private function inSourceOrder(array $calls): array
     {
-        $callsBySpotId = [];
-        foreach ([
-            ...$nodeFinder->findInstanceOf($body, MethodCall::class),
-            ...$nodeFinder->findInstanceOf($body, NullsafeMethodCall::class),
-            ...$nodeFinder->findInstanceOf($body, StaticCall::class),
-        ] as $call) {
-            $callsBySpotId[spl_object_id($call)] = $call;
-        }
-
-        $calls = $callsBySpotId;
         usort($calls, static fn (MethodCall|NullsafeMethodCall|StaticCall $a, MethodCall|NullsafeMethodCall|StaticCall $b): int => $a->getStartTokenPos() <=> $b->getStartTokenPos());
 
         return $calls;
@@ -237,7 +222,7 @@ final readonly class PhpParserFormBindingParser implements FormBindingParserInte
      * type: ...)`) — resolve `type` the same way `Route`'s `path` and
      * `IsGranted`'s `attribute` are resolved elsewhere in this scanner.
      *
-     * @param list<Arg|Node\VariadicPlaceholder> $args
+     * @param list<Node> $args
      */
     private function typeArgument(array $args): ?Arg
     {

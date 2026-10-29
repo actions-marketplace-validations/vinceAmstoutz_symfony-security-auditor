@@ -19,7 +19,15 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\TokenUsageSnapshot;
 
 final readonly class LLMResponse
 {
-    private const int JSON_MAX_DEPTH = 512;
+    /**
+     * Stop reasons after which the response is not the model's complete
+     * answer: output cut by the token limit, suppressed by a content filter,
+     * a tool loop stopped at its iteration cap, a call that produced no
+     * content at all, or a request the model could not take in.
+     */
+    private const array DEGRADED_STOP_REASONS = ['length', 'content-filter', 'max_tool_iterations', 'empty_content', self::REQUEST_TOO_LARGE_STOP_REASON];
+
+    private const string REQUEST_TOO_LARGE_STOP_REASON = 'request_too_large';
 
     private function __construct(
         private string $content,
@@ -29,6 +37,8 @@ final readonly class LLMResponse
         private string $stopReason,
         private int $cacheReadTokens,
         private int $cacheCreationTokens,
+        private ?string $reportedModel = null,
+        private bool $reachedToolCap = false,
     ) {}
 
     public static function of(
@@ -100,6 +110,56 @@ final readonly class LLMResponse
         return $this->stopReason;
     }
 
+    /**
+     * The same response carrying the model the provider says answered it,
+     * which a gateway or a failover platform may pick on its own. Null when
+     * the provider reports none.
+     */
+    public function withReportedModel(?string $reportedModel): self
+    {
+        return new self(
+            $this->content,
+            $this->inputTokens,
+            $this->outputTokens,
+            $this->model,
+            $this->stopReason,
+            $this->cacheReadTokens,
+            $this->cacheCreationTokens,
+            $reportedModel,
+            $this->reachedToolCap,
+        );
+    }
+
+    public function reportedModel(): ?string
+    {
+        return $this->reportedModel;
+    }
+
+    /**
+     * The same response, marked as the answer of a tool-using conversation
+     * that reached its last allowed round: the model may have looked at less
+     * than it wanted to, so an answer that found nothing is no verdict to keep.
+     */
+    public function withReachedToolCap(): self
+    {
+        return new self(
+            $this->content,
+            $this->inputTokens,
+            $this->outputTokens,
+            $this->model,
+            $this->stopReason,
+            $this->cacheReadTokens,
+            $this->cacheCreationTokens,
+            $this->reportedModel,
+            true,
+        );
+    }
+
+    public function reachedToolCap(): bool
+    {
+        return $this->reachedToolCap;
+    }
+
     public function totalTokens(): int
     {
         return $this->inputTokens + $this->outputTokens + $this->cacheReadTokens + $this->cacheCreationTokens;
@@ -117,18 +177,7 @@ final readonly class LLMResponse
      */
     public function parseJson(): array
     {
-        $content = $this->content;
-
-        // Strip markdown fences that LLMs sometimes wrap JSON in
-        $content = (string) preg_replace('/```json\s*/', '', $content);
-        $content = (string) preg_replace('/```\s*/', '', $content);
-        $content = trim($content);
-
-        try {
-            $decoded = json_decode($content, true, self::JSON_MAX_DEPTH, \JSON_THROW_ON_ERROR);
-        } catch (JsonException $jsonException) {
-            $decoded = $this->recoverDecodedJsonBlock($content) ?? throw $jsonException;
-        }
+        $decoded = LLMAnswerJsonDecoder::decode($this->content);
 
         if (!\is_array($decoded)) {
             throw new RuntimeException('LLM response did not decode to array');
@@ -137,217 +186,30 @@ final readonly class LLMResponse
         return $decoded;
     }
 
-    /**
-     * Walks every `[`/`{` position outside JSON string literals and returns the
-     * first balanced block that decodes as JSON, or `null` when none do.
-     *
-     * When the content itself spans a single balanced block (`[ ... ]` or
-     * `{ ... }` with no surrounding prose), the top-level `json_decode` has
-     * already attempted exactly that payload — re-trying nested openers within
-     * it would silently accept shallower inner blocks (defeating depth limits,
-     * for one), so recovery is skipped in that case.
-     *
-     * Returns the decoded value as `mixed` so the existing not-array guard in
-     * `parseJson` remains the single place that enforces the array contract.
-     */
-    private function recoverDecodedJsonBlock(string $content): mixed
-    {
-        if ($this->contentIsSingleBalancedBlock($content)) {
-            return null;
-        }
-
-        $trackStringLiterals = $this->hasBalancedQuotes($content);
-
-        $length = \strlen($content);
-        $state = ['inString' => false, 'escape' => false];
-
-        for ($i = 0; $i < $length; ++$i) {
-            $char = $content[$i];
-            $next = $this->advanceIfTrackingStringLiterals($trackStringLiterals, $char, $state);
-            $state = ['inString' => $next['inString'], 'escape' => $next['escape']];
-
-            if ($next['consumed']) {
-                continue;
-            }
-
-            $candidate = $this->decodeOpenerCandidate($content, $i, $char);
-            if (null === $candidate) {
-                continue;
-            }
-
-            return $candidate;
-        }
-
-        return null;
-    }
-
-    /**
-     * Delegates to {@see self::advanceStringLiteralState()} only when the
-     * content's quotes are genuinely paired — otherwise every character is
-     * reported as not consumed, so `recoverDecodedJsonBlock` tries every
-     * `[`/`{` position directly instead of relying on a toggle a stray
-     * unpaired quote would desync (see {@see self::hasBalancedQuotes()}).
-     *
-     * @param array{inString: bool, escape: bool} $state
-     *
-     * @return array{inString: bool, escape: bool, consumed: bool}
-     */
-    private function advanceIfTrackingStringLiterals(bool $trackStringLiterals, string $char, array $state): array
-    {
-        if (!$trackStringLiterals) {
-            return [...$state, 'consumed' => false];
-        }
-
-        return $this->advanceStringLiteralState($char, $state['inString'], $state['escape']);
-    }
-
-    /**
-     * An unescaped double-quote toggles "inside a string" on and off as
-     * `recoverDecodedJsonBlock` scans for the first genuine `[`/`{` opener —
-     * meant to skip a bracket embedded in a quoted prose phrase (see
-     * `test_it_skips_a_leading_quoted_string_with_escaped_bracket_before_the_real_array`).
-     * That toggle only makes sense when every quote in the content is
-     * genuinely paired; a single unpaired literal quote before the real
-     * JSON (e.g. a measurement like `5"`) would otherwise flip the running
-     * state permanently, hiding every opener after it — including the real
-     * one. Running the same state machine across the whole content and
-     * checking whether it ends still "inside a string" detects that case,
-     * so the scan can fall back to trying every opener directly instead.
-     */
-    private function hasBalancedQuotes(string $content): bool
-    {
-        $length = \strlen($content);
-        $inString = false;
-        $escape = false;
-
-        for ($i = 0; $i < $length; ++$i) {
-            $next = $this->advanceStringLiteralState($content[$i], $inString, $escape);
-            $inString = $next['inString'];
-            $escape = $next['escape'];
-        }
-
-        return !$inString;
-    }
-
-    private function decodeOpenerCandidate(string $content, int $start, string $char): mixed
-    {
-        return match ($char) {
-            '[' => $this->tryDecodeBalancedBlock($content, $start, '[', ']'),
-            '{' => $this->tryDecodeBalancedBlock($content, $start, '{', '}'),
-            default => null,
-        };
-    }
-
-    /**
-     * Advances the string-literal scanning state for a single character.
-     *
-     * `consumed` is true when the character belongs to string-literal handling
-     * (an escape, a quote, or any character inside a string) and the caller must
-     * skip its own structural handling for it.
-     *
-     * @return array{inString: bool, escape: bool, consumed: bool}
-     */
-    private function advanceStringLiteralState(string $char, bool $inString, bool $escape): array
-    {
-        if ($escape) {
-            return ['inString' => $inString, 'escape' => false, 'consumed' => true];
-        }
-
-        if ($inString) {
-            return [
-                'inString' => '"' !== $char,
-                'escape' => '\\' === $char,
-                'consumed' => true,
-            ];
-        }
-
-        $opensString = '"' === $char;
-
-        return ['inString' => $opensString, 'escape' => false, 'consumed' => $opensString];
-    }
-
-    /**
-     * True when `$content` starts with an opener and `scanBalancedBlockFrom`
-     * consumes the entire string — meaning the original top-level `json_decode`
-     * call already saw exactly this payload.
-     */
-    private function contentIsSingleBalancedBlock(string $content): bool
-    {
-        $block = match ($content[0] ?? '') {
-            '[' => $this->scanBalancedBlockFrom($content, 0, '[', ']'),
-            '{' => $this->scanBalancedBlockFrom($content, 0, '{', '}'),
-            default => null,
-        };
-
-        if (null === $block) {
-            return false;
-        }
-
-        return \strlen($block) === \strlen($content);
-    }
-
-    /**
-     * Scans a balanced block starting at `$start` and attempts to JSON-decode it.
-     * Returns the decoded value on success, or `null` when scanning hits EOF or
-     * decoding fails — the caller iterates to the next opener candidate.
-     */
-    private function tryDecodeBalancedBlock(string $content, int $start, string $open, string $close): mixed
-    {
-        $block = $this->scanBalancedBlockFrom($content, $start, $open, $close);
-        if (null === $block) {
-            return null;
-        }
-
-        try {
-            return json_decode($block, true, self::JSON_MAX_DEPTH, \JSON_THROW_ON_ERROR);
-        } catch (JsonException) {
-            return null;
-        }
-    }
-
-    private function scanBalancedBlockFrom(string $content, int $start, string $open, string $close): ?string
-    {
-        $length = \strlen($content);
-        $depth = 0;
-        $inString = false;
-        $escape = false;
-
-        for ($i = $start; $i < $length; ++$i) {
-            $char = $content[$i];
-
-            $next = $this->advanceStringLiteralState($char, $inString, $escape);
-            $inString = $next['inString'];
-            $escape = $next['escape'];
-
-            if ($next['consumed']) {
-                continue;
-            }
-
-            $depth = $this->adjustDepth($depth, $char, $open, $close);
-
-            if ($char === $close && 0 === $depth) {
-                return substr($content, $start, $i - $start + 1);
-            }
-        }
-
-        return null;
-    }
-
-    private function adjustDepth(int $depth, string $char, string $open, string $close): int
-    {
-        if ($char === $open) {
-            return $depth + 1;
-        }
-
-        if ($char === $close) {
-            return $depth - 1;
-        }
-
-        return $depth;
-    }
-
     public function isEmpty(): bool
     {
         return '' === trim($this->content);
+    }
+
+    /**
+     * Whether the answer was cut short (see `DEGRADED_STOP_REASONS`), in
+     * which case an empty or partial payload is not the model's verdict and
+     * must never be cached or reported as one.
+     */
+    public function isDegraded(): bool
+    {
+        return \in_array($this->stopReason, self::DEGRADED_STOP_REASONS, true);
+    }
+
+    /**
+     * Whether the provider refused the request because the prompt alone
+     * exceeds the model's input window — the content carries the refusal. A
+     * batch client answers this per request where a single call throws, so
+     * the caller can split the work; it is degraded too, so no consumer
+     * counts it as a verdict.
+     */
+    public function isRequestTooLarge(): bool
+    {
+        return self::REQUEST_TOO_LARGE_STOP_REASON === $this->stopReason;
     }
 }

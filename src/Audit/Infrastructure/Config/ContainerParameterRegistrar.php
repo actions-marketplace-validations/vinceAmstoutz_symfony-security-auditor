@@ -20,9 +20,11 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\AuditExecuti
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\BundleConfiguration;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\ConfigurationNotices;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\LLMConfiguration;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\ToolsScope;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemReviewerCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\AttackerPromptBuilder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\ReviewerPromptBuilder;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\RegexCodeSlicer;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\RegexStaticPreScanner;
 
 /**
@@ -63,6 +65,7 @@ final readonly class ContainerParameterRegistrar
             'reviewer_max_output_tokens' => $llm->reviewerMaxOutputTokens(),
             'scan.included_paths' => $scan->includedPaths,
             'scan.respect_gitignore' => $scan->respectGitignore,
+            'scan.include_dotfiles' => $scan->includeDotfiles,
             'scan.max_file_size_kb' => $scan->maxFileSizeKb,
             'scan.secret_scrubbing.enabled' => $scan->secretScrubbingEnabled,
             'scan.secret_scrubbing.additional_patterns' => $scan->additionalScrubberPatterns,
@@ -71,6 +74,7 @@ final readonly class ContainerParameterRegistrar
             'audit.min_confidence' => $audit->minConfidence,
             'audit.reviewer_batch_size' => $audit->reviewerBatchSize,
             'audit.tools_enabled' => $audit->toolsEnabled,
+            'audit.tools_scope' => $audit->toolsScope->value,
             'audit.structured_collection' => $audit->structuredCollection,
             'audit.reviewer_structured_collection' => $audit->reviewerStructuredCollection,
             'audit.stable_system_prompt' => $audit->stableSystemPrompt,
@@ -80,6 +84,11 @@ final readonly class ContainerParameterRegistrar
             'audit.baseline' => $audit->baseline,
             'audit.triage_memory' => $audit->triageMemory,
             'audit.fail_on' => $audit->failOn->value,
+            'audit.min_score' => $audit->minScore,
+            'audit.fail_on_incomplete' => $audit->failOnIncomplete,
+            'audit.format' => $audit->format,
+            'audit.output' => $audit->output,
+            'audit.report_path_prefix' => $audit->reportPathPrefix,
             'audit.since_closure' => $audit->sinceClosure,
             'audit.excluded_types' => $audit->excludedTypes,
             'audit.included_types' => $audit->includedTypes,
@@ -101,7 +110,7 @@ final readonly class ContainerParameterRegistrar
             'audit.retry.initial_delay_ms' => $retry->initialDelayMs,
             'audit.retry.backoff_multiplier' => $retry->backoffMultiplier,
             'audit.retry.jitter_ratio' => $retry->jitterRatio,
-            'config_notices' => ConfigurationNotices::of($audit, $llm),
+            'config_notices' => ConfigurationNotices::of($audit, $llm, $scan->customRiskPatterns),
             'cache.enabled' => $cache->enabled,
             'cache.dir' => $cache->dir,
             'cache.advisory_dir' => \sprintf('%s/advisory', $cache->dir),
@@ -154,7 +163,17 @@ final readonly class ContainerParameterRegistrar
             return 'off';
         }
 
-        return \sprintf('on-%d', $auditExecutionConfiguration->reviewerMaxToolIterations);
+        return \sprintf('on-%d%s', $auditExecutionConfiguration->reviewerMaxToolIterations, $this->toolsScopeSalt($auditExecutionConfiguration));
+    }
+
+    /**
+     * Empty for the `audited` scope, so the keys of a configuration that never
+     * names a scope stay those of earlier releases, while a `scanned` run,
+     * whose tools may read files an `audited` one may not, keys apart.
+     */
+    private function toolsScopeSalt(AuditExecutionConfiguration $auditExecutionConfiguration): string
+    {
+        return ToolsScope::Scanned === $auditExecutionConfiguration->toolsScope ? '-scanned' : '';
     }
 
     /**
@@ -212,7 +231,7 @@ final readonly class ContainerParameterRegistrar
             return 'off';
         }
 
-        return \sprintf('on-%d', $bundleConfiguration->audit->maxToolIterations);
+        return \sprintf('on-%d%s', $bundleConfiguration->audit->maxToolIterations, $this->toolsScopeSalt($bundleConfiguration->audit));
     }
 
     private function codeSlicingSalt(BundleConfiguration $bundleConfiguration): string
@@ -221,6 +240,6 @@ final readonly class ContainerParameterRegistrar
             return 'off';
         }
 
-        return \sprintf('on-%d', $bundleConfiguration->audit->codeSlicingMinLines);
+        return \sprintf('v%d-on-%d', RegexCodeSlicer::CACHE_VERSION, $bundleConfiguration->audit->codeSlicingMinLines);
     }
 }

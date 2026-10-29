@@ -14,6 +14,7 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Advisory;
 
 use Override;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Clock\ClockInterface;
 use Psr\Log\LoggerInterface;
@@ -28,9 +29,12 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\Exception
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\LockfileHashedAdvisoryCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Advisory\Fixture\RecordingComposerAuditRunner;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Advisory\Fixture\ThrowingComposerAuditRunner;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\FileSystem\Fixture\AssertsOwnerOnlyAccessTrait;
 
 final class LockfileHashedAdvisoryCacheTest extends TestCase
 {
+    use AssertsOwnerOnlyAccessTrait;
+
     private string $projectDir;
 
     private string $cacheDir;
@@ -172,6 +176,79 @@ final class LockfileHashedAdvisoryCacheTest extends TestCase
         self::assertSame(2, $recordingComposerAuditRunner->callCount, 'without a lockfile, every call must hit the inner runner');
         $cacheFiles = glob($this->cacheDir.'/*/*.json');
         self::assertSame([], false !== $cacheFiles ? $cacheFiles : []);
+    }
+
+    /**
+     * @throws AdvisorySourceUnavailableException
+     */
+    public function test_a_lockfile_symlinked_to_a_file_inside_the_project_is_cached_like_any_other(): void
+    {
+        file_put_contents($this->projectDir.'/real.lock', '{"lock": "v1"}');
+        symlink($this->projectDir.'/real.lock', $this->projectDir.'/composer.lock');
+        $recordingComposerAuditRunner = $this->recordingRunner('{"advisories": {}}');
+        $lockfileHashedAdvisoryCache = $this->makeCache($recordingComposerAuditRunner);
+
+        $lockfileHashedAdvisoryCache->run($this->projectDir);
+        $lockfileHashedAdvisoryCache->run($this->projectDir);
+
+        self::assertSame(1, $recordingComposerAuditRunner->callCount, 'a lockfile symlinked inside the project is keyed by its content, so the second call is a hit');
+        self::assertFileExists($this->cacheDir.'/'.substr(hash('sha256', '{"lock": "v1"}'), 0, 2).'/'.hash('sha256', '{"lock": "v1"}').'.json');
+    }
+
+    /**
+     * @throws AdvisorySourceUnavailableException
+     */
+    public function test_a_lockfile_symlinked_outside_the_project_is_never_cached(): void
+    {
+        $outside = sys_get_temp_dir().'/advisory_cache_outside_'.uniqid('', true).'.lock';
+        file_put_contents($outside, '{"lock": "v1"}');
+        symlink($outside, $this->projectDir.'/composer.lock');
+        $recordingComposerAuditRunner = $this->recordingRunner('{"advisories": {}}');
+        $lockfileHashedAdvisoryCache = $this->makeCache($recordingComposerAuditRunner);
+
+        try {
+            $lockfileHashedAdvisoryCache->run($this->projectDir);
+            $lockfileHashedAdvisoryCache->run($this->projectDir);
+        } finally {
+            unlink($outside);
+        }
+
+        self::assertSame(2, $recordingComposerAuditRunner->callCount, 'a lockfile symlinked outside the project must reach the inner runner every time');
+        $cacheFiles = glob($this->cacheDir.'/*/*.json');
+        self::assertSame([], false !== $cacheFiles ? $cacheFiles : []);
+    }
+
+    /**
+     * @throws AdvisorySourceUnavailableException
+     */
+    #[DataProvider('payloadsThatAreNotAnAdvisoryDocument')]
+    public function test_a_payload_that_is_not_an_advisory_document_is_returned_but_never_cached(string $payload): void
+    {
+        $this->writeLockfile('{"lock": "v1"}');
+        $recordingComposerAuditRunner = $this->recordingRunner($payload);
+        $lockfileHashedAdvisoryCache = $this->makeCache($recordingComposerAuditRunner);
+
+        $first = $lockfileHashedAdvisoryCache->run($this->projectDir);
+        $second = $lockfileHashedAdvisoryCache->run($this->projectDir);
+
+        self::assertSame($payload, $first);
+        self::assertSame($payload, $second);
+        self::assertSame(2, $recordingComposerAuditRunner->callCount, 'a payload no advisory lookup can use must not be served from cache');
+        $cacheFiles = glob($this->cacheDir.'/*/*.json');
+        self::assertSame([], false !== $cacheFiles ? $cacheFiles : []);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function payloadsThatAreNotAnAdvisoryDocument(): iterable
+    {
+        yield 'text before the JSON document' => ["Warning: something on stdout\n{\"advisories\": {}}"];
+        yield 'invalid JSON' => ['not json at all'];
+        yield 'a scalar' => ['42'];
+        yield 'null' => ['null'];
+        yield 'no advisories key' => ['{"abandoned": {}}'];
+        yield 'advisories that is not a map' => ['{"advisories": "none"}'];
     }
 
     /**
@@ -682,6 +759,98 @@ final class LockfileHashedAdvisoryCacheTest extends TestCase
 
         self::assertSame('{"advisories": {"new/cve": []}}', $json);
         self::assertSame(2, $recordingComposerAuditRunner->callCount, 'an entry aged exactly the TTL must be treated as expired, not served from cache');
+    }
+
+    /**
+     * @throws AdvisorySourceUnavailableException
+     */
+    public function test_it_refuses_its_own_directory_below_the_cache_root_when_that_is_a_symlink(): void
+    {
+        $this->writeLockfile('{"lock": "v1"}');
+        $base = sys_get_temp_dir().'/advisory_cache_symlinked_self_'.uniqid('', true);
+        mkdir($base.'/elsewhere', recursive: true);
+        mkdir($base.'/cache');
+        symlink($base.'/elsewhere', $base.'/cache/advisory');
+        $recordingComposerAuditRunner = $this->recordingRunner('{"advisories": {}}');
+        $lockfileHashedAdvisoryCache = new LockfileHashedAdvisoryCache($recordingComposerAuditRunner, $base.'/cache/advisory', new Filesystem(), new NullLogger(), new NativeClock());
+
+        try {
+            $lockfileHashedAdvisoryCache->run($this->projectDir);
+            $lockfileHashedAdvisoryCache->run($this->projectDir);
+
+            self::assertSame(2, $recordingComposerAuditRunner->callCount);
+            self::assertSame(['.', '..'], scandir($base.'/elsewhere'));
+        } finally {
+            (new Filesystem())->remove($base);
+        }
+    }
+
+    /**
+     * @throws AdvisorySourceUnavailableException
+     */
+    public function test_a_relative_cache_directory_is_read_against_the_working_directory(): void
+    {
+        $this->writeLockfile('{"lock": "v1"}');
+        $base = sys_get_temp_dir().'/advisory_cache_relative_'.uniqid('', true);
+        mkdir($base);
+        $recordingComposerAuditRunner = $this->recordingRunner('{"advisories": {}}');
+        $workingDirectory = getcwd();
+        self::assertIsString($workingDirectory);
+
+        chdir($base);
+        try {
+            $lockfileHashedAdvisoryCache = new LockfileHashedAdvisoryCache($recordingComposerAuditRunner, 'var/cache/advisory', new Filesystem(), new NullLogger(), new NativeClock());
+            $lockfileHashedAdvisoryCache->run($this->projectDir);
+            $lockfileHashedAdvisoryCache->run($this->projectDir);
+
+            self::assertSame(1, $recordingComposerAuditRunner->callCount);
+        } finally {
+            chdir($workingDirectory);
+            (new Filesystem())->remove($base);
+        }
+    }
+
+    /**
+     * @throws AdvisorySourceUnavailableException
+     */
+    public function test_it_still_caches_when_a_directory_above_the_cache_is_a_symlink(): void
+    {
+        $this->writeLockfile('{"lock": "v1"}');
+        $base = sys_get_temp_dir().'/advisory_cache_symlinked_parent_'.uniqid('', true);
+        mkdir($base.'/real', recursive: true);
+        symlink($base.'/real', $base.'/link');
+        $recordingComposerAuditRunner = $this->recordingRunner('{"advisories": {}}');
+        $lockfileHashedAdvisoryCache = new LockfileHashedAdvisoryCache($recordingComposerAuditRunner, $base.'/link/cache', new Filesystem(), new NullLogger(), new NativeClock());
+        $workingDirectory = getcwd();
+        self::assertIsString($workingDirectory);
+
+        chdir($base);
+        try {
+            $lockfileHashedAdvisoryCache->run($this->projectDir);
+            $lockfileHashedAdvisoryCache->run($this->projectDir);
+
+            self::assertSame(1, $recordingComposerAuditRunner->callCount);
+        } finally {
+            chdir($workingDirectory);
+            (new Filesystem())->remove($base);
+        }
+    }
+
+    /**
+     * @throws AdvisorySourceUnavailableException
+     */
+    public function test_a_stored_payload_and_the_directories_made_for_it_are_owner_only(): void
+    {
+        $this->writeLockfile('{"lock": "v1"}');
+
+        $this->makeCache($this->recordingRunner('{"advisories": {}}'))->run($this->projectDir);
+
+        $entries = glob($this->cacheDir.'/*/*.json');
+        self::assertIsArray($entries);
+        self::assertCount(1, $entries);
+        self::assertOwnerOnlyFile($entries[0]);
+        self::assertOwnerOnlyDirectory(\dirname($entries[0]));
+        self::assertOwnerOnlyDirectory($this->cacheDir);
     }
 
     #[Override]

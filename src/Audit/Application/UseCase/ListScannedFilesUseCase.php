@@ -13,14 +13,16 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase;
 
-use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Scan\ScanPathFilter;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Scan\ScopedScan;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditContextException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\GitChangedFilesResolverInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ProbingProjectFileScannerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ProjectFileScannerInterface;
 
 /**
  * Resolves the exact set of files an audit would ingest — the project scan
- * narrowed by the same scan-path filter the real run applies — without
+ * scoped to the `--path` values as the real run scopes it — without
  * invoking the LLM. Backs the `--show-scanned` console option so a user can
  * confirm their `included_paths` / `--path` configuration matches the files
  * they expect before paying for a run.
@@ -32,27 +34,48 @@ final readonly class ListScannedFilesUseCase
     public function __construct(
         private ProjectFileScannerInterface $projectFileScanner,
         private ?GitChangedFilesResolverInterface $gitChangedFilesResolver = null,
+        private ?SinceClosurePreview $sinceClosurePreview = null,
     ) {}
 
     /**
-     * @param list<string> $scanPaths    optional project-relative subdirectories
-     *                                   to restrict the listing to; empty list
+     * @param list<string> $scanPaths    optional project-relative paths to scope
+     *                                   the listing to, as a run does; empty list
      *                                   (the default) lists every scanned file
      * @param ?string      $diffSinceRef when set, mirrors `EstimateAuditCostUseCase`/
      *                                   `IngestionStage` by narrowing the listing to
      *                                   files changed against this git ref, matching
-     *                                   what an `audit:run --since` would actually scan
+     *                                   what an `audit:run --since` would actually scan,
+     *                                   with the files `audit.since_closure` adds to it
      *
      * @return list<ProjectFile>
+     *
+     * @throws InvalidAuditContextException
      */
     public function execute(string $projectPath, array $scanPaths = [], ?string $diffSinceRef = null): array
     {
-        $files = ScanPathFilter::apply($this->projectFileScanner->scan($projectPath), $scanPaths);
-        if (null !== $diffSinceRef && $this->gitChangedFilesResolver instanceof GitChangedFilesResolverInterface) {
-            return $this->filterByGitDiff($projectPath, $diffSinceRef, $files);
+        $scopedScanResult = ScopedScan::resolve($this->projectFileScanner, $projectPath, $scanPaths);
+        $files = $scopedScanResult->audited->files;
+        if (null === $diffSinceRef || !$this->gitChangedFilesResolver instanceof GitChangedFilesResolverInterface) {
+            return $files;
         }
 
-        return $files;
+        $changedFiles = $this->filterByGitDiff($projectPath, $diffSinceRef, $files);
+
+        return $this->sinceClosurePreview?->auditedFiles($projectPath, $scanPaths, $diffSinceRef, $changedFiles, $scopedScanResult->mappingFiles) ?? $changedFiles;
+    }
+
+    /**
+     * Whether the configured scan reaches a file in the project, as a run asks
+     * of a directory holding no `composer.json`: a scanner that can probe
+     * answers without reading a file, any other is asked through a whole scan.
+     *
+     * @throws InvalidAuditContextException
+     */
+    public function holdsAFile(string $projectPath): bool
+    {
+        return $this->projectFileScanner instanceof ProbingProjectFileScannerInterface
+            ? $this->projectFileScanner->reachesAFile($projectPath)
+            : [] !== $this->execute($projectPath);
     }
 
     /**

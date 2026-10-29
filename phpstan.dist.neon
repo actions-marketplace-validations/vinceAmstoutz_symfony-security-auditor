@@ -1,5 +1,6 @@
 includes:
     - vendor/spaze/phpstan-disallowed-calls/disallowed-execution-calls.neon
+    - vendor/symplify/phpstan-rules/config/services/services.neon
 
 parameters:
     bootstrapFiles:
@@ -60,7 +61,6 @@ rules:
     - Symplify\PHPStanRules\Rules\Symfony\NoGetInCommandRule
     - Symplify\PHPStanRules\Rules\PHPUnit\PublicStaticDataProviderRule
     - Symplify\PHPStanRules\Rules\PHPUnit\NoAssertFuncCallInTestsRule
-    - Symplify\PHPStanRules\Rules\PHPUnit\NoMockOnlyTestRule
     - Symplify\PHPStanRules\Rules\PHPUnit\NoMockObjectAndRealObjectPropertyRule
     - Symplify\PHPStanRules\Rules\PHPUnit\NoDoubleConsecutiveTestMockRule
 
@@ -70,7 +70,7 @@ services:
         tags:
             - phpstan.parser.richParserNodeVisitor
     -
-        class: Symplify\PHPStanRules\Rules\ForbiddenNodeRule
+        class: VinceAmstoutz\SymfonySecurityAuditor\Tooling\PHPStan\ForbiddenNodeRule
         arguments:
             forbiddenNodes:
                 - PhpParser\Node\Expr\ErrorSuppress

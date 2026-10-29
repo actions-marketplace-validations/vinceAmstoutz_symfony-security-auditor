@@ -17,6 +17,8 @@ use JsonException;
 use Override;
 use Symfony\Component\Filesystem\Exception\IOException;
 use Symfony\Component\Filesystem\Filesystem;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AnalyzedFiles;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\UnanalyzedFiles;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\MalformedReportFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\ReportFileNotReadableException;
@@ -26,7 +28,11 @@ use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\ReportFileNotReadable
  * `fingerprint` key existed is still accepted: its fingerprint is recomputed
  * from `type`, `file`, and `title` with the exact formula
  * {@see Vulnerability::fingerprintOf()} uses, so it never drifts from the
- * canonical identity.
+ * canonical identity. The report's `coverage` ledger, when it carries one,
+ * names the files the run could not fully analyze the same way
+ * {@see UnanalyzedFiles} reads it for the run itself, and the files its
+ * attacker analyzed the way {@see AnalyzedFiles} does; its `scope` says where a
+ * complete run looked.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -37,11 +43,13 @@ final readonly class ReportFindingsLoader implements ReportFindingsLoaderInterfa
     ) {}
 
     #[Override]
-    public function load(string $path): array
+    public function load(string $path): LoadedReport
     {
+        $decoded = $this->decodeReport($path);
+
         $findings = [];
         $index = 0;
-        foreach ($this->decodeVulnerabilities($path) as $vulnerability) {
+        foreach ($this->vulnerabilitiesIn($decoded, $path) as $vulnerability) {
             if (!\is_array($vulnerability)) {
                 throw MalformedReportFileException::vulnerabilityEntryNotAnObject($path, $index);
             }
@@ -50,7 +58,75 @@ final readonly class ReportFindingsLoader implements ReportFindingsLoaderInterfa
             ++$index;
         }
 
-        return $findings;
+        $coverage = $this->coverageIn($decoded);
+
+        return new LoadedReport(
+            $findings,
+            new SuppressedFingerprintLists(
+                $this->stringsIn($decoded['suppressed_fingerprints'] ?? null),
+                $this->stringsIn($decoded['suppressed_baseline_fingerprints'] ?? $decoded['suppressed_fingerprints'] ?? null),
+            ),
+            $coverage,
+            $this->completeRunScanPathsIn($decoded, AnalyzedFiles::in($coverage ?? [])),
+            $this->projectPathIn($decoded),
+        );
+    }
+
+    /**
+     * The strings of a list the report holds: the fingerprints of the findings
+     * the run found and its report leaves out — accepted by the baseline or
+     * muted by type — under `suppressed_fingerprints`, the baseline
+     * fingerprints that left them out under `suppressed_baseline_fingerprints`.
+     * A report written before that key existed lists the baseline fingerprints
+     * under `suppressed_fingerprints`, and one written before both lists none.
+     *
+     * @return list<string>
+     */
+    private function stringsIn(mixed $fingerprints): array
+    {
+        return \is_array($fingerprints) ? array_values(array_filter($fingerprints, \is_string(...))) : [];
+    }
+
+    /**
+     * The folder the run audited, from a report that names each finding by
+     * its project file — one written since it lists `suppressed_fingerprints`.
+     * Null for a report written before, whose findings keep the paths the
+     * model echoed.
+     *
+     * @param array<array-key, mixed> $decoded
+     */
+    private function projectPathIn(array $decoded): ?string
+    {
+        if (!\array_key_exists('suppressed_fingerprints', $decoded)) {
+            return null;
+        }
+
+        $project = $decoded['project'] ?? null;
+
+        return \is_string($project) ? $project : '';
+    }
+
+    /**
+     * The `--path` scopes of a run that can say a file it never listed is
+     * gone: it reported itself complete, analyzed at least one file, and
+     * recorded a `scope` that ran over the whole history, with no `--since`.
+     * Null otherwise — including for a report written before the scope
+     * existed, and for a run whose scan found nothing to analyze, which says
+     * nothing about the files it never saw.
+     *
+     * @param array<array-key, mixed> $decoded
+     * @param list<string>            $analyzedFiles
+     *
+     * @return list<string>|null
+     */
+    private function completeRunScanPathsIn(array $decoded, array $analyzedFiles): ?array
+    {
+        $scope = $decoded['scope'] ?? null;
+        if (true !== ($decoded['complete'] ?? null) || [] === $analyzedFiles || !\is_array($scope) || !\array_key_exists('since', $scope) || null !== $scope['since'] || !\is_array($scope['paths'] ?? null)) {
+            return null;
+        }
+
+        return array_values(array_filter($scope['paths'], \is_string(...)));
     }
 
     /**
@@ -59,7 +135,7 @@ final readonly class ReportFindingsLoader implements ReportFindingsLoaderInterfa
      * @throws ReportFileNotReadableException
      * @throws MalformedReportFileException
      */
-    private function decodeVulnerabilities(string $path): array
+    private function decodeReport(string $path): array
     {
         if (!$this->filesystem->exists($path)) {
             throw ReportFileNotReadableException::forPath($path);
@@ -81,12 +157,49 @@ final readonly class ReportFindingsLoader implements ReportFindingsLoaderInterfa
             throw MalformedReportFileException::missingVulnerabilitiesArray($path);
         }
 
+        return $decoded;
+    }
+
+    /**
+     * @param array<array-key, mixed> $decoded
+     *
+     * @return array<array-key, mixed>
+     *
+     * @throws MalformedReportFileException
+     */
+    private function vulnerabilitiesIn(array $decoded, string $path): array
+    {
         $vulnerabilities = $decoded['vulnerabilities'] ?? null;
         if (!\is_array($vulnerabilities)) {
             throw MalformedReportFileException::missingVulnerabilitiesArray($path);
         }
 
         return $vulnerabilities;
+    }
+
+    /**
+     * The report's coverage ledger: null for a report written before the
+     * ledger existed. An entry without the expected shape names no file.
+     *
+     * @param array<array-key, mixed> $decoded
+     *
+     * @return list<array{stage: string, file: string, status: string}>|null
+     */
+    private function coverageIn(array $decoded): ?array
+    {
+        $coverage = $decoded['coverage'] ?? null;
+        if (!\is_array($coverage)) {
+            return null;
+        }
+
+        $entries = [];
+        foreach ($coverage as $entry) {
+            if (\is_array($entry) && \is_string($entry['stage'] ?? null) && \is_string($entry['file'] ?? null) && \is_string($entry['status'] ?? null)) {
+                $entries[] = ['stage' => $entry['stage'], 'file' => $entry['file'], 'status' => $entry['status']];
+            }
+        }
+
+        return $entries;
     }
 
     /**

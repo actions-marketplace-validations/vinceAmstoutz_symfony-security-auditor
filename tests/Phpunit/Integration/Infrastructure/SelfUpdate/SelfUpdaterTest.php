@@ -27,6 +27,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\NullPri
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\PendingBinarySwap;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\PricingCatalogRefresherInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\PricingCatalogRefreshOutcome;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ReleaseChannel;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ReleaseClientInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\RunningBinaryLocatorInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\SelfUpdater;
@@ -37,6 +38,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Infrastructure\SelfUp
 final class SelfUpdaterTest extends TestCase
 {
     private const string LATEST_RELEASE_API_URL = 'https://api.github.com/repos/vinceAmstoutz/symfony-security-auditor/releases/latest';
+
+    private const string SNAPSHOT_RELEASE_API_URL = 'https://api.github.com/repos/vinceAmstoutz/symfony-security-auditor/releases/tags/snapshot';
 
     private string $workingDirectory;
 
@@ -72,6 +75,22 @@ final class SelfUpdaterTest extends TestCase
 
         self::assertSame(SelfUpdateStatus::Updated, $selfUpdateResult->status);
         self::assertStringEqualsFile($this->binaryPath, $payload);
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    public function test_it_reports_the_download_progress_to_its_caller(): void
+    {
+        $payload = 'NEW-BINARY';
+        $receivedBytes = [];
+
+        $this->selfUpdater($this->clientFor('9.9.9', $payload, hash('sha256', $payload)))->run('1.0.0', false, onDownloadProgress: static function (int $bytes) use (&$receivedBytes): void {
+            $receivedBytes[] = $bytes;
+        });
+
+        self::assertSame([10], $receivedBytes);
     }
 
     /**
@@ -259,6 +278,30 @@ final class SelfUpdaterTest extends TestCase
      * @throws SelfUpdateFailedException
      * @throws UnsupportedSelfUpdatePlatformException
      */
+    public function test_a_download_it_cannot_discard_keeps_the_failure_that_rejected_it(): void
+    {
+        $filesystem = new class extends Filesystem {
+            /**
+             * @param string|iterable<mixed> $files
+             */
+            #[Override]
+            public function remove(string|iterable $files): void
+            {
+                throw new IOException('removal refused');
+            }
+        };
+        $selfUpdater = $this->selfUpdater($this->clientFor('9.9.9', 'NEW', 'da39a3ee5e6b4b0d3255bfef95601890afd80709'), $this->binaryPath, $filesystem);
+
+        $this->expectException(SelfUpdateFailedException::class);
+        $this->expectExceptionMessage('Checksum verification failed');
+
+        $selfUpdater->run('1.0.0', false);
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
     public function test_it_rejects_a_download_that_vanishes_before_it_can_be_hashed(): void
     {
         $selfUpdater = $this->selfUpdater($this->clientFor('9.9.9', 'NEW', hash('sha256', 'NEW'), vanishAfterDownload: true));
@@ -285,6 +328,33 @@ final class SelfUpdaterTest extends TestCase
         $this->expectExceptionMessage('not writable');
 
         $selfUpdater->run('1.0.0', false);
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    public function test_it_refuses_to_update_a_writable_binary_whose_directory_is_not_writable(): void
+    {
+        $filesystem = new class extends Filesystem {
+            #[Override]
+            public function tempnam(string $dir, string $prefix, string $suffix = ''): string
+            {
+                throw new IOException('A temporary file could not be created: Permission denied');
+            }
+        };
+        $fakeReleaseClient = $this->clientFor('9.9.9', 'NEW', hash('sha256', 'NEW'));
+        $selfUpdater = $this->selfUpdater($fakeReleaseClient, $this->binaryPath, $filesystem);
+
+        try {
+            $this->expectException(SelfUpdateFailedException::class);
+            $this->expectExceptionMessage(\sprintf('The directory "%s" holding the binary is not writable (A temporary file could not be created: Permission denied)', $this->workingDirectory));
+
+            $selfUpdater->run('1.0.0', false);
+        } finally {
+            self::assertSame(1, $fakeReleaseClient->requests, 'Only the latest-version lookup may reach the network before the refusal.');
+            self::assertStringEqualsFile($this->binaryPath, 'OLD-BINARY');
+        }
     }
 
     /**
@@ -361,11 +431,47 @@ final class SelfUpdaterTest extends TestCase
 
         try {
             $this->expectException(SelfUpdateFailedException::class);
+            $this->expectExceptionMessageMatches('/: rename refused$/');
 
             $this->pendingBinarySwap->commit();
         } finally {
             self::assertCount(0, (new Finder())->in($this->workingDirectory)->files()->name('/\.download$/')->ignoreDotFiles(false));
         }
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    public function test_a_download_it_cannot_discard_after_a_failed_swap_is_named_in_the_same_error(): void
+    {
+        $filesystem = new class extends Filesystem {
+            #[Override]
+            public function rename(string $origin, string $target, bool $overwrite = false): void
+            {
+                throw new IOException('rename refused');
+            }
+
+            /**
+             * @param string|iterable<mixed> $files
+             */
+            #[Override]
+            public function remove(string|iterable $files): void
+            {
+                throw new IOException('removal refused');
+            }
+        };
+        $payload = 'NEW';
+        $this->selfUpdater($this->clientFor('9.9.9', $payload, hash('sha256', $payload)), $this->binaryPath, $filesystem)->run('1.0.0', false);
+
+        $this->expectException(SelfUpdateFailedException::class);
+        $this->expectExceptionMessageMatches(\sprintf(
+            '#^Failed to replace the binary at "%s": rename refused\. The downloaded update at "%s/[^"]+\.download" could not be removed either \(removal refused\); delete it by hand\.$#',
+            preg_quote($this->binaryPath, '#'),
+            preg_quote($this->workingDirectory, '#'),
+        ));
+
+        $this->pendingBinarySwap->commit();
     }
 
     /**
@@ -403,6 +509,51 @@ final class SelfUpdaterTest extends TestCase
     }
 
     /**
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    #[DataProvider('hostileReleaseTags')]
+    public function test_it_refuses_a_release_tag_that_is_not_a_release_version_before_building_any_url_from_it(string $tagName): void
+    {
+        $fakeReleaseClient = new FakeReleaseClient([self::LATEST_RELEASE_API_URL => json_encode(['tag_name' => $tagName], \JSON_THROW_ON_ERROR)]);
+        $selfUpdater = $this->selfUpdater($fakeReleaseClient);
+
+        try {
+            $selfUpdater->run('1.0.0', false);
+            self::fail('A tag that is not a release version must be refused.');
+        } catch (SelfUpdateFailedException $selfUpdateFailedException) {
+            self::assertSame(\sprintf('Could not determine the latest released version from "%s".', self::LATEST_RELEASE_API_URL), $selfUpdateFailedException->getMessage());
+            self::assertSame(1, $fakeReleaseClient->requests);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function hostileReleaseTags(): iterable
+    {
+        yield 'a path traversal' => ['../../x'];
+        yield 'a version followed by a path traversal' => ['9.9.9/../../evil'];
+        yield 'a version followed by a query' => ['9.9.9?download=1'];
+        yield 'a url' => ['https://evil.test/9.9.9'];
+        yield 'a version followed by a newline' => ["9.9.9\n"];
+        yield 'a version followed by a terminal escape' => ["9.9.9\x1b[31m"];
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    public function test_it_updates_from_a_prerelease_tag(): void
+    {
+        $payload = 'NEW-BINARY';
+        $selfUpdateResult = $this->selfUpdater($this->clientFor('9.9.9-rc.1', $payload, hash('sha256', $payload)))->run('1.0.0', false);
+        $this->pendingBinarySwap->commit();
+
+        self::assertSame('9.9.9-rc.1', $selfUpdateResult->latestVersion);
+        self::assertStringEqualsFile($this->binaryPath, $payload);
+    }
+
+    /**
      * @return iterable<string, array{string}>
      */
     public static function unresolvableLatestVersionPayloads(): iterable
@@ -412,6 +563,111 @@ final class SelfUpdaterTest extends TestCase
         yield 'object without tag_name' => ['{"foo":"bar"}'];
         yield 'non-string tag_name' => ['{"tag_name":123}'];
         yield 'empty tag_name' => ['{"tag_name":""}'];
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    public function test_it_installs_the_snapshot_named_by_the_snapshot_release(): void
+    {
+        $payload = 'SNAPSHOT-BINARY';
+        $selfUpdateResult = $this->selfUpdater($this->snapshotClientFor('1.0.0+3.gabcdef1', $payload, hash('sha256', $payload)))->run('1.0.0', false, ReleaseChannel::Snapshot);
+        $this->pendingBinarySwap->commit();
+
+        self::assertSame(SelfUpdateStatus::Updated, $selfUpdateResult->status);
+        self::assertSame('1.0.0+3.gabcdef1', $selfUpdateResult->latestVersion);
+        self::assertStringEqualsFile($this->binaryPath, $payload);
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    public function test_it_installs_a_snapshot_that_ranks_below_the_running_release(): void
+    {
+        $payload = 'SNAPSHOT-BINARY';
+        $selfUpdateResult = $this->selfUpdater($this->snapshotClientFor('1.0.0+3.gabcdef1', $payload, hash('sha256', $payload)))->run('2.0.0', false, ReleaseChannel::Snapshot);
+
+        self::assertSame(SelfUpdateStatus::Updated, $selfUpdateResult->status);
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    public function test_it_reports_the_running_snapshot_as_up_to_date(): void
+    {
+        $selfUpdateResult = $this->selfUpdater($this->snapshotClientFor('1.0.0+3.gabcdef1', 'IGNORED', hash('sha256', 'IGNORED')))->run('1.0.0+3.gabcdef1', false, ReleaseChannel::Snapshot);
+
+        self::assertSame(SelfUpdateStatus::AlreadyUpToDate, $selfUpdateResult->status);
+        self::assertStringEqualsFile($this->binaryPath, 'OLD-BINARY');
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    public function test_it_keeps_a_release_newer_than_the_latest_one(): void
+    {
+        $selfUpdateResult = $this->selfUpdater($this->clientFor('1.0.0', 'IGNORED', hash('sha256', 'IGNORED')))->run('2.0.0', false);
+
+        self::assertSame(SelfUpdateStatus::AlreadyUpToDate, $selfUpdateResult->status);
+        self::assertStringEqualsFile($this->binaryPath, 'OLD-BINARY');
+    }
+
+    /**
+     * @throws SelfUpdateFailedException
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    public function test_it_takes_a_snapshot_build_back_to_the_latest_release(): void
+    {
+        $payload = 'RELEASE-BINARY';
+        $selfUpdateResult = $this->selfUpdater($this->clientFor('1.0.0', $payload, hash('sha256', $payload)))->run('1.0.0+3.gabcdef1', false);
+        $this->pendingBinarySwap->commit();
+
+        self::assertSame(SelfUpdateStatus::Updated, $selfUpdateResult->status);
+        self::assertStringEqualsFile($this->binaryPath, $payload);
+    }
+
+    /**
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    #[DataProvider('unresolvableSnapshotPayloads')]
+    public function test_it_refuses_a_snapshot_release_that_names_no_snapshot_version(string $apiBody): void
+    {
+        $fakeReleaseClient = new FakeReleaseClient([self::SNAPSHOT_RELEASE_API_URL => $apiBody]);
+
+        try {
+            $this->selfUpdater($fakeReleaseClient)->run('1.0.0', false, ReleaseChannel::Snapshot);
+            self::fail('A snapshot release without a snapshot version must be refused.');
+        } catch (SelfUpdateFailedException $selfUpdateFailedException) {
+            self::assertSame(\sprintf('Could not determine the latest released version from "%s".', self::SNAPSHOT_RELEASE_API_URL), $selfUpdateFailedException->getMessage());
+            self::assertSame(1, $fakeReleaseClient->requests);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function unresolvableSnapshotPayloads(): iterable
+    {
+        yield 'not json' => ['this is not json'];
+        yield 'object without name' => ['{"tag_name":"snapshot"}'];
+        yield 'non-string name' => ['{"name":123}'];
+        yield 'a release version' => ['{"name":"1.0.0"}'];
+        yield 'a terminal escape' => ['{"name":"1.0.0+3.gabcdef1\\u001b[31m"}'];
+    }
+
+    /**
+     * @throws UnsupportedSelfUpdatePlatformException
+     */
+    private function snapshotClientFor(string $snapshotVersion, string $payload, string $checksum): FakeReleaseClient
+    {
+        return new FakeReleaseClient([
+            self::SNAPSHOT_RELEASE_API_URL => \sprintf('{"tag_name":"snapshot","name":"%s"}', $snapshotVersion),
+            $this->asset('snapshot')->checksumUrl => \sprintf("%s\n", $checksum),
+        ], $payload);
     }
 
     /**

@@ -103,6 +103,16 @@ final class MarkdownReportRendererTest extends AbstractReportRendererTestCase
     /**
      * @throws InvalidAuditContextException
      */
+    public function test_render_escapes_markup_in_the_primary_model(): void
+    {
+        $output = $this->renderer->render($this->makeReportWithCost(AuditCost::zero('<details>[claude](https://evil.example)')));
+
+        self::assertStringContainsString('**Model:** &lt;details&gt;\\[claude\\](https&#58;//evil.example) ·', $output);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
     public function test_render_shows_unknown_model_when_the_primary_model_is_blank(): void
     {
         $output = $this->renderer->render($this->makeReportWithCost(AuditCost::zero('')));
@@ -130,6 +140,68 @@ final class MarkdownReportRendererTest extends AbstractReportRendererTestCase
         $output = $this->renderer->render($this->makeReportWithCost(AuditCost::of(100, 50, 0.0, 'ollama/llama3.2')));
 
         self::assertStringContainsString('**Cost:** $0.0000 (no published pricing, or a self-hosted model)', $output);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_render_states_the_risk_of_an_audit_that_did_not_finish_as_covering_only_the_files_analyzed(): void
+    {
+        self::assertStringContainsString('**Risk level:** SAFE (score 0, on the files analyzed) · ', $this->renderer->render($this->makeIncompleteReport()));
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_render_states_no_risk_level_for_an_audit_that_analyzed_no_file(): void
+    {
+        $output = $this->renderer->render($this->makeReportThatAnalyzedNoFile());
+
+        self::assertStringContainsString('**Risk level:** UNKNOWN (no file was analyzed) · ', $output);
+        self::assertStringNotContainsString('SAFE', $output);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_render_gives_a_scan_that_found_no_file_no_verdict(): void
+    {
+        $output = $this->renderer->render($this->makeReportOfAScanThatFoundNoFile());
+
+        self::assertStringContainsString('**Risk level:** UNKNOWN (no file was analyzed) · ', $output);
+        self::assertStringContainsString('> ⚠️ **Audit incomplete: the scan found no file to audit, so this report has no verdict', $output);
+        self::assertStringNotContainsString('SAFE', $output);
+        self::assertStringNotContainsString('No validated vulnerabilities found.', $output);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_render_never_calls_an_incomplete_audit_clean(): void
+    {
+        self::assertStringNotContainsString('No validated vulnerabilities found.', $this->renderer->render($this->makeIncompleteReport()));
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_render_says_an_audit_without_findings_did_not_finish(): void
+    {
+        self::assertStringContainsString('> ⚠️ **Audit incomplete: 2 file(s)', $this->renderer->render($this->makeIncompleteReport()));
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_render_warns_above_the_findings_of_an_audit_that_did_not_finish(): void
+    {
+        self::assertStringContainsString(
+            "free of vulnerabilities.**\n\n## Summary by severity",
+            $this->renderer->render($this->makeIncompleteReport($this->makeValidatedVuln())),
+        );
     }
 
     /**
@@ -315,7 +387,32 @@ final class MarkdownReportRendererTest extends AbstractReportRendererTestCase
         $output = $this->renderer->render($this->makeReport($vulnerability));
 
         self::assertStringNotContainsString('[here](https://evil.example.com)', $output);
-        self::assertStringContainsString('Click \\[here\\](https://evil.example.com) for the PoC', $output);
+        self::assertStringContainsString('Click \\[here\\](https&#58;//evil.example.com) for the PoC', $output);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_render_keeps_every_email_address_and_mention_of_finding_text_from_becoming_live(): void
+    {
+        $vulnerability = Vulnerability::of(
+            new VulnerabilityClassification(VulnerabilityType::SQL_INJECTION, VulnerabilitySeverity::HIGH, 'Report to security@evil.example', 0.9),
+            new CodeLocation('src/Foo.php', 1, 5),
+            new VulnerabilityNarrative('cc @octocat', 'mailto:a@evil.example', 'proof', 'xmpp:b@evil.example/home'),
+            'code',
+        )->withReviewerValidation(true);
+
+        $output = $this->renderer->render($this->makeReportWithCost(AuditCost::zero('claude@20250101'), $vulnerability));
+
+        self::assertStringContainsString("**Model:** claude@\u{2060}20250101 ·", $output);
+        self::assertStringContainsString("### 🟠 HIGH — Report to security@\u{2060}evil.example\n", $output);
+        self::assertStringContainsString("\ncc @\u{2060}octocat\n", $output);
+        self::assertStringContainsString("**Attack vector:** mailto:a@\u{2060}evil.example\n", $output);
+        self::assertStringContainsString("**Remediation:** xmpp:b@\u{2060}evil.example/home", $output);
+        self::assertDoesNotMatchRegularExpression('/@(?!\x{2060})/u', $output);
     }
 
     /**

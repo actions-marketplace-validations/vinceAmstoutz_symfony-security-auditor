@@ -16,16 +16,21 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use Symfony\AI\Platform\FinishReason\FinishReason;
-use Symfony\AI\Platform\FinishReason\FinishReasonCase;
+use Symfony\AI\Platform\Message\AssistantMessage;
+use Symfony\AI\Platform\Message\Message;
 use Symfony\AI\Platform\Result\DeferredResult;
 use Symfony\AI\Platform\Result\MultiPartResult;
 use Symfony\AI\Platform\Result\ResultInterface;
 use Symfony\AI\Platform\Result\TextResult;
 use Symfony\AI\Platform\Result\ToolCall;
 use Symfony\AI\Platform\Result\ToolCallResult;
+use Symfony\AI\Platform\TokenUsage\TokenUsage;
+use Symfony\AI\Platform\TokenUsage\TokenUsageExtractorInterface;
 use Symfony\AI\Platform\TokenUsage\TokenUsageInterface;
+use Throwable;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\NegativeTokenCountException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Telemetry\TokenUsageRecorder;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\TokenUsageSnapshot;
 
 /**
  * Extracts token usage, tool calls, text, and the provider finish reason from
@@ -36,31 +41,243 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Telemetry\TokenUsageR
  */
 final readonly class PlatformResultExtractor
 {
+    private FinishReasonReader $finishReasonReader;
+
     public function __construct(
         private ?TokenUsageRecorder $tokenUsageRecorder,
         private LoggerInterface $logger = new NullLogger(),
-    ) {}
+    ) {
+        $this->finishReasonReader = new FinishReasonReader($logger);
+    }
 
-    /** @return array{0: int, 1: int, 2: int, 3: int}
+    /**
+     * The usage the provider reported for an answered call, or, when it
+     * reported none (Bedrock's InvokeModel route, a gateway that omits
+     * `usage`), the call's estimated input tokens, which the provider bills
+     * all the same: the output it produced is then unknown and counted as
+     * none. A usage object that reports no prompt tokens (empty, or zero with
+     * no cache count to account for the prompt) books the estimate for the
+     * input as well, beside the completion it reported.
+     *
+     * @return array{0: int, 1: int, 2: int, 3: int}
      *
      * @throws NegativeTokenCountException
      */
-    public function extractTokens(DeferredResult $deferredResult): array
+    public function extractTokens(DeferredResult $deferredResult, int $estimatedInputTokens): array
     {
         $metadata = $deferredResult->getMetadata()->all();
         $tokenUsage = $metadata['token_usage'] ?? null;
         if (!$tokenUsage instanceof TokenUsageInterface) {
-            return [0, 0, 0, 0];
+            return $this->bookEstimatedInput($estimatedInputTokens);
         }
 
-        $inputTokens = $tokenUsage->getPromptTokens() ?? 0;
-        $outputTokens = $tokenUsage->getCompletionTokens() ?? 0;
-        $cacheReadTokens = $tokenUsage->getCacheReadTokens() ?? 0;
-        $cacheCreationTokens = $tokenUsage->getCacheCreationTokens() ?? 0;
+        [$inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens] = $this->billedTokenCounts($tokenUsage, $estimatedInputTokens);
         $this->assertNonNegative($inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens);
         $this->tokenUsageRecorder?->record($inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens);
 
         return [$inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens];
+    }
+
+    /**
+     * @return array{0: int, 1: int, 2: int, 3: int}
+     */
+    private function billedTokenCounts(TokenUsageInterface $tokenUsage, int $estimatedInputTokens): array
+    {
+        [$inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens] = $this->tokenCounts($tokenUsage);
+        if (!$this->reportsPrompt($tokenUsage, $inputTokens, $cacheReadTokens, $cacheCreationTokens)) {
+            $this->logger->debug('The provider reported no prompt tokens for an answer; its input is booked at the estimated input tokens, since the provider bills the request it accepted', [
+                'estimated_input_tokens' => $estimatedInputTokens,
+            ]);
+            $inputTokens = $estimatedInputTokens;
+        }
+
+        return [$inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens];
+    }
+
+    /**
+     * A request is never empty, so a prompt count that is missing, or zero
+     * with no cache read or write to stand in for it (Anthropic counts those
+     * apart from its input tokens), is a provider that did not report it.
+     */
+    private function reportsPrompt(TokenUsageInterface $tokenUsage, int $inputTokens, int $cacheReadTokens, int $cacheCreationTokens): bool
+    {
+        return null !== $tokenUsage->getPromptTokens() && (0 !== $inputTokens || 0 !== $cacheReadTokens || 0 !== $cacheCreationTokens);
+    }
+
+    /**
+     * @return array{0: int, 1: int, 2: int, 3: int}
+     *
+     * @throws NegativeTokenCountException
+     */
+    private function bookEstimatedInput(int $estimatedInputTokens): array
+    {
+        $this->logger->debug('The provider reported no token usage for an answer; it is booked at its estimated input tokens, since the provider bills the request it accepted', [
+            'estimated_input_tokens' => $estimatedInputTokens,
+        ]);
+        $this->tokenUsageRecorder?->record($estimatedInputTokens, 0, 0, 0);
+
+        return [$estimatedInputTokens, 0, 0, 0];
+    }
+
+    /**
+     * The usage a provider reported in the raw answer of a call its bridge
+     * failed to convert, read with that bridge's own extractor — a failed
+     * conversion attaches no `token_usage` metadata. A usage that reports no
+     * prompt tokens has the call's estimated input tokens as its input, as in
+     * `extractTokens()`. Null when the answer reports none, cannot be read, or
+     * reports a negative count. Nothing is recorded here: the caller books the
+     * failed call.
+     */
+    public function extractBilledUsage(DeferredResult $deferredResult, int $estimatedInputTokens): ?TokenUsageSnapshot
+    {
+        try {
+            $tokenUsage = $this->usageInRawAnswer($deferredResult);
+
+            return $tokenUsage instanceof TokenUsageInterface ? TokenUsageSnapshot::of(...$this->billedTokenCounts($tokenUsage, $estimatedInputTokens)) : null;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * The input tokens the provider counts against its input-tokens-per-minute
+     * limit for a call booked at `$tokenUsageSnapshot`: the input and the
+     * cache writes, and the cache reads too where the provider counts them
+     * inside its prompt, as OpenAI-style providers do. Anthropic leaves its
+     * cache reads out of that limit. The cost books the cache reads at the
+     * cache rate either way.
+     */
+    public function rateLimitedInputTokens(DeferredResult $deferredResult, TokenUsageSnapshot $tokenUsageSnapshot): int
+    {
+        $cacheReadsCountedInPrompt = $this->countsCacheReadsInPrompt($this->reportedUsage($deferredResult));
+
+        return $tokenUsageSnapshot->inputTokens() + $tokenUsageSnapshot->cacheCreationTokens() + ($cacheReadsCountedInPrompt ? $tokenUsageSnapshot->cacheReadTokens() : 0);
+    }
+
+    /**
+     * A usage that reports no prompt has its input booked at the estimated
+     * input tokens, which count the whole prompt, its cached share included.
+     */
+    private function countsCacheReadsInPrompt(TokenUsageInterface $tokenUsage): bool
+    {
+        $promptTokens = $tokenUsage->getPromptTokens();
+
+        return null !== $promptTokens && 0 !== $this->cachedTokensInsidePrompt($tokenUsage, $promptTokens);
+    }
+
+    /**
+     * The usage of an answered call, or of one its bridge failed to convert,
+     * which only its raw answer reports: an empty one when it reports none.
+     */
+    private function reportedUsage(DeferredResult $deferredResult): TokenUsageInterface
+    {
+        $tokenUsage = $deferredResult->getMetadata()->all()['token_usage'] ?? null;
+
+        return $tokenUsage instanceof TokenUsageInterface ? $tokenUsage : $this->usageInRawAnswer($deferredResult) ?? new TokenUsage();
+    }
+
+    private function usageInRawAnswer(DeferredResult $deferredResult): ?TokenUsageInterface
+    {
+        $tokenUsageExtractor = $deferredResult->getResultConverter()->getTokenUsageExtractor();
+
+        return $tokenUsageExtractor instanceof TokenUsageExtractorInterface ? $this->extractedUsage($tokenUsageExtractor, $deferredResult) : null;
+    }
+
+    private function extractedUsage(TokenUsageExtractorInterface $tokenUsageExtractor, DeferredResult $deferredResult): ?TokenUsageInterface
+    {
+        try {
+            return $tokenUsageExtractor->extract($deferredResult->getRawResult());
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * @return array{0: int, 1: int, 2: int, 3: int}
+     */
+    private function tokenCounts(TokenUsageInterface $tokenUsage): array
+    {
+        $promptTokens = $tokenUsage->getPromptTokens() ?? 0;
+        $completionTokens = $tokenUsage->getCompletionTokens() ?? 0;
+        $cachedInsidePrompt = $this->cachedTokensInsidePrompt($tokenUsage, $promptTokens);
+
+        return [
+            $promptTokens - $cachedInsidePrompt,
+            $completionTokens + $this->thinkingTokensCountedApart($tokenUsage, $promptTokens, $completionTokens),
+            0 === $cachedInsidePrompt ? $tokenUsage->getCacheReadTokens() ?? 0 : $cachedInsidePrompt,
+            $tokenUsage->getCacheCreationTokens() ?? 0,
+        ];
+    }
+
+    /**
+     * Anthropic counts cache reads and writes apart from its input tokens and
+     * always reports the writes; OpenAI-style providers (OpenAI, Gemini,
+     * DeepSeek, gateways) report a total and count the cached tokens inside
+     * the prompt. Booking both as they come would bill the cached share twice
+     * at the full input rate, or never at the cache rate.
+     */
+    private function cachedTokensInsidePrompt(TokenUsageInterface $tokenUsage, int $promptTokens): int
+    {
+        if (null !== $tokenUsage->getCacheCreationTokens() || null === $tokenUsage->getTotalTokens()) {
+            return 0;
+        }
+
+        $cachedTokens = $tokenUsage->getCacheReadTokens() ?? $tokenUsage->getCachedTokens() ?? 0;
+
+        return $cachedTokens <= $promptTokens ? $cachedTokens : 0;
+    }
+
+    /**
+     * Gemini and Vertex AI bill their thought tokens as output yet report
+     * them apart from the candidates, so the total is the sum of the three;
+     * OpenAI-style providers count their reasoning tokens inside the
+     * completion, so adding them would bill the same tokens twice. Only a
+     * total that has room for the thinking tokens next to the prompt and the
+     * completion shows they were counted apart.
+     */
+    private function thinkingTokensCountedApart(TokenUsageInterface $tokenUsage, int $promptTokens, int $completionTokens): int
+    {
+        $thinkingTokens = $tokenUsage->getThinkingTokens() ?? 0;
+        $totalTokens = $tokenUsage->getTotalTokens();
+
+        if (null === $totalTokens || $promptTokens + $completionTokens + $thinkingTokens > $totalTokens) {
+            return 0;
+        }
+
+        return $thinkingTokens;
+    }
+
+    /**
+     * The share of the `$cacheCreationTokens` cache writes a call is booked
+     * with that Anthropic keeps for an hour (`cache_retention: long`) and
+     * bills at its own rate. Only the raw answer reports it: the bridge's
+     * usage counts every write alike. None when the answer does not split its
+     * writes or cannot be read.
+     */
+    public function extractOneHourCacheCreationTokens(DeferredResult $deferredResult, int $cacheCreationTokens): int
+    {
+        try {
+            $usage = $deferredResult->getRawResult()->getData()['usage'] ?? null;
+        } catch (Throwable) {
+            return 0;
+        }
+
+        $cacheCreation = \is_array($usage) ? $usage['cache_creation'] ?? null : null;
+        $oneHourCacheCreationTokens = \is_array($cacheCreation) ? $cacheCreation['ephemeral_1h_input_tokens'] ?? null : null;
+
+        return \is_int($oneHourCacheCreationTokens) ? min($oneHourCacheCreationTokens, $cacheCreationTokens) : 0;
+    }
+
+    /**
+     * The model the provider says served the call, which a gateway routing
+     * on its own, or a failover platform, can differ from the one requested.
+     */
+    public function extractReportedModel(DeferredResult $deferredResult): ?string
+    {
+        $tokenUsage = $deferredResult->getMetadata()->all()['token_usage'] ?? null;
+        $reportedModel = $tokenUsage instanceof TokenUsageInterface ? $tokenUsage->getModel() : null;
+
+        return '' === $reportedModel ? null : $reportedModel;
     }
 
     /**
@@ -101,22 +318,7 @@ final readonly class PlatformResultExtractor
             return null;
         }
 
-        $this->warnWhenDegraded($finishReason);
-
-        return $finishReason->getRaw();
-    }
-
-    private function warnWhenDegraded(FinishReason $finishReason): void
-    {
-        $warning = match (true) {
-            $finishReason->is(FinishReasonCase::LENGTH) => 'LLM response was truncated by the output token limit — findings may be lost; raise max_output_tokens (or the per-agent attacker/reviewer variants)',
-            $finishReason->is(FinishReasonCase::CONTENT_FILTER) => 'LLM response was suppressed by the provider content filter — findings may be lost',
-            default => null,
-        };
-
-        if (null !== $warning) {
-            $this->logger->warning($warning, ['finish_reason' => $finishReason->getRaw()]);
-        }
+        return $this->finishReasonReader->stopReason($finishReason, $this->extractText($deferredResult->getResult()));
     }
 
     /**
@@ -129,14 +331,27 @@ final readonly class PlatformResultExtractor
         }
 
         if ($result instanceof MultiPartResult) {
+            $toolCalls = [];
             foreach ($result->getContent() as $part) {
                 if ($part instanceof ToolCallResult) {
-                    return array_values($part->getContent());
+                    array_push($toolCalls, ...$part->getContent());
                 }
             }
+
+            return $toolCalls;
         }
 
         return [];
+    }
+
+    /**
+     * The model's answer as the assistant turn that goes back with the tool
+     * results: whole, so a signed thinking block and the text in between its
+     * tool calls come back the way the provider produced them.
+     */
+    public function extractAssistantMessage(ResultInterface $result): AssistantMessage
+    {
+        return Message::ofAssistant($result);
     }
 
     public function extractText(ResultInterface $result): string

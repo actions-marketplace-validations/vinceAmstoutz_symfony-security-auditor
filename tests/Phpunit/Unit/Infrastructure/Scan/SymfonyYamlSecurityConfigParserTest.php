@@ -14,8 +14,10 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\Scan;
 
 use Override;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AccessControlRule;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\SymfonyYamlSecurityConfigParser;
 
 final class SymfonyYamlSecurityConfigParserTest extends TestCase
@@ -200,7 +202,7 @@ final class SymfonyYamlSecurityConfigParserTest extends TestCase
      * internally, so `methods: [post]` and `methods: [POST]` are equally
      * valid, semantically-identical YAML. The `methods: ...` marker must be
      * normalized to uppercase here, since
-     * `SymfonyMappingContextRenderer::alternativeCoversMethods()` re-parses
+     * `AccessControlRuleMatcher::alternativeCoversMethods()` re-parses
      * it with an uppercase-only regex to decide route coverage.
      */
     public function test_it_normalizes_lowercase_methods_to_uppercase(): void
@@ -278,6 +280,119 @@ final class SymfonyYamlSecurityConfigParserTest extends TestCase
         self::assertSame(['^/metrics' => ['ROLE_MONITOR']], $accessControl);
     }
 
+    #[DataProvider('nonProductionEnvironmentCases')]
+    public function test_it_ignores_access_control_the_production_kernel_never_loads(string $environment): void
+    {
+        $accessControl = $this->symfonyYamlSecurityConfigParser->parseAccessControl(<<<YAML
+            security:
+                access_control:
+                    - { path: ^/profile, roles: ROLE_USER }
+            when@{$environment}:
+                security:
+                    access_control:
+                        - { path: ^/admin, roles: ROLE_ADMIN }
+            YAML);
+
+        self::assertSame(['^/profile' => ['ROLE_USER']], $accessControl);
+    }
+
+    #[DataProvider('nonProductionEnvironmentCases')]
+    public function test_it_ignores_firewalls_the_production_kernel_never_loads(string $environment): void
+    {
+        $firewallRules = $this->symfonyYamlSecurityConfigParser->parseFirewallRules(<<<YAML
+            security:
+                firewalls:
+                    main:
+                        pattern: ^/
+            when@{$environment}:
+                security:
+                    firewalls:
+                        admin:
+                            pattern: ^/admin
+                            security: false
+            YAML);
+
+        self::assertSame(['^/'], $firewallRules);
+    }
+
+    /** @return iterable<string, array{0: string}> */
+    public static function nonProductionEnvironmentCases(): iterable
+    {
+        yield 'test' => ['test'];
+        yield 'dev' => ['dev'];
+        yield 'staging' => ['staging'];
+    }
+
+    #[DataProvider('loadRankCases')]
+    public function test_it_ranks_the_configuration_files_in_the_order_the_kernel_loads_them(string $relativePath, int $rank): void
+    {
+        self::assertSame($rank, $this->symfonyYamlSecurityConfigParser->loadRank($relativePath));
+    }
+
+    /** @return iterable<string, array{0: string, 1: int}> */
+    public static function loadRankCases(): iterable
+    {
+        yield 'the security package' => ['config/packages/security.yaml', 0];
+        yield 'a production package' => ['config/packages/prod/security.yaml', 1];
+        yield 'a nested production package' => ['config/packages/prod/security/firewalls.yaml', 1];
+    }
+
+    #[DataProvider('configurationFileCases')]
+    public function test_it_tells_which_configuration_files_the_production_kernel_loads(string $relativePath, bool $loaded): void
+    {
+        self::assertSame($loaded, $this->symfonyYamlSecurityConfigParser->isLoadedInProduction($relativePath));
+    }
+
+    /** @return iterable<string, array{0: string, 1: bool}> */
+    public static function configurationFileCases(): iterable
+    {
+        yield 'the security package' => ['config/packages/security.yaml', true];
+        yield 'the security package with a yml extension' => ['config/packages/security.yml', true];
+        yield 'a production package' => ['config/packages/prod/security.yaml', true];
+        yield 'a nested production package' => ['config/packages/prod/security/firewalls.yaml', true];
+        yield 'a test package' => ['config/packages/test/security.yaml', false];
+        yield 'a development package' => ['config/packages/dev/security.yaml', false];
+        yield 'a file no kernel imports' => ['config/legacy/access.yaml', false];
+        yield 'a security file outside the packages' => ['config/security.yaml', false];
+        yield 'another package' => ['config/packages/framework.yaml', true];
+        yield 'another package with a yml extension, which the kernel does not load' => ['config/packages/security_access.yml', false];
+        yield 'a production package with a yml extension' => ['config/packages/prod/security_access.yml', true];
+        yield 'a security package below another directory' => ['src/config/packages/security.yaml', false];
+        yield 'a distributed security package' => ['config/packages/security.yaml.dist', false];
+        yield 'an xml production package' => ['config/packages/prod/security.xml', false];
+    }
+
+    public function test_it_gives_the_access_control_rules_in_the_order_they_are_declared(): void
+    {
+        $accessControlRules = $this->symfonyYamlSecurityConfigParser->parseAccessControlRules(<<<'YAML'
+            when@prod:
+                security:
+                    access_control:
+                        - { path: ^/prod, roles: ROLE_PROD }
+            security:
+                access_control:
+                    - { path: ^/admin, roles: ROLE_ADMIN, methods: [get, POST] }
+                    - { path: ^/ }
+                    - { route: admin_export, requires_channel: https }
+                    - { roles: ROLE_NOWHERE }
+                    - not a rule
+                    - { path: ^/admin, roles: ROLE_ADMIN }
+            YAML);
+
+        self::assertEquals([
+            new AccessControlRule('^/admin', ['GET', 'POST'], true),
+            new AccessControlRule('^/', [], false),
+            new AccessControlRule('route: admin_export', [], false),
+            new AccessControlRule('^/admin', [], true),
+            new AccessControlRule('^/prod', [], true),
+        ], $accessControlRules);
+    }
+
+    public function test_it_gives_no_access_control_rule_for_a_document_without_a_list(): void
+    {
+        self::assertSame([], $this->symfonyYamlSecurityConfigParser->parseAccessControlRules("security:\n    access_control: ~\n"));
+    }
+
     public function test_it_keys_route_based_entries_by_route_name(): void
     {
         $accessControl = $this->symfonyYamlSecurityConfigParser->parseAccessControl(<<<'YAML'
@@ -350,6 +465,40 @@ final class SymfonyYamlSecurityConfigParserTest extends TestCase
         );
     }
 
+    public function test_the_root_section_precedes_the_production_override_wherever_the_document_writes_it(): void
+    {
+        $accessControl = $this->symfonyYamlSecurityConfigParser->parseAccessControl(<<<'YAML'
+            when@prod:
+                security:
+                    access_control:
+                        - { path: ^/api, roles: ROLE_USER }
+            security:
+                access_control:
+                    - { path: ^/api/docs, roles: PUBLIC_ACCESS }
+            YAML);
+
+        self::assertSame(['^/api/docs', '^/api'], array_keys($accessControl));
+    }
+
+    public function test_a_section_without_access_control_keeps_every_rule_an_earlier_section_recorded(): void
+    {
+        $accessControl = $this->symfonyYamlSecurityConfigParser->parseAccessControl(<<<'YAML'
+            security:
+                access_control:
+                    - { path: ^/admin, roles: ROLE_ADMIN }
+                    - { path: ^/api, roles: ROLE_USER }
+            when@prod:
+                security:
+                    firewalls:
+                        main: { lazy: true }
+            YAML);
+
+        self::assertSame(
+            ['^/admin' => ['ROLE_ADMIN'], '^/api' => ['ROLE_USER']],
+            $accessControl,
+        );
+    }
+
     public function test_it_keeps_collecting_entries_after_one_without_a_path(): void
     {
         $accessControl = $this->symfonyYamlSecurityConfigParser->parseAccessControl(<<<'YAML'
@@ -412,6 +561,18 @@ final class SymfonyYamlSecurityConfigParserTest extends TestCase
             );
 
         (new SymfonyYamlSecurityConfigParser($logger))->parseAccessControl("\t{ not: yaml");
+    }
+
+    public function test_it_skips_and_logs_security_configuration_too_large_to_read(): void
+    {
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('debug')
+            ->with('Skipping unparseable YAML during security-config mapping', ['error' => 'it holds 262145 bytes, more than the 262144 the audit reads']);
+
+        $securityYaml = "security:\n    access_control:\n        - { path: ^/admin, roles: ROLE_ADMIN }\n";
+
+        self::assertSame([], (new SymfonyYamlSecurityConfigParser($logger))->parseAccessControl($securityYaml.'#'.str_repeat('x', 262_144 - 1 - \strlen($securityYaml))."\n"));
     }
 
     public function test_it_trims_quoted_padded_paths_and_patterns(): void

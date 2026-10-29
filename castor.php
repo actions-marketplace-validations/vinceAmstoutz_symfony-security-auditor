@@ -16,6 +16,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Tooling\Eval\EvalReport;
 use VinceAmstoutz\SymfonySecurityAuditor\Tooling\Eval\EvalScorer;
 use VinceAmstoutz\SymfonySecurityAuditor\Tooling\Eval\GroundTruthManifest;
 
+use function Castor\context;
+use function Castor\fs;
 use function Castor\io;
 use function Castor\run;
 
@@ -69,17 +71,69 @@ function releaseBump(string $version): void
     io()->success(sprintf('All version pins now point at %s.', $version));
 }
 
+#[AsTask(name: 'compat:record', description: 'Record the compatibility fixtures from a release tag, or from a checkout of one that has its vendor/ installed')]
+function compatRecord(string $tagOrCheckout): void
+{
+    $checkout = is_dir($tagOrCheckout) ? rtrim($tagOrCheckout, '/') : sprintf('var/compat/%s', $tagOrCheckout);
+    $release = is_dir($tagOrCheckout)
+        ? trim(run(['git', '-C', $checkout, 'describe', '--tags', '--exact-match'], context()->withQuiet())->getOutput())
+        : $tagOrCheckout;
+
+    if (1 !== preg_match('/^\\d+\\.\\d+\\.\\d+$/', $release)) {
+        io()->error(sprintf('"%s" is not a X.Y.Z release tag.', $release));
+
+        exit(1);
+    }
+
+    if (!is_dir($checkout)) {
+        run(['git', 'worktree', 'add', '--detach', $checkout, $release]);
+        run(['docker', 'compose', 'exec', 'php', 'composer', 'install', '--no-interaction', '--no-progress', sprintf('--working-dir=%s', $checkout)]);
+    }
+
+    run(['docker', 'compose', 'exec', 'php', 'php', 'tools/Compat/record-configuration.php', $checkout, $release]);
+    run(['docker', 'compose', 'exec', '--user', sprintf('%d:%d', posix_getuid(), posix_getgid()), 'php', 'php', 'tools/Compat/record.php', $checkout, $release]);
+
+    io()->success(sprintf('Recorded the compatibility fixtures from %s. Empty the accepted-differences.php files and the roave baseline: they list differences from the previous release.', $release));
+}
+
+#[AsTask(name: 'compat:lock', description: 'Refresh the dependencies the compatibility job installs (tests/Phpunit/Compat/composer.lock) after composer.json changed')]
+function compatLock(): void
+{
+    run(['docker', 'compose', 'exec', 'php', 'composer', 'update', '--no-interaction', '--no-progress']);
+    fs()->copy('composer.lock', 'tests/Phpunit/Compat/composer.lock', true);
+
+    io()->success('tests/Phpunit/Compat/composer.lock now pins what composer.json resolves to on the container\'s PHP. Run the compatibility suite before committing it: a new console or bridge release may change what a scenario prints.');
+}
+
+#[AsTask(name: 'compat:draft', description: 'Replay the compatibility scenarios on this tree and print draft accepted-differences.php entries for every difference not yet accepted')]
+function compatDraft(): void
+{
+    run(['docker', 'compose', 'exec', 'php', 'php', 'tools/Compat/draft-accepted.php']);
+}
+
 #[AsTask(name: 'eval', description: 'Audit a ground-truth fixture and score detection precision/recall against its manifest')]
 function evaluate(
     string $target = 'examples/vulnerable-app',
     string $groundTruth = 'examples/vulnerable-app/ground-truth.json',
     float $minPrecision = 0.0,
     float $minRecall = 0.0,
+    string $apiKeyEnv = 'ANTHROPIC_API_KEY',
 ): void {
-    $reportPath = sprintf('%s/ssa-eval-%s.json', sys_get_temp_dir(), bin2hex(random_bytes(4)));
+    registerProjectAutoloader();
+    fs()->mkdir('var');
+    $reportPath = sprintf('var/ssa-eval-%s.json', bin2hex(random_bytes(4)));
 
     io()->section('Running the auditor against the fixture (uses real LLM calls)');
-    run(sprintf('docker compose exec php bin/console audit:run %s --format=json --output=%s', $target, $reportPath));
+    $audit = run(
+        ['docker', 'compose', 'exec', '-e', $apiKeyEnv, 'php', 'examples/vulnerable-app/bin/console', 'audit:run', $target, '--format=json', '--output='.$reportPath],
+        context()->withAllowFailure(),
+    );
+
+    if (!is_file($reportPath)) {
+        io()->error(sprintf('The audit wrote no report (exit code %d). Run "composer install" in examples/vulnerable-app and export %s first.', $audit->getExitCode(), $apiKeyEnv));
+
+        exit(1);
+    }
 
     $manifest = GroundTruthManifest::fromFile($groundTruth);
     $evalReport = (new EvalScorer())->score($manifest, actualFindingsFromReport($reportPath));
@@ -93,6 +147,25 @@ function evaluate(
     }
 
     io()->success('Detection quality meets the configured thresholds.');
+}
+
+/** Castor loads no Composer autoloader, and the Docker setup keeps vendor/ inside the container. */
+function registerProjectAutoloader(): void
+{
+    spl_autoload_register(static function (string $class): void {
+        $namespaceDirectories = [
+            'VinceAmstoutz\\SymfonySecurityAuditor\\Tooling\\' => __DIR__.'/tools/',
+            'VinceAmstoutz\\SymfonySecurityAuditor\\' => __DIR__.'/src/',
+        ];
+
+        foreach ($namespaceDirectories as $namespace => $directory) {
+            if (str_starts_with($class, $namespace)) {
+                require $directory.str_replace('\\', '/', substr($class, strlen($namespace))).'.php';
+
+                return;
+            }
+        }
+    });
 }
 
 /**
@@ -205,11 +278,18 @@ function runCodeQualityTools(bool $fixMode = false): void
     io()->section('Install script tests');
     run('sh tests/Shell/install_script_test.sh');
 
+    io()->section('Pull request check tests');
+    run('sh tests/Shell/pull_request_check_test.sh');
+
+    io()->section('Changelog check');
+    run('sh tests/Shell/changelog_check_test.sh');
+    run('sh .github/scripts/check-changelog.sh CHANGELOG.md');
+
     io()->section('PHPUnit');
     run('docker compose exec php vendor/bin/phpunit --coverage-clover=build/coverage/clover.xml --coverage-xml=build/coverage/coverage-xml --log-junit=build/coverage/junit.xml');
 
     io()->section('Infection');
-    run('docker compose exec php php -d memory_limit=2G bin/infection --configuration=infection.json5 --threads=max --coverage=build/coverage --skip-initial-tests --min-msi=100 --min-covered-msi=100');
+    run('docker compose exec php php -d memory_limit=4G bin/infection --configuration=infection.json5 --threads=max --coverage=build/coverage --skip-initial-tests --min-msi=100 --min-covered-msi=100');
 
     io()->success($fixMode ? 'Fixing complete.' : 'Linting complete.');
 }

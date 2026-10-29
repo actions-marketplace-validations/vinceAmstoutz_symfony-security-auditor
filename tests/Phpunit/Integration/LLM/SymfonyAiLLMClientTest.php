@@ -21,11 +21,9 @@ use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use RuntimeException;
 use Symfony\AI\Platform\Exception\RateLimitExceededException;
-use Symfony\AI\Platform\Exception\UnexpectedResultTypeException;
 use Symfony\AI\Platform\FinishReason\FinishReason;
 use Symfony\AI\Platform\FinishReason\FinishReasonCase;
 use Symfony\AI\Platform\Message\AssistantMessage;
-use Symfony\AI\Platform\Message\MessageBag;
 use Symfony\AI\Platform\Message\SystemMessage;
 use Symfony\AI\Platform\Message\ToolCallMessage;
 use Symfony\AI\Platform\Message\UserMessage;
@@ -38,15 +36,12 @@ use Symfony\AI\Platform\Result\BaseResult;
 use Symfony\AI\Platform\Result\DeferredResult;
 use Symfony\AI\Platform\Result\InMemoryRawResult;
 use Symfony\AI\Platform\Result\MultiPartResult;
-use Symfony\AI\Platform\Result\RawResultInterface;
 use Symfony\AI\Platform\Result\ResultInterface;
 use Symfony\AI\Platform\Result\TextResult;
 use Symfony\AI\Platform\Result\ToolCall;
 use Symfony\AI\Platform\Result\ToolCallResult;
-use Symfony\AI\Platform\ResultConverterInterface;
 use Symfony\AI\Platform\Test\InMemoryPlatform;
 use Symfony\AI\Platform\TokenUsage\TokenUsage;
-use Symfony\AI\Platform\TokenUsage\TokenUsageExtractorInterface;
 use Symfony\AI\Platform\Tool\Tool;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\BudgetTracker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\CostCalculator;
@@ -55,12 +50,11 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\NegativeTok
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Telemetry\TokenUsageRecorder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditBudgetException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidTokenUsageException;
-use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidToolDefinitionException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidToolRegistryException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\LLMRequestTooLargeException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditBudget;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\PricingProviderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\RateLimiterInterface;
-use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\Tool\ToolDefinition;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\Tool\ToolInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\Tool\ToolRegistry;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\BackoffSchedule;
@@ -76,11 +70,15 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\RateLimitBacko
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\RetryPolicy;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\SymfonyAiLLMClient;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TransientFailureClassifier;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\CallbackTool;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\FakeRateLimiter;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\FakeSleeper;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\FixedPricingProvider;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\FixedTokenEstimator;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\FlakyPlatform;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\InvocationOptionsCapture;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\PlatformInvocationLog;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\ScriptedPlatform;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\ScriptedTokenUsagePlatform;
 use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\LLM\Fixture\ThrowingConverter;
 
@@ -94,10 +92,11 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_returns_text_from_platform_invoke(): void
     {
-        $platform = $this->scriptedPlatform([new TextResult('Hello from LLM')]);
+        $platform = $this->scriptedPlatformWithTokenUsage(new TextResult('Hello from LLM'), new TokenUsage(promptTokens: 12, completionTokens: 5));
         $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'test-model', new NullLogger()));
 
         $llmResponse = $symfonyAiLLMClient->complete('You are a helper.', 'Tell me a joke.');
@@ -105,8 +104,8 @@ final class SymfonyAiLLMClientTest extends TestCase
         self::assertSame('Hello from LLM', $llmResponse->content());
         self::assertSame('test-model', $llmResponse->model());
         self::assertSame('end_turn', $llmResponse->stopReason());
-        self::assertSame(0, $llmResponse->inputTokens());
-        self::assertSame(0, $llmResponse->outputTokens());
+        self::assertSame(12, $llmResponse->inputTokens());
+        self::assertSame(5, $llmResponse->outputTokens());
     }
 
     /**
@@ -117,6 +116,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_surfaces_the_provider_finish_reason_as_stop_reason(): void
     {
@@ -127,7 +127,7 @@ final class SymfonyAiLLMClientTest extends TestCase
 
         $llmResponse = $symfonyAiLLMClient->complete('sys', 'usr');
 
-        self::assertSame('max_tokens', $llmResponse->stopReason());
+        self::assertSame('length', $llmResponse->stopReason());
     }
 
     /**
@@ -139,6 +139,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
      * @throws InvalidToolRegistryException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_surfaces_the_provider_finish_reason_as_stop_reason(): void
     {
@@ -154,7 +155,7 @@ final class SymfonyAiLLMClientTest extends TestCase
             3,
         );
 
-        self::assertSame('max_tokens', $llmResponse->stopReason());
+        self::assertSame('length', $llmResponse->stopReason());
     }
 
     /**
@@ -162,6 +163,9 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws MissingAiPlatformException
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_surfaces_the_provider_finish_reason_as_stop_reason(): void
     {
@@ -172,7 +176,7 @@ final class SymfonyAiLLMClientTest extends TestCase
 
         $responses = $symfonyAiLLMClient->completeBatch([['system' => 's', 'user' => 'u']], 4);
 
-        self::assertSame('max_tokens', $responses[0]->stopReason());
+        self::assertSame('length', $responses[0]->stopReason());
     }
 
     /**
@@ -181,6 +185,9 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws InvalidToolRegistryException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_with_tools_surfaces_the_provider_finish_reason_as_stop_reason(): void
     {
@@ -193,7 +200,7 @@ final class SymfonyAiLLMClientTest extends TestCase
             ['system' => 's', 'user' => 'u', 'tools' => new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger())],
         ], 4, 3);
 
-        self::assertSame('max_tokens', $responses[0]->stopReason());
+        self::assertSame('length', $responses[0]->stopReason());
     }
 
     /**
@@ -204,6 +211,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_logs_debug_with_prompt_lengths_and_temperature(): void
     {
@@ -235,6 +243,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_logs_debug_response_with_content_length(): void
     {
@@ -268,6 +277,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_passes_temperature_via_options(): void
     {
@@ -290,6 +300,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_omits_temperature_when_left_at_default(): void
     {
@@ -311,6 +322,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_never_sends_cache_control_even_for_anthropic_model(): void
     {
@@ -332,6 +344,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_passes_provider_json_mode_response_format_for_anthropic_model(): void
     {
@@ -353,6 +366,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_omits_response_format_for_non_anthropic_model_even_when_json_mode_enabled(): void
     {
@@ -374,6 +388,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_passes_all_anthropic_options_together_when_multiple_flags_enabled(): void
     {
@@ -401,6 +416,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_omits_response_format_when_provider_json_mode_disabled(): void
     {
@@ -422,6 +438,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_passes_max_output_tokens_via_options_for_anthropic_model(): void
     {
@@ -445,6 +462,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_omits_max_output_tokens_for_non_anthropic_model_even_when_configured(): void
     {
@@ -468,6 +486,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_still_sends_temperature_for_non_anthropic_model(): void
     {
@@ -489,6 +508,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_omits_max_output_tokens_when_left_at_default(): void
     {
@@ -511,6 +531,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_passes_max_output_tokens_via_options_for_anthropic_model(): void
     {
@@ -545,6 +566,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_throws_when_no_ai_platform_is_configured(): void
     {
@@ -565,6 +587,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_throws_when_no_ai_platform_is_configured(): void
     {
@@ -580,6 +603,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_throws_when_no_ai_platform_is_configured(): void
     {
@@ -594,6 +622,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_returns_empty_for_no_requests(): void
     {
@@ -605,6 +638,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_returns_one_response_per_request_in_order(): void
     {
@@ -625,6 +663,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_processes_more_requests_than_window_size(): void
     {
@@ -643,6 +686,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_clamps_non_positive_window_to_one(): void
     {
@@ -659,6 +707,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_records_token_usage_per_response(): void
     {
@@ -687,6 +740,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_acquires_rate_limit_for_each_request(): void
     {
@@ -709,6 +767,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_falls_back_to_the_sequential_complete_path_when_dispatch_throws(): void
     {
@@ -730,6 +793,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_releases_the_rate_limiter_reservation_when_dispatch_fails(): void
     {
@@ -762,6 +830,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_releases_the_rate_limiter_reservation_when_token_extraction_fails(): void
     {
@@ -803,6 +872,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_releases_the_rate_limiter_reservation_when_token_extraction_fails_without_a_token_usage_recorder(): void
     {
@@ -834,8 +904,9 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
-    public function test_complete_releases_the_rate_limiter_reservation_when_the_result_has_no_text(): void
+    public function test_complete_answers_a_result_with_no_text_as_empty_content_and_settles_the_rate_limiter_reservation(): void
     {
         $fakeRateLimiter = new FakeRateLimiter();
         $platform = $this->scriptedPlatform([new MultiPartResult([new ToolCallResult([new ToolCall('1', 'someTool')])])]);
@@ -845,16 +916,11 @@ final class SymfonyAiLLMClientTest extends TestCase
             platformResilienceConfig: new PlatformResilienceConfig(rateLimiter: $fakeRateLimiter),
         );
 
-        $threw = false;
-        try {
-            $symfonyAiLLMClient->complete('s', 'u');
-        } catch (UnexpectedResultTypeException) {
-            $threw = true;
-        }
+        $llmResponse = $symfonyAiLLMClient->complete('s', 'u');
 
-        self::assertTrue($threw);
+        self::assertSame('', $llmResponse->content());
         self::assertCount(1, $fakeRateLimiter->acquired);
-        self::assertSame([[0, 0]], $fakeRateLimiter->recorded);
+        self::assertCount(1, $fakeRateLimiter->recorded);
     }
 
     /**
@@ -865,6 +931,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_releases_the_rate_limiter_reservation_when_token_extraction_fails(): void
     {
@@ -893,6 +960,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_releases_exactly_the_failed_reservation_before_falling_back_to_complete(): void
     {
@@ -941,6 +1013,11 @@ final class SymfonyAiLLMClientTest extends TestCase
      *
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_releases_a_clean_reservation_when_extraction_fails_then_records_the_fallbacks_reservation_independently(): void
     {
@@ -964,139 +1041,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
      * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
      * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_resolves_each_conversation_against_its_own_registry(): void
-    {
-        $firstToolCalls = 0;
-        $secondToolCalls = 0;
-        $firstRegistry = new ToolRegistry([$this->makeTool('record', 'd', static function (array $arguments) use (&$firstToolCalls): string {
-            ++$firstToolCalls;
-
-            return 'ok';
-        })], new NullLogger());
-        $secondRegistry = new ToolRegistry([$this->makeTool('record', 'd', static function (array $arguments) use (&$secondToolCalls): string {
-            ++$secondToolCalls;
-
-            return 'ok';
-        })], new NullLogger());
-
-        $platform = $this->scriptedPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])]),
-            new TextResult('answer-1'),
-            new TextResult('answer-0'),
-        ]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()));
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's0', 'user' => 'u0', 'tools' => $firstRegistry],
-            ['system' => 's1', 'user' => 'u1', 'tools' => $secondRegistry],
-        ], 4, 3);
-
-        self::assertCount(2, $responses);
-        self::assertSame('answer-0', $responses[0]->content());
-        self::assertSame('end_turn', $responses[0]->stopReason());
-        self::assertSame('answer-1', $responses[1]->content());
-        self::assertSame(1, $firstToolCalls);
-        self::assertSame(0, $secondToolCalls);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_returns_empty_list_for_empty_requests(): void
-    {
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding(new InMemoryPlatform('ok'), 'm', new NullLogger()));
-
-        self::assertSame([], $symfonyAiLLMClient->completeBatchWithTools([], 4, 3));
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     * @throws InvalidToolRegistryException
-     */
-    public function test_complete_batch_with_tools_grows_the_rate_limiter_estimate_as_tool_results_accumulate_in_the_conversation(): void
-    {
-        $tool = $this->makeTool('lookup', 'looks things up', static fn (array $args): string => 'tool-result');
-        $toolRegistry = new ToolRegistry([$tool], new NullLogger());
-
-        $platform = $this->scriptedPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('call-1', 'lookup', ['q' => 'test'])])]),
-            new MultiPartResult([new TextResult('final answer')]),
-        ]);
-
-        $fakeRateLimiter = new FakeRateLimiter();
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            new PlatformRequestConfig(tokenEstimator: new FixedTokenEstimator(10)),
-            new PlatformResilienceConfig(rateLimiter: $fakeRateLimiter),
-        );
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 'sys', 'user' => 'usr', 'tools' => $toolRegistry],
-        ], 1, 5);
-
-        self::assertSame([20, 30], $fakeRateLimiter->acquired);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_caps_iterations_and_warns(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-
-        /** @var list<array{string, array<string, mixed>}> $warnings */
-        $warnings = [];
-        $logger = self::createStub(LoggerInterface::class);
-        $logger->method('debug');
-        $logger->method('warning')->willReturnCallback(
-            static function (string $msg, array $ctx = []) use (&$warnings): void {
-                $warnings[] = [$msg, $ctx];
-            },
-        );
-
-        $platformInvocationLog = new PlatformInvocationLog();
-        $platform = $this->scriptedPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])]),
-            new MultiPartResult([new ToolCallResult([new ToolCall('2', 'record')])]),
-            new MultiPartResult([new ToolCallResult([new ToolCall('3', 'record')])]),
-        ], $platformInvocationLog);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', $logger));
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 2);
-
-        self::assertSame('max_tool_iterations', $responses[0]->stopReason());
-        self::assertSame('', $responses[0]->content());
-        self::assertSame(2, $platformInvocationLog->invocations);
-
-        $capLogs = array_values(array_filter(
-            $warnings,
-            static fn (array $entry): bool => 'Tool-using loop hit iteration cap' === $entry[0],
-        ));
-        self::assertCount(1, $capLogs);
-        self::assertSame(2, $capLogs[0][1]['max_iterations']);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_sends_each_prompt_under_its_own_role(): void
     {
@@ -1116,801 +1065,12 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_sends_each_prompt_under_its_own_role(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platformInvocationLog = new PlatformInvocationLog();
-        $platform = $this->scriptedPlatform([new TextResult('ok')], $platformInvocationLog);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()));
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 'sys-prompt', 'user' => 'usr-prompt', 'tools' => $toolRegistry],
-        ], 4, 2);
-
-        $messages = $platformInvocationLog->messageSnapshots[0];
-        self::assertInstanceOf(SystemMessage::class, $messages[0]);
-        self::assertSame('sys-prompt', $messages[0]->getContent());
-        self::assertInstanceOf(UserMessage::class, $messages[1]);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_reports_tokens_accumulated_across_rounds_when_capping(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-
-        /** @var list<array{string, array<string, mixed>}> $warnings */
-        $warnings = [];
-        $logger = self::createStub(LoggerInterface::class);
-        $logger->method('debug');
-        $logger->method('warning')->willReturnCallback(
-            static function (string $msg, array $ctx = []) use (&$warnings): void {
-                $warnings[] = [$msg, $ctx];
-            },
-        );
-
-        $platform = $this->scriptedPlatformWithTokenUsage(
-            [
-                new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])]),
-                new MultiPartResult([new ToolCallResult([new ToolCall('2', 'record')])]),
-            ],
-            [
-                new TokenUsage(promptTokens: 7, completionTokens: 3),
-                new TokenUsage(promptTokens: 11, completionTokens: 5),
-            ],
-        );
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', $logger));
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 2);
-
-        $capContexts = array_values(array_map(
-            static fn (array $entry): array => $entry[1],
-            array_filter($warnings, static fn (array $entry): bool => 'Tool-using loop hit iteration cap' === $entry[0]),
-        ));
-        self::assertSame([['max_iterations' => 2, 'input_tokens' => 18, 'output_tokens' => 8]], $capContexts);
-    }
-
-    /**
-     * @throws InvalidRetryConfigurationException
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_falls_back_to_the_sequential_path_when_dispatch_fails_before_tools_ran(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platform = $this->flakyPlatform([
-            new RuntimeException('HTTP 503 Service Unavailable'),
-            new TextResult('recovered'),
-        ]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformResilienceConfig: new PlatformResilienceConfig(retryPolicy: new RetryPolicy(new BackoffSchedule(maxAttempts: 3, initialDelayMs: 10, backoffMultiplier: 2.0, jitterRatio: 0.0), jitterSource: static fn (): float => 0.5), transientFailureClassifier: new TransientFailureClassifier(), sleeper: new FakeSleeper()),
-        );
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame('recovered', $responses[0]->content());
-        self::assertSame('end_turn', $responses[0]->stopReason());
-    }
-
-    /**
-     * @throws InvalidRetryConfigurationException
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_falls_back_to_the_sequential_path_when_the_retry_itself_fails_before_tools_ran(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platform = $this->flakyPlatform([
-            new RuntimeException('HTTP 503 Service Unavailable'),
-            new RuntimeException('HTTP 401 Unauthorized'),
-            new TextResult('recovered-via-full-restart'),
-        ]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformResilienceConfig: new PlatformResilienceConfig(retryPolicy: new RetryPolicy(new BackoffSchedule(maxAttempts: 3, initialDelayMs: 10, backoffMultiplier: 2.0, jitterRatio: 0.0), jitterSource: static fn (): float => 0.5), transientFailureClassifier: new TransientFailureClassifier(), sleeper: new FakeSleeper()),
-        );
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame('recovered-via-full-restart', $responses[0]->content());
-        self::assertSame('end_turn', $responses[0]->stopReason());
-    }
-
-    /**
-     * @throws InvalidRetryConfigurationException
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_releases_the_rate_limiter_reservation_when_dispatch_fails_before_tools_ran(): void
-    {
-        $fakeRateLimiter = new FakeRateLimiter();
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platform = $this->flakyPlatform([
-            new RuntimeException('HTTP 503 Service Unavailable'),
-            new TextResult('recovered'),
-        ]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformResilienceConfig: new PlatformResilienceConfig(retryPolicy: new RetryPolicy(new BackoffSchedule(maxAttempts: 3, initialDelayMs: 10, backoffMultiplier: 2.0, jitterRatio: 0.0), jitterSource: static fn (): float => 0.5), transientFailureClassifier: new TransientFailureClassifier(), sleeper: new FakeSleeper(), rateLimiter: $fakeRateLimiter),
-        );
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertCount(2, $fakeRateLimiter->recorded);
-        self::assertSame([0, 0], $fakeRateLimiter->recorded[0]);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_releases_exactly_the_failed_reservation_before_falling_back(): void
-    {
-        $fakeRateLimiter = new FakeRateLimiter();
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platform = new class implements PlatformInterface {
-            private int $calls = 0;
-
-            #[Override]
-            public function invoke(Model|string $model, array|string|object $input, array $options = []): DeferredResult
-            {
-                if (0 === $this->calls) {
-                    ++$this->calls;
-
-                    return new DeferredResult(new ThrowingConverter(new RuntimeException('boom')), new InMemoryRawResult(['text' => ''], [], (object) []), $options);
-                }
-
-                $deferredResult = new DeferredResult(new PlainConverter(new TextResult('recovered')), new InMemoryRawResult(['text' => ''], [], (object) []), $options);
-                $deferredResult->getMetadata()->add('token_usage', new TokenUsage(promptTokens: 9, completionTokens: 4));
-
-                return $deferredResult;
-            }
-
-            #[Override]
-            public function getModelCatalog(): ModelCatalogInterface
-            {
-                return new FallbackModelCatalog();
-            }
-        };
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformResilienceConfig: new PlatformResilienceConfig(rateLimiter: $fakeRateLimiter),
-        );
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame('recovered', $responses[0]->content());
-        self::assertSame([[0, 0], [9, 4]], $fakeRateLimiter->recorded);
-    }
-
-    /**
-     * A dispatch whose token extraction fails must release its own
-     * reservation as `[0, 0]` — not the poisoned value that failed to
-     * extract — and the fallback conversation's own reservation must still
-     * be recorded correctly and independently alongside it.
-     *
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_releases_a_clean_reservation_when_extraction_fails_then_records_the_fallbacks_reservation_independently(): void
-    {
-        $fakeRateLimiter = new FakeRateLimiter();
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platform = $this->scriptedPlatformWithTokenUsage(
-            [new TextResult('ignored'), new TextResult('recovered')],
-            [new TokenUsage(promptTokens: -1, completionTokens: 0), new TokenUsage(promptTokens: 5, completionTokens: 2)],
-        );
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformResilienceConfig: new PlatformResilienceConfig(rateLimiter: $fakeRateLimiter),
-        );
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame('recovered', $responses[0]->content());
-        self::assertSame([[0, 0], [5, 2]], $fakeRateLimiter->recorded);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_falls_back_to_the_sequential_path_when_resolution_fails_before_tools_ran(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-
-        $platform = new class implements PlatformInterface {
-            private int $invocations = 0;
-
-            #[Override]
-            public function invoke(Model|string $model, array|string|object $input, array $options = []): DeferredResult
-            {
-                ++$this->invocations;
-                $converter = 1 === $this->invocations
-                    ? new class implements ResultConverterInterface {
-                        #[Override]
-                        public function supports(Model $model): bool
-                        {
-                            return true;
-                        }
-
-                        /**
-                         * @throws RuntimeException
-                         */
-                        #[Override]
-                        public function convert(RawResultInterface $result, array $options = []): ResultInterface
-                        {
-                            throw new RuntimeException('resolution exploded');
-                        }
-
-                        #[Override]
-                        public function getTokenUsageExtractor(): ?TokenUsageExtractorInterface
-                        {
-                            return null;
-                        }
-                    }
-                : new PlainConverter(new TextResult('recovered'));
-
-                return new DeferredResult($converter, new InMemoryRawResult(['text' => ''], [], (object) []), $options);
-            }
-
-            #[Override]
-            public function getModelCatalog(): ModelCatalogInterface
-            {
-                return new FallbackModelCatalog();
-            }
-        };
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()));
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame('recovered', $responses[0]->content());
-        self::assertSame('end_turn', $responses[0]->stopReason());
-    }
-
-    /**
-     * @throws InvalidRetryConfigurationException
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_finalizes_as_empty_content_when_failing_after_tools_ran(): void
-    {
-        $toolCalls = 0;
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd', static function (array $arguments) use (&$toolCalls): string {
-            ++$toolCalls;
-
-            return 'ok';
-        })], new NullLogger());
-
-        /** @var list<array{string, array<string, mixed>}> $warnings */
-        $warnings = [];
-        $logger = self::createStub(LoggerInterface::class);
-        $logger->method('debug');
-        $logger->method('warning')->willReturnCallback(
-            static function (string $msg, array $ctx = []) use (&$warnings): void {
-                $warnings[] = [$msg, $ctx];
-            },
-        );
-
-        $platform = $this->flakyPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])]),
-            new RuntimeException('HTTP 503 Service Unavailable'),
-            new RuntimeException('HTTP 503 Service Unavailable'),
-        ]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', $logger),
-            platformResilienceConfig: new PlatformResilienceConfig(retryPolicy: new RetryPolicy(new BackoffSchedule(maxAttempts: 1))),
-        );
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame('empty_content', $responses[0]->stopReason());
-        self::assertSame('', $responses[0]->content());
-        self::assertSame(1, $toolCalls);
-
-        $failureLogs = array_values(array_filter(
-            $warnings,
-            static fn (array $entry): bool => 'Concurrent tool-using conversation failed after tool execution; keeping recorded tool results' === $entry[0],
-        ));
-        self::assertCount(1, $failureLogs);
-        self::assertArrayHasKey('input_tokens', $failureLogs[0][1]);
-        self::assertArrayHasKey('output_tokens', $failureLogs[0][1]);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_rethrows_a_non_transient_failure_instead_of_finalizing_as_empty_content_after_tools_ran(): void
-    {
-        $toolCalls = 0;
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd', static function (array $arguments) use (&$toolCalls): string {
-            ++$toolCalls;
-
-            return 'ok';
-        })], new NullLogger());
-
-        $platform = $this->flakyPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])]),
-            new RuntimeException('dispatch blip'),
-            new RuntimeException('HTTP 401 Unauthorized'),
-        ]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()));
-
-        $this->expectException(NonTransientLLMFailureException::class);
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-    }
-
-    /**
-     * @throws InvalidRetryConfigurationException
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_retries_through_the_seam_and_recovers_when_failing_after_tools_ran(): void
-    {
-        $toolCalls = 0;
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd', static function (array $arguments) use (&$toolCalls): string {
-            ++$toolCalls;
-
-            return 'ok';
-        })], new NullLogger());
-
-        $fakeSleeper = new FakeSleeper();
-        $platform = $this->flakyPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])]),
-            new RuntimeException('HTTP 503 Service Unavailable'),
-            new RuntimeException('HTTP 503 Service Unavailable'),
-            new TextResult('recovered-through-retry'),
-        ]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformResilienceConfig: new PlatformResilienceConfig(retryPolicy: new RetryPolicy(new BackoffSchedule(maxAttempts: 3, initialDelayMs: 10, backoffMultiplier: 2.0, jitterRatio: 0.0), jitterSource: static fn (): float => 0.5), transientFailureClassifier: new TransientFailureClassifier(), sleeper: $fakeSleeper),
-        );
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame('recovered-through-retry', $responses[0]->content());
-        self::assertSame('end_turn', $responses[0]->stopReason());
-        self::assertSame(1, $toolCalls);
-        self::assertSame([10], $fakeSleeper->durations);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
      * @throws InvalidAuditBudgetException
      * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
      * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_propagates_budget_exceeded_when_a_post_tool_retry_exceeds_it(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-
-        $platform = new class implements PlatformInterface {
-            private int $invocations = 0;
-
-            #[Override]
-            public function invoke(Model|string $model, array|string|object $input, array $options = []): DeferredResult
-            {
-                ++$this->invocations;
-
-                if (1 === $this->invocations) {
-                    return new DeferredResult(
-                        new PlainConverter(new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])])),
-                        new InMemoryRawResult(['text' => ''], [], (object) []),
-                        $options,
-                    );
-                }
-
-                if (2 === $this->invocations) {
-                    throw new RuntimeException('HTTP 503 Service Unavailable');
-                }
-
-                if ($this->invocations > 3) {
-                    throw new RuntimeException('platform invoked more times than scripted — invokeWithRetry never returned (a mutation removed a loop-exit branch).');
-                }
-
-                $deferredResult = new DeferredResult(
-                    new PlainConverter(new TextResult('too-expensive')),
-                    new InMemoryRawResult(['text' => ''], [], (object) []),
-                    $options,
-                );
-                $deferredResult->getMetadata()->add('token_usage', new TokenUsage(promptTokens: 500, completionTokens: 0));
-
-                return $deferredResult;
-            }
-
-            #[Override]
-            public function getModelCatalog(): ModelCatalogInterface
-            {
-                return new FallbackModelCatalog();
-            }
-        };
-
-        $budgetTracker = new BudgetTracker(
-            AuditBudget::forTokens(100),
-            new CostCalculator($this->stubPricing(0.0, 0.0)),
-        );
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformAccountingConfig: new PlatformAccountingConfig(tokenUsageRecorder: new TokenUsageRecorder(), budgetTracker: $budgetTracker),
-        );
-
-        $this->expectException(BudgetExceededException::class);
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_finalizes_as_empty_content_when_the_retry_itself_fails_after_tools_ran(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-
-        $platform = new class implements PlatformInterface {
-            private int $invocations = 0;
-
-            #[Override]
-            public function invoke(Model|string $model, array|string|object $input, array $options = []): DeferredResult
-            {
-                ++$this->invocations;
-
-                if (1 === $this->invocations) {
-                    return new DeferredResult(
-                        new PlainConverter(new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])])),
-                        new InMemoryRawResult(['text' => ''], [], (object) []),
-                        $options,
-                    );
-                }
-
-                if (2 === $this->invocations) {
-                    throw new RuntimeException('HTTP 503 Service Unavailable');
-                }
-
-                $deferredResult = new DeferredResult(
-                    new PlainConverter(new TextResult('should never surface')),
-                    new InMemoryRawResult(['text' => ''], [], (object) []),
-                    $options,
-                );
-                $deferredResult->getMetadata()->add('token_usage', new TokenUsage(promptTokens: -1, completionTokens: 0));
-
-                return $deferredResult;
-            }
-
-            #[Override]
-            public function getModelCatalog(): ModelCatalogInterface
-            {
-                return new FallbackModelCatalog();
-            }
-        };
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformAccountingConfig: new PlatformAccountingConfig(tokenUsageRecorder: new TokenUsageRecorder()),
-        );
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame('empty_content', $responses[0]->stopReason());
-        self::assertSame('', $responses[0]->content());
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_accumulates_tokens_across_rounds(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platform = $this->scriptedPlatformWithTokenUsage(
-            [
-                new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])]),
-                new TextResult('done'),
-            ],
-            [
-                new TokenUsage(promptTokens: 10, completionTokens: 5, cacheCreationTokens: 2, cacheReadTokens: 3),
-                new TokenUsage(promptTokens: 20, completionTokens: 7, cacheCreationTokens: 1, cacheReadTokens: 4),
-            ],
-        );
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()));
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame('done', $responses[0]->content());
-        self::assertSame(30, $responses[0]->inputTokens());
-        self::assertSame(12, $responses[0]->outputTokens());
-        self::assertSame(7, $responses[0]->cacheReadTokens());
-        self::assertSame(3, $responses[0]->cacheCreationTokens());
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_records_rate_limit_for_each_round(): void
-    {
-        $fakeRateLimiter = new FakeRateLimiter();
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platform = $this->scriptedPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])]),
-            new TextResult('done'),
-        ]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformResilienceConfig: new PlatformResilienceConfig(rateLimiter: $fakeRateLimiter),
-        );
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertCount(2, $fakeRateLimiter->recorded);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_appends_assistant_then_tool_call_message_between_rounds(): void
-    {
-        $tool = $this->makeTool('record', 'd', static fn (array $args): string => 'tool-output');
-        $toolRegistry = new ToolRegistry([$tool], new NullLogger());
-
-        $platformInvocationLog = new PlatformInvocationLog();
-        $platform = $this->scriptedPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('call-1', 'record', ['q' => 'v'])])]),
-            new MultiPartResult([new TextResult('done')]),
-        ], $platformInvocationLog);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()));
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame(2, $platformInvocationLog->invocations);
-        $secondInvocationMessages = $platformInvocationLog->messageSnapshots[1];
-
-        $hasAssistant = false;
-        $hasToolCall = false;
-        foreach ($secondInvocationMessages as $secondInvocationMessage) {
-            if ($secondInvocationMessage instanceof AssistantMessage) {
-                $hasAssistant = true;
-            }
-
-            if ($secondInvocationMessage instanceof ToolCallMessage) {
-                $hasToolCall = true;
-            }
-        }
-
-        self::assertTrue($hasAssistant, 'Second round should receive an AssistantMessage carrying the prior tool calls');
-        self::assertTrue($hasToolCall, 'Second round should receive a ToolCallMessage carrying the tool execution result');
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_dispatches_one_window_at_a_time_when_concurrency_is_one(): void
-    {
-        $rateLimiter = new class implements RateLimiterInterface {
-            /** @var list<string> */
-            public array $events = [];
-
-            #[Override]
-            public function acquire(int $estimatedInputTokens): void
-            {
-                $this->events[] = 'acquire';
-            }
-
-            #[Override]
-            public function record(int $inputTokens, int $outputTokens): void
-            {
-                $this->events[] = 'record';
-            }
-
-            #[Override]
-            public function pauseUntil(DateTimeImmutable $until): void {}
-        };
-
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platform = $this->scriptedPlatform([new TextResult('a'), new TextResult('b')]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()), platformResilienceConfig: new PlatformResilienceConfig(rateLimiter: $rateLimiter));
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's0', 'user' => 'u0', 'tools' => $toolRegistry],
-            ['system' => 's1', 'user' => 'u1', 'tools' => $toolRegistry],
-        ], 1, 3);
-
-        self::assertSame(['acquire', 'record', 'acquire', 'record'], $rateLimiter->events);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_keeps_dispatching_later_conversations_after_an_earlier_one_finishes(): void
-    {
-        $firstRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $secondRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-
-        $platform = $this->scriptedPlatform([
-            new TextResult('answer-0'),
-            new MultiPartResult([new ToolCallResult([new ToolCall('1', 'record')])]),
-            new TextResult('answer-1'),
-        ]);
-
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()));
-
-        $responses = $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's0', 'user' => 'u0', 'tools' => $firstRegistry],
-            ['system' => 's1', 'user' => 'u1', 'tools' => $secondRegistry],
-        ], 4, 3);
-
-        self::assertCount(2, $responses);
-        self::assertSame('answer-0', $responses[0]->content());
-        self::assertSame('answer-1', $responses[1]->content());
-        self::assertSame('end_turn', $responses[1]->stopReason());
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidAuditBudgetException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_records_budget_and_aborts_when_a_response_exceeds_it(): void
-    {
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $platform = $this->scriptedPlatformWithTokenUsage(
-            new TextResult('done'),
-            new TokenUsage(promptTokens: 500, completionTokens: 0),
-        );
-        $budgetTracker = new BudgetTracker(
-            AuditBudget::forTokens(100),
-            new CostCalculator($this->stubPricing(0.0, 0.0)),
-        );
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding($platform, 'm', new NullLogger()),
-            platformAccountingConfig: new PlatformAccountingConfig(tokenUsageRecorder: new TokenUsageRecorder(), budgetTracker: $budgetTracker),
-        );
-
-        $this->expectException(BudgetExceededException::class);
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's', 'user' => 'u', 'tools' => $toolRegistry],
-        ], 4, 3);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidToolRegistryException
-     * @throws InvalidTokenUsageException
-     * @throws NonTransientLLMFailureException
-     */
-    public function test_complete_batch_with_tools_acquires_rate_limit_for_each_dispatch(): void
-    {
-        $fakeRateLimiter = new FakeRateLimiter();
-        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
-        $symfonyAiLLMClient = new SymfonyAiLLMClient(
-            new PlatformBinding(new InMemoryPlatform('ok'), 'm', new NullLogger()),
-            new PlatformRequestConfig(tokenEstimator: new FixedTokenEstimator(123)),
-            new PlatformResilienceConfig(rateLimiter: $fakeRateLimiter),
-        );
-
-        $symfonyAiLLMClient->completeBatchWithTools([
-            ['system' => 's1', 'user' => 'u1', 'tools' => $toolRegistry],
-            ['system' => 's2', 'user' => 'u2', 'tools' => $toolRegistry],
-        ], 4, 3);
-
-        self::assertSame([246, 246], $fakeRateLimiter->acquired);
-    }
-
-    /**
-     * @throws MissingAiPlatformException
-     * @throws BudgetExceededException
-     * @throws InvalidAuditBudgetException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_records_budget_and_aborts_when_a_response_exceeds_it(): void
     {
@@ -1935,6 +1095,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_dispatches_one_request_per_window_when_concurrency_is_one(): void
     {
@@ -1976,6 +1141,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_falls_back_to_complete_when_resolving_a_response_throws(): void
     {
@@ -2013,6 +1183,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_warns_when_falling_back_to_complete_after_a_resolve_failure(): void
     {
@@ -2056,6 +1231,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     /**
      * @throws MissingAiPlatformException
      * @throws InvalidAuditBudgetException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
      */
     public function test_complete_batch_rethrows_budget_exceeded_without_falling_back_to_complete(): void
     {
@@ -2113,12 +1293,11 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_returns_text_when_platform_emits_no_tool_calls(): void
     {
-        $platform = $this->scriptedPlatform([
-            new MultiPartResult([new TextResult('done')]),
-        ]);
+        $platform = $this->scriptedPlatformWithTokenUsage(new MultiPartResult([new TextResult('done')]), new TokenUsage(promptTokens: 12, completionTokens: 5));
         $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()));
 
         $toolRegistry = new ToolRegistry([$this->makeTool('lookup', 'description here')], new NullLogger());
@@ -2127,8 +1306,8 @@ final class SymfonyAiLLMClientTest extends TestCase
 
         self::assertSame('done', $llmResponse->content());
         self::assertSame('end_turn', $llmResponse->stopReason());
-        self::assertSame(0, $llmResponse->inputTokens());
-        self::assertSame(0, $llmResponse->outputTokens());
+        self::assertSame(12, $llmResponse->inputTokens());
+        self::assertSame(5, $llmResponse->outputTokens());
     }
 
     /**
@@ -2140,6 +1319,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_executes_tool_calls_then_returns_final_text(): void
     {
@@ -2167,6 +1347,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_grows_the_rate_limiter_estimate_as_tool_results_accumulate_in_the_conversation(): void
     {
@@ -2199,8 +1380,9 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
-    public function test_complete_with_tools_stops_at_iteration_cap_and_warns(): void
+    public function test_complete_with_tools_stops_after_a_closing_request_that_still_reads_and_warns(): void
     {
         $tool = $this->makeTool('lookup', 'lookup');
         $toolRegistry = new ToolRegistry([$tool], new NullLogger());
@@ -2215,26 +1397,29 @@ final class SymfonyAiLLMClientTest extends TestCase
             },
         );
 
-        $platform = $this->scriptedPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('1', 'lookup')])]),
-            new MultiPartResult([new ToolCallResult([new ToolCall('2', 'lookup')])]),
-            new MultiPartResult([new ToolCallResult([new ToolCall('3', 'lookup')])]),
-        ]);
+        $platform = $this->scriptedPlatformWithTokenUsage(
+            [
+                new MultiPartResult([new ToolCallResult([new ToolCall('1', 'lookup')])]),
+                new MultiPartResult([new ToolCallResult([new ToolCall('2', 'lookup')])]),
+                new MultiPartResult([new ToolCallResult([new ToolCall('3', 'lookup')])]),
+            ],
+            [new TokenUsage(promptTokens: 10, completionTokens: 3), new TokenUsage(promptTokens: 20, completionTokens: 5), new TokenUsage(promptTokens: 30, completionTokens: 7)],
+        );
 
         $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', $logger));
         $llmResponse = $symfonyAiLLMClient->completeWithTools('sys', 'usr', $toolRegistry, 2);
 
         self::assertSame('', $llmResponse->content());
         self::assertSame('max_tool_iterations', $llmResponse->stopReason());
-        self::assertSame(0, $llmResponse->inputTokens());
-        self::assertSame(0, $llmResponse->outputTokens());
+        self::assertSame(60, $llmResponse->inputTokens());
+        self::assertSame(15, $llmResponse->outputTokens());
 
         $capLogs = array_values(array_filter(
             $warnings,
             static fn (array $entry): bool => 'Tool-using loop hit iteration cap' === $entry[0],
         ));
         self::assertCount(1, $capLogs);
-        self::assertSame(2, $capLogs[0][1]['max_iterations']);
+        self::assertSame(['max_iterations' => 2, 'input_tokens' => 60, 'output_tokens' => 15], $capLogs[0][1]);
     }
 
     /**
@@ -2246,8 +1431,9 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
-    public function test_complete_with_tools_invokes_platform_exact_max_iterations_times_when_all_iterations_return_tool_calls(): void
+    public function test_complete_with_tools_invokes_platform_max_iterations_times_plus_one_closing_request_when_every_round_reads(): void
     {
         $tool = $this->makeTool('lookup', 'lookup');
         $toolRegistry = new ToolRegistry([$tool], new NullLogger());
@@ -2265,7 +1451,7 @@ final class SymfonyAiLLMClientTest extends TestCase
         $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', new NullLogger()));
         $symfonyAiLLMClient->completeWithTools('sys', 'usr', $toolRegistry, 2);
 
-        self::assertSame(2, $platformInvocationLog->invocations);
+        self::assertSame(3, $platformInvocationLog->invocations);
     }
 
     /**
@@ -2277,6 +1463,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_logs_loop_ended_debug_with_iterations_count_and_content_length(): void
     {
@@ -2291,10 +1478,13 @@ final class SymfonyAiLLMClientTest extends TestCase
             },
         );
 
-        $platform = $this->scriptedPlatform([
-            new MultiPartResult([new ToolCallResult([new ToolCall('1', 'lookup')])]),
-            new MultiPartResult([new TextResult('finished-12c')]),
-        ]);
+        $platform = $this->scriptedPlatformWithTokenUsage(
+            [
+                new MultiPartResult([new ToolCallResult([new ToolCall('1', 'lookup')])]),
+                new MultiPartResult([new TextResult('finished-12c')]),
+            ],
+            [new TokenUsage(promptTokens: 7, completionTokens: 2), new TokenUsage(promptTokens: 11, completionTokens: 4)],
+        );
 
         $symfonyAiLLMClient = new SymfonyAiLLMClient(new PlatformBinding($platform, 'm', $logger));
         $symfonyAiLLMClient->completeWithTools('sys', 'usr', $toolRegistry, 5);
@@ -2305,8 +1495,7 @@ final class SymfonyAiLLMClientTest extends TestCase
         ));
 
         self::assertCount(1, $endedLogs);
-        self::assertSame(1, $endedLogs[0][1]['iterations']);
-        self::assertSame(12, $endedLogs[0][1]['content_length']);
+        self::assertSame(['iterations' => 1, 'content_length' => 12, 'input_tokens' => 18, 'output_tokens' => 6], $endedLogs[0][1]);
     }
 
     /**
@@ -2318,6 +1507,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_appends_assistant_message_then_tool_call_message_between_iterations(): void
     {
@@ -2364,6 +1554,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_logs_tool_invocation_with_tool_name_and_iteration_number(): void
     {
@@ -2406,6 +1597,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_passes_tool_definitions_in_options(): void
     {
@@ -2464,6 +1656,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_handles_bare_tool_call_result_not_wrapped_in_multipart(): void
     {
@@ -2490,6 +1683,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_handles_bare_text_result_not_wrapped_in_multipart(): void
     {
@@ -2513,6 +1707,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_falls_back_to_empty_text_when_platform_returns_unknown_result_type(): void
     {
@@ -2546,6 +1741,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_normalize_schema_tolerates_missing_properties_and_required(): void
     {
@@ -2586,6 +1782,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_populates_input_and_output_tokens_from_platform_metadata(): void
     {
@@ -2616,6 +1813,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_populates_cache_tokens_from_platform_metadata(): void
     {
@@ -2642,9 +1840,39 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws MissingAiPlatformException
      * @throws TransientLLMFailureException
      * @throws NonTransientLLMFailureException
+     * @throws InvalidAuditBudgetException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
+     */
+    public function test_complete_books_cached_input_an_openai_style_provider_counts_inside_the_prompt_once(): void
+    {
+        $budgetTracker = new BudgetTracker(AuditBudget::unlimited(), new CostCalculator($this->stubPricing(0.0, 0.0)));
+        $platform = $this->scriptedPlatformWithTokenUsage(
+            new TextResult('done'),
+            new TokenUsage(promptTokens: 10000, completionTokens: 200, cachedTokens: 9000, totalTokens: 10200),
+        );
+        $symfonyAiLLMClient = new SymfonyAiLLMClient(
+            new PlatformBinding($platform, 'm', new NullLogger()),
+            platformAccountingConfig: new PlatformAccountingConfig(budgetTracker: $budgetTracker),
+        );
+
+        $llmResponse = $symfonyAiLLMClient->complete('sys', 'usr');
+
+        self::assertSame([1000, 200, 9000], [$llmResponse->inputTokens(), $llmResponse->outputTokens(), $llmResponse->cacheReadTokens()]);
+        self::assertSame(10200, $budgetTracker->tokensUsed());
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws MissingAiPlatformException
+     * @throws TransientLLMFailureException
+     * @throws NonTransientLLMFailureException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_defaults_cache_tokens_to_zero_when_token_usage_omits_them(): void
     {
@@ -2668,23 +1896,25 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
-    public function test_complete_returns_zero_tokens_when_platform_metadata_omits_token_usage(): void
+    public function test_complete_books_the_estimated_input_tokens_when_platform_metadata_omits_token_usage(): void
     {
         $tokenUsageRecorder = new TokenUsageRecorder();
         $platform = $this->scriptedPlatform([new TextResult('done')]);
         $symfonyAiLLMClient = new SymfonyAiLLMClient(
             new PlatformBinding($platform, 'm', new NullLogger()),
+            new PlatformRequestConfig(tokenEstimator: new FixedTokenEstimator(7)),
             platformAccountingConfig: new PlatformAccountingConfig(tokenUsageRecorder: $tokenUsageRecorder),
         );
 
         $llmResponse = $symfonyAiLLMClient->complete('sys', 'usr');
 
-        self::assertSame(0, $llmResponse->inputTokens());
+        self::assertSame(14, $llmResponse->inputTokens());
         self::assertSame(0, $llmResponse->outputTokens());
         self::assertSame(0, $llmResponse->cacheReadTokens());
         self::assertSame(0, $llmResponse->cacheCreationTokens());
-        self::assertSame(0, $tokenUsageRecorder->snapshot()->totalTokens());
+        self::assertSame(14, $tokenUsageRecorder->snapshot()->totalTokens());
     }
 
     /**
@@ -2695,8 +1925,9 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
-    public function test_complete_returns_zero_tokens_when_token_usage_prompt_and_completion_are_null(): void
+    public function test_complete_books_the_estimated_input_tokens_when_token_usage_prompt_and_completion_are_null(): void
     {
         $tokenUsageRecorder = new TokenUsageRecorder();
         $platform = $this->scriptedPlatformWithTokenUsage(
@@ -2705,14 +1936,15 @@ final class SymfonyAiLLMClientTest extends TestCase
         );
         $symfonyAiLLMClient = new SymfonyAiLLMClient(
             new PlatformBinding($platform, 'm', new NullLogger()),
+            new PlatformRequestConfig(tokenEstimator: new FixedTokenEstimator(100)),
             platformAccountingConfig: new PlatformAccountingConfig(tokenUsageRecorder: $tokenUsageRecorder),
         );
 
         $llmResponse = $symfonyAiLLMClient->complete('sys', 'usr');
 
-        self::assertSame(0, $llmResponse->inputTokens());
+        self::assertSame(200, $llmResponse->inputTokens());
         self::assertSame(0, $llmResponse->outputTokens());
-        self::assertSame(0, $tokenUsageRecorder->snapshot()->totalTokens());
+        self::assertSame(200, $tokenUsageRecorder->snapshot()->totalTokens());
     }
 
     /**
@@ -2723,6 +1955,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_consecutive_complete_calls_accumulate_in_shared_recorder(): void
     {
@@ -2756,6 +1989,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_aborts_mid_loop_when_budget_exceeded(): void
     {
@@ -2798,6 +2032,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_records_budget_call_and_aborts_when_exceeded(): void
     {
@@ -2820,32 +2055,43 @@ final class SymfonyAiLLMClientTest extends TestCase
         $symfonyAiLLMClient->complete('sys', 'usr');
     }
 
-    private function stubPricing(float $inputPrice, float $outputPrice): PricingProviderInterface
+    /**
+     * @throws BudgetExceededException
+     * @throws MissingAiPlatformException
+     * @throws TransientLLMFailureException
+     * @throws NonTransientLLMFailureException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
+     */
+    public function test_complete_bills_the_call_at_the_rate_of_the_model_the_provider_reports(): void
     {
-        return new class($inputPrice, $outputPrice) implements PricingProviderInterface {
-            public function __construct(
-                private readonly float $inputPrice,
-                private readonly float $outputPrice,
-            ) {}
+        $budgetTracker = $this->budgetTrackerPricingReportedModelAboveConfiguredOne();
+        $symfonyAiLLMClient = $this->clientBilling($budgetTracker, [new TextResult('done')]);
 
-            #[Override]
-            public function pricePerMillionInputTokens(string $model): float
-            {
-                return $this->inputPrice;
-            }
+        $symfonyAiLLMClient->complete('sys', 'usr');
 
-            #[Override]
-            public function pricePerMillionOutputTokens(string $model): float
-            {
-                return $this->outputPrice;
-            }
+        self::assertSame(10.0, $budgetTracker->costUsdUsed());
+    }
 
-            #[Override]
-            public function hasModel(string $model): bool
-            {
-                return true;
-            }
-        };
+    /**
+     * @throws MissingAiPlatformException
+     * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
+     */
+    public function test_complete_batch_bills_each_call_at_the_rate_of_the_model_the_provider_reports(): void
+    {
+        $budgetTracker = $this->budgetTrackerPricingReportedModelAboveConfiguredOne();
+        $symfonyAiLLMClient = $this->clientBilling($budgetTracker, [new TextResult('a'), new TextResult('b')]);
+
+        $symfonyAiLLMClient->completeBatch([['system' => 's1', 'user' => 'u1'], ['system' => 's2', 'user' => 'u2']], 4);
+
+        self::assertSame(20.0, $budgetTracker->costUsdUsed());
     }
 
     /**
@@ -2857,6 +2103,101 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
+     */
+    public function test_complete_with_tools_bills_each_iteration_at_the_rate_of_the_model_the_provider_reports(): void
+    {
+        $budgetTracker = $this->budgetTrackerPricingReportedModelAboveConfiguredOne();
+        $symfonyAiLLMClient = $this->clientBilling($budgetTracker, [new TextResult('done')]);
+
+        $symfonyAiLLMClient->completeWithTools('sys', 'usr', new ToolRegistry([$this->makeTool('echo', 'echo')], new NullLogger()), 5);
+
+        self::assertSame(10.0, $budgetTracker->costUsdUsed());
+    }
+
+    /**
+     * @throws MissingAiPlatformException
+     * @throws BudgetExceededException
+     * @throws InvalidToolRegistryException
+     * @throws InvalidTokenUsageException
+     * @throws NonTransientLLMFailureException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws TransientLLMFailureException
+     */
+    public function test_complete_batch_with_tools_bills_each_call_at_the_rate_of_the_model_the_provider_reports(): void
+    {
+        $budgetTracker = $this->budgetTrackerPricingReportedModelAboveConfiguredOne();
+        $symfonyAiLLMClient = $this->clientBilling($budgetTracker, [new TextResult('a'), new TextResult('b')]);
+        $toolRegistry = new ToolRegistry([$this->makeTool('record', 'd')], new NullLogger());
+
+        $symfonyAiLLMClient->completeBatchWithTools([
+            ['system' => 's1', 'user' => 'u1', 'tools' => $toolRegistry],
+            ['system' => 's2', 'user' => 'u2', 'tools' => $toolRegistry],
+        ], 4, 3);
+
+        self::assertSame(20.0, $budgetTracker->costUsdUsed());
+    }
+
+    /**
+     * @param list<ResultInterface> $results
+     */
+    private function clientBilling(BudgetTracker $budgetTracker, array $results): SymfonyAiLLMClient
+    {
+        $tokenUsages = array_map(
+            static fn (): TokenUsage => new TokenUsage(promptTokens: 1_000_000, completionTokens: 0, model: 'reported-model'),
+            $results,
+        );
+
+        return new SymfonyAiLLMClient(
+            new PlatformBinding($this->scriptedPlatformWithTokenUsage($results, $tokenUsages), 'configured-model', new NullLogger()),
+            platformAccountingConfig: new PlatformAccountingConfig(tokenUsageRecorder: new TokenUsageRecorder(), budgetTracker: $budgetTracker),
+        );
+    }
+
+    private function budgetTrackerPricingReportedModelAboveConfiguredOne(): BudgetTracker
+    {
+        return new BudgetTracker(
+            AuditBudget::unlimited(),
+            new CostCalculator(new class implements PricingProviderInterface {
+                private const array INPUT_PRICES = ['configured-model' => 1.0, 'reported-model' => 10.0];
+
+                #[Override]
+                public function pricePerMillionInputTokens(string $model): float
+                {
+                    return self::INPUT_PRICES[$model] ?? 0.0;
+                }
+
+                #[Override]
+                public function pricePerMillionOutputTokens(string $model): float
+                {
+                    return 0.0;
+                }
+
+                #[Override]
+                public function hasModel(string $model): bool
+                {
+                    return \array_key_exists($model, self::INPUT_PRICES);
+                }
+            }),
+        );
+    }
+
+    private function stubPricing(float $inputPrice, float $outputPrice): PricingProviderInterface
+    {
+        return new FixedPricingProvider($inputPrice, $outputPrice);
+    }
+
+    /**
+     * @throws BudgetExceededException
+     * @throws MissingAiPlatformException
+     * @throws TransientLLMFailureException
+     * @throws NonTransientLLMFailureException
+     * @throws InvalidToolRegistryException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_accumulates_tokens_across_iterations(): void
     {
@@ -2900,10 +2241,7 @@ final class SymfonyAiLLMClientTest extends TestCase
         ResultInterface|array $results = new TextResult(''),
         TokenUsage|array $tokenUsages = new TokenUsage(),
     ): PlatformInterface {
-        $resultList = $results instanceof ResultInterface ? [$results] : $results;
-        $tokenUsageList = $tokenUsages instanceof TokenUsage ? [$tokenUsages] : $tokenUsages;
-
-        return new ScriptedTokenUsagePlatform($resultList, $tokenUsageList);
+        return ScriptedTokenUsagePlatform::scripted($results, $tokenUsages);
     }
 
     /**
@@ -2914,6 +2252,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_retries_transient_failures_and_succeeds(): void
     {
@@ -2942,6 +2281,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_releases_the_rate_limiter_reservation_for_each_failed_retry_attempt(): void
     {
@@ -2973,6 +2313,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_throws_transient_failure_after_exhausting_attempts(): void
     {
@@ -3006,6 +2347,29 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     */
+    public function test_complete_batch_counts_the_failed_dispatch_among_the_attempts_when_its_fallback_runs_out_of_retries(): void
+    {
+        $symfonyAiLLMClient = new SymfonyAiLLMClient(
+            new PlatformBinding($this->flakyPlatform(array_fill(0, 4, new RuntimeException('HTTP 503 Service Unavailable'))), 'm', new NullLogger()),
+            platformResilienceConfig: new PlatformResilienceConfig(retryPolicy: new RetryPolicy(new BackoffSchedule(maxAttempts: 3, initialDelayMs: 10, backoffMultiplier: 2.0, jitterRatio: 0.0), jitterSource: static fn (): float => 0.5), transientFailureClassifier: new TransientFailureClassifier(), sleeper: new FakeSleeper()),
+        );
+
+        $this->expectException(TransientLLMFailureException::class);
+        $this->expectExceptionMessage('LLM call failed after 4 attempts: HTTP 503 Service Unavailable');
+
+        $symfonyAiLLMClient->completeBatch([['system' => 's', 'user' => 'u']], 2);
+    }
+
+    /**
+     * @throws InvalidRetryConfigurationException
+     * @throws BudgetExceededException
+     * @throws MissingAiPlatformException
+     * @throws TransientLLMFailureException
+     * @throws NonTransientLLMFailureException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_logs_warning_with_full_context_when_retrying_transient_failure(): void
     {
@@ -3045,6 +2409,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_logs_one_warning_per_intermediate_attempt_no_warning_on_last(): void
     {
@@ -3085,6 +2450,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_does_not_retry_non_transient_failures(): void
     {
@@ -3109,6 +2475,11 @@ final class SymfonyAiLLMClientTest extends TestCase
     }
 
     /**
+     * A peer that closes the TLS connection mid-read — a stale keep-alive socket
+     * taken from the HTTP client's pool is the common trigger — is a transport
+     * truncation, not a rejected request. It must be retried on a fresh
+     * connection instead of aborting the whole audit.
+     *
      * @throws InvalidRetryConfigurationException
      * @throws BudgetExceededException
      * @throws MissingAiPlatformException
@@ -3116,6 +2487,31 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
+     */
+    public function test_complete_recovers_when_the_provider_truncates_the_response_mid_read(): void
+    {
+        $platform = $this->flakyPlatform([
+            new RuntimeException('OpenSSL SSL_read: OpenSSL/3.5.7: error:0A000126:SSL routines::unexpected eof while reading, errno 0 for "https://example.com/v1/chat/completions".'),
+            new TextResult('recovered'),
+        ]);
+        $symfonyAiLLMClient = new SymfonyAiLLMClient(
+            new PlatformBinding($platform, 'm', new NullLogger()),
+            platformResilienceConfig: new PlatformResilienceConfig(retryPolicy: new RetryPolicy(new BackoffSchedule(maxAttempts: 3, initialDelayMs: 10, backoffMultiplier: 2.0, jitterRatio: 0.0), jitterSource: static fn (): float => 0.5), transientFailureClassifier: new TransientFailureClassifier(), sleeper: new FakeSleeper()),
+        );
+
+        self::assertSame('recovered', $symfonyAiLLMClient->complete('sys', 'usr')->content());
+    }
+
+    /**
+     * @throws InvalidRetryConfigurationException
+     * @throws BudgetExceededException
+     * @throws MissingAiPlatformException
+     * @throws TransientLLMFailureException
+     * @throws NonTransientLLMFailureException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_returns_empty_response_when_platform_reports_empty_content(): void
     {
@@ -3144,6 +2540,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_logs_warning_when_platform_reports_empty_content(): void
     {
@@ -3183,6 +2580,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_returns_empty_response_when_platform_reports_empty_content_on_first_iteration(): void
     {
@@ -3211,6 +2609,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_logs_warning_when_platform_reports_empty_content(): void
     {
@@ -3254,6 +2653,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_demotes_empty_content_to_debug_after_at_least_one_tool_iteration(): void
     {
@@ -3304,6 +2704,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_does_not_retry_empty_content_failures(): void
     {
@@ -3329,6 +2730,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_uses_rate_limit_delay_for_429_errors(): void
     {
@@ -3352,9 +2754,42 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws BudgetExceededException
      * @throws MissingAiPlatformException
      * @throws TransientLLMFailureException
+     * @throws InvalidTokenUsageException
+     * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
+     */
+    public function test_complete_aborts_at_once_on_a_429_that_says_the_billing_quota_is_exhausted(): void
+    {
+        $fakeSleeper = new FakeSleeper();
+        $platform = $this->flakyPlatform([
+            new RateLimitExceededException(null, 'You exceeded your current quota, please check your plan and billing details.'),
+            new TextResult('recovered'),
+        ]);
+        $symfonyAiLLMClient = new SymfonyAiLLMClient(
+            new PlatformBinding($platform, 'm', new NullLogger()),
+            platformResilienceConfig: new PlatformResilienceConfig(retryPolicy: new RetryPolicy(new BackoffSchedule(maxAttempts: 3, initialDelayMs: 500, jitterRatio: 0.0), new RateLimitBackoff(initialDelayMs: 60_000), jitterSource: static fn (): float => 0.5), transientFailureClassifier: new TransientFailureClassifier(), sleeper: $fakeSleeper),
+        );
+
+        $aborted = false;
+        try {
+            $symfonyAiLLMClient->complete('sys', 'usr');
+        } catch (NonTransientLLMFailureException) {
+            $aborted = true;
+        }
+
+        self::assertTrue($aborted);
+        self::assertSame([], $fakeSleeper->durations);
+    }
+
+    /**
+     * @throws InvalidRetryConfigurationException
+     * @throws BudgetExceededException
+     * @throws MissingAiPlatformException
+     * @throws TransientLLMFailureException
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_uses_regular_delay_for_non_rate_limit_transient_errors(): void
     {
@@ -3381,6 +2816,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_non_rate_limit_transient_error_never_pauses_the_rate_limiter(): void
     {
@@ -3407,6 +2843,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_eager_resolution_catches_transient_failure_thrown_from_deferred_result(): void
     {
@@ -3434,6 +2871,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_acquire_runs_before_invoke_with_estimated_input_tokens(): void
     {
@@ -3458,6 +2896,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_record_runs_after_success_with_actual_tokens(): void
     {
@@ -3485,6 +2924,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
+     * @throws LLMRequestTooLargeException
      */
     public function test_complete_with_tools_records_actual_tokens_after_each_iteration(): void
     {
@@ -3520,6 +2960,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_429_with_retry_after_uses_server_hint_and_pauses_rate_limiter(): void
     {
@@ -3548,6 +2989,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_429_with_retry_after_exceeding_the_ceiling_clamps_the_rate_limiter_pause_too(): void
     {
@@ -3580,6 +3022,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
+     * @throws LLMRequestTooLargeException
      */
     public function test_429_without_retry_after_falls_back_to_exponential_delay(): void
     {
@@ -3677,43 +3120,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      */
     private function flakyPlatform(array $scriptedResultsOrErrors): PlatformInterface
     {
-        return new class($scriptedResultsOrErrors) implements PlatformInterface {
-            /** @var list<ResultInterface|RuntimeException> */
-            private array $remaining;
-
-            /** @param list<ResultInterface|RuntimeException> $scriptedResultsOrErrors */
-            public function __construct(array $scriptedResultsOrErrors)
-            {
-                $this->remaining = $scriptedResultsOrErrors;
-            }
-
-            #[Override]
-            public function invoke(Model|string $model, array|string|object $input, array $options = []): DeferredResult
-            {
-                $next = array_shift($this->remaining);
-                if ($next instanceof RuntimeException) {
-                    throw $next;
-                }
-
-                if (!$next instanceof ResultInterface) {
-                    throw new RuntimeException('flakyPlatform invoked more times than scripted — invokeWithRetry never returned (a mutation removed a loop-exit branch).');
-                }
-
-                $result = $next;
-
-                return new DeferredResult(
-                    new PlainConverter($result),
-                    new InMemoryRawResult(['text' => ''], [], (object) []),
-                    $options,
-                );
-            }
-
-            #[Override]
-            public function getModelCatalog(): ModelCatalogInterface
-            {
-                return new FallbackModelCatalog();
-            }
-        };
+        return new FlakyPlatform($scriptedResultsOrErrors);
     }
 
     /**
@@ -3721,48 +3128,7 @@ final class SymfonyAiLLMClientTest extends TestCase
      */
     private function scriptedPlatform(array $scriptedResults, ?PlatformInvocationLog $platformInvocationLog = null): PlatformInterface
     {
-        return new class($scriptedResults, $platformInvocationLog) implements PlatformInterface {
-            /** @var list<ResultInterface> */
-            private array $remaining;
-
-            /**
-             * @param list<ResultInterface> $scriptedResults
-             */
-            public function __construct(
-                array $scriptedResults,
-                private readonly ?PlatformInvocationLog $platformInvocationLog,
-            ) {
-                $this->remaining = $scriptedResults;
-            }
-
-            #[Override]
-            public function invoke(Model|string $model, array|string|object $input, array $options = []): DeferredResult
-            {
-                if ($this->platformInvocationLog instanceof PlatformInvocationLog) {
-                    ++$this->platformInvocationLog->invocations;
-                    if ($input instanceof MessageBag) {
-                        $this->platformInvocationLog->messageSnapshots[] = $input->getMessages();
-                    }
-                }
-
-                $result = array_shift($this->remaining);
-                if (!$result instanceof ResultInterface) {
-                    throw new RuntimeException('scriptedPlatform invoked more times than scripted — invokeWithRetry never returned (a mutation removed a loop-exit branch).');
-                }
-
-                return new DeferredResult(
-                    new PlainConverter($result),
-                    new InMemoryRawResult(['text' => ''], [], (object) []),
-                    $options,
-                );
-            }
-
-            #[Override]
-            public function getModelCatalog(): ModelCatalogInterface
-            {
-                return new FallbackModelCatalog();
-            }
-        };
+        return new ScriptedPlatform($scriptedResults, $platformInvocationLog);
     }
 
     private function scriptedPlatformCapturingOptions(
@@ -3811,32 +3177,6 @@ final class SymfonyAiLLMClientTest extends TestCase
         ?Closure $executor = null,
         array $parametersSchema = ['type' => 'object', 'properties' => [], 'required' => []],
     ): ToolInterface {
-        return new class($name, $description, $executor, $parametersSchema) implements ToolInterface {
-            /**
-             * @param ?Closure(array<string, mixed>): string $executor
-             * @param array<string, mixed>                   $parametersSchema
-             */
-            public function __construct(
-                private readonly string $name,
-                private readonly string $description,
-                private readonly ?Closure $executor,
-                private readonly array $parametersSchema,
-            ) {}
-
-            /**
-             * @throws InvalidToolDefinitionException
-             */
-            #[Override]
-            public function definition(): ToolDefinition
-            {
-                return new ToolDefinition($this->name, $this->description, $this->parametersSchema);
-            }
-
-            #[Override]
-            public function execute(array $arguments): string
-            {
-                return $this->executor instanceof Closure ? ($this->executor)($arguments) : 'ok';
-            }
-        };
+        return new CallbackTool($name, $description, $executor, $parametersSchema);
     }
 }

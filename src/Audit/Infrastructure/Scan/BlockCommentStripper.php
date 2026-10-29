@@ -21,39 +21,33 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan;
  */
 final readonly class BlockCommentStripper
 {
-    public function __construct(
-        private StringLiteralMasker $stringLiteralMasker = new StringLiteralMasker(),
-    ) {}
-
     /**
      * @return array{line: string, inside_block_comment: bool}
      */
     public function strip(string $line, bool $insideBlockComment): array
     {
+        return $insideBlockComment || str_contains($line, '/*')
+            ? $this->scan($line, $insideBlockComment)
+            : ['line' => $line, 'inside_block_comment' => false];
+    }
+
+    /**
+     * @return array{line: string, inside_block_comment: bool}
+     */
+    private function scan(string $line, bool $insideBlockComment): array
+    {
+        $closingLimits = LiteralScanState::closingLimits($line);
+        $state = CommentScanState::start($line, $insideBlockComment);
         $kept = '';
-        $remaining = $line;
 
-        while (true) {
-            if ($insideBlockComment) {
-                $closeOffset = strpos($remaining, '*/');
-                if (false === $closeOffset) {
-                    return ['line' => $kept, 'inside_block_comment' => true];
-                }
+        foreach (str_split($line) as $offset => $char) {
+            $state = $state->advance($line, $offset, $char, $closingLimits);
 
-                $remaining = substr($remaining, $closeOffset + 2);
-                $insideBlockComment = false;
-
-                continue;
+            if (!$state->swallows($offset)) {
+                $kept .= $char;
             }
-
-            $openOffset = strpos($this->stringLiteralMasker->mask($remaining), '/*');
-            if (false === $openOffset) {
-                return ['line' => $kept.$remaining, 'inside_block_comment' => false];
-            }
-
-            $kept .= substr($remaining, 0, $openOffset);
-            $remaining = substr($remaining, $openOffset + 2);
-            $insideBlockComment = true;
         }
+
+        return ['line' => $kept, 'inside_block_comment' => $state->endsInsideComment()];
     }
 }

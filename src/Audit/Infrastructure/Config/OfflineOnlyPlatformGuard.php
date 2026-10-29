@@ -13,7 +13,6 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config;
 
-use Uri\Rfc3986\Uri;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\NonLocalPlatformEndpointException;
 
 /**
@@ -22,7 +21,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\N
  * accepted only when it carries at least one URL and every URL it carries
  * resolves to a loopback, link-local or private-range host — so a hosted
  * provider (an `api_key` and nothing else) and a cloud endpoint
- * (`base_url: https://…azure.com`) are both rejected.
+ * (`base_url: https://…azure.com`) are both rejected. A provider whose only
+ * candidate endpoint a dry run read from an unset variable is not judged.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -39,21 +39,36 @@ final readonly class OfflineOnlyPlatformGuard
     }
 
     /**
+     * Whether every endpoint of every configured platform is on the loopback
+     * interface, which no proxy can reach on the caller's behalf.
+     */
+    public function reachesOnlyLoopback(StandalonePlatformConfig $standalonePlatformConfig): bool
+    {
+        foreach ($this->endpointsIn($standalonePlatformConfig->platform) as $platformEndpoint) {
+            if (!$platformEndpoint->isLoopback()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * @param array<array-key, mixed> $providerConfig
      *
      * @throws NonLocalPlatformEndpointException
      */
     private function assertProviderIsLocal(string $provider, array $providerConfig): void
     {
-        $urls = $this->urlsIn($providerConfig);
+        $endpoints = $this->endpointsIn($providerConfig);
 
-        if ([] === $urls) {
+        if ([] === $endpoints && !$this->holdsAnUnresolvedSetting($providerConfig)) {
             throw NonLocalPlatformEndpointException::forProviderWithoutEndpoint($provider);
         }
 
-        foreach ($urls as $url) {
-            if (!$this->isLocal($url)) {
-                throw NonLocalPlatformEndpointException::forProvider($provider, $url);
+        foreach ($endpoints as $endpoint) {
+            if (!$this->isLocal($endpoint)) {
+                throw NonLocalPlatformEndpointException::forProvider($provider, $endpoint->origin());
             }
         }
     }
@@ -61,39 +76,66 @@ final readonly class OfflineOnlyPlatformGuard
     /**
      * @param array<array-key, mixed> $providerConfig
      *
-     * @return list<string>
+     * @return list<PlatformEndpoint>
      */
-    private function urlsIn(array $providerConfig): array
+    private function endpointsIn(array $providerConfig): array
     {
-        $urls = [];
-        foreach ($providerConfig as $value) {
+        $endpoints = [];
+        foreach ($providerConfig as $key => $value) {
             if (\is_array($value)) {
-                $urls = [...$urls, ...$this->urlsIn($value)];
+                $endpoints = [...$endpoints, ...$this->endpointsIn($value)];
 
                 continue;
             }
 
-            if (\is_string($value) && $this->isEndpoint($value)) {
-                $urls[] = $value;
+            $endpoint = $this->endpointIn($key, $value);
+            if ($endpoint instanceof PlatformEndpoint) {
+                $endpoints[] = $endpoint;
             }
         }
 
-        return $urls;
+        return $endpoints;
     }
 
-    private function isEndpoint(string $value): bool
+    /**
+     * A dry run stands in for a setting whose `%env()%` variable is unset,
+     * since it never reaches the provider: whether that setting is a local
+     * endpoint only the real run can tell, and it names the variable instead.
+     *
+     * @param array<array-key, mixed> $providerConfig
+     */
+    private function holdsAnUnresolvedSetting(array $providerConfig): bool
     {
-        return null !== Uri::parse($value)?->getScheme();
-    }
-
-    private function isLocal(string $url): bool
-    {
-        $host = Uri::parse($url)?->getHost();
-        if (null === $host || '' === $host) {
-            return false;
+        foreach ($providerConfig as $key => $value) {
+            if ($this->isUnresolved($key, $value)) {
+                return true;
+            }
         }
 
-        $host = trim($host, '[]');
+        return false;
+    }
+
+    private function isUnresolved(int|string $key, mixed $value): bool
+    {
+        if (\is_array($value)) {
+            return $this->holdsAnUnresolvedSetting($value);
+        }
+
+        return !PlatformApiKey::names($key) && StandalonePlatformConfigResolver::UNNEEDED_CREDENTIAL === $value;
+    }
+
+    private function endpointIn(int|string $key, mixed $value): ?PlatformEndpoint
+    {
+        if (PlatformApiKey::names($key) || !\is_string($value)) {
+            return null;
+        }
+
+        return PlatformEndpoint::tryFrom(ContainerParameterSyntax::unescape($value));
+    }
+
+    private function isLocal(PlatformEndpoint $platformEndpoint): bool
+    {
+        $host = trim($platformEndpoint->host, '[]');
 
         if ('localhost' === $host || str_ends_with($host, '.localhost') || str_ends_with($host, '.local')) {
             return true;

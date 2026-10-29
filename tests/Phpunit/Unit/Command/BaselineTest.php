@@ -14,13 +14,17 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Command;
 
 use Override;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Filesystem\Filesystem;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AcceptedFindingFeedback;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemTriageMemoryStore;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Baseline;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineEntry;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\BaselineWriteFailedException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\MalformedBaselineFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\UnsafeBaselineWriteException;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Command\Fixture\DiscardDevice;
 
 final class BaselineTest extends TestCase
 {
@@ -128,6 +132,101 @@ final class BaselineTest extends TestCase
 
     /**
      * @throws MalformedBaselineFileException
+     * @throws UnsafeBaselineWriteException
+     */
+    public function test_save_writes_non_ascii_text_as_written_so_the_file_stays_readable(): void
+    {
+        $path = $this->tmpDir.'/baseline.json';
+
+        (new Baseline($this->filesystem))->save($path, [[...$this->entry('SSA-AAA'), 'title' => 'Injection dans le dépôt', 'reason' => 'Paramètres liés — 日本語']]);
+
+        $contents = file_get_contents($path);
+        self::assertIsString($contents);
+        self::assertStringContainsString('"title": "Injection dans le dépôt"', $contents);
+        self::assertStringContainsString('"reason": "Paramètres liés — 日本語"', $contents);
+        self::assertStringNotContainsString('\\u', $contents);
+    }
+
+    /**
+     * @throws MalformedBaselineFileException
+     * @throws UnsafeBaselineWriteException
+     */
+    #[DataProvider('invisibleFormatCharacters')]
+    public function test_save_escapes_the_bidirectional_and_invisible_characters_of_a_finding(string $character, string $escaped): void
+    {
+        $path = $this->tmpDir.'/baseline.json';
+        $entry = [...$this->entry('SSA-AAA'), 'file' => 'src/a'.$character.'b.php', 'title' => 'Safe '.$character.'check'];
+
+        (new Baseline($this->filesystem))->save($path, [$entry]);
+
+        $contents = file_get_contents($path);
+        self::assertIsString($contents);
+        self::assertStringNotContainsString($character, $contents);
+        self::assertStringContainsString('"file": "src/a'.$escaped.'b.php"', $contents);
+        self::assertStringContainsString('"title": "Safe '.$escaped.'check"', $contents);
+        self::assertSame([$entry], json_decode($contents, true, flags: \JSON_THROW_ON_ERROR));
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function invisibleFormatCharacters(): iterable
+    {
+        yield 'arabic letter mark' => ["\u{061C}", '\u061c'];
+        yield 'zero width space' => ["\u{200B}", '\u200b'];
+        yield 'zero width non-joiner' => ["\u{200C}", '\u200c'];
+        yield 'left-to-right mark' => ["\u{200E}", '\u200e'];
+        yield 'right-to-left mark' => ["\u{200F}", '\u200f'];
+        yield 'line separator' => ["\u{2028}", '\u2028'];
+        yield 'paragraph separator' => ["\u{2029}", '\u2029'];
+        yield 'left-to-right embedding' => ["\u{202A}", '\u202a'];
+        yield 'right-to-left override' => ["\u{202E}", '\u202e'];
+        yield 'word joiner' => ["\u{2060}", '\u2060'];
+        yield 'left-to-right isolate' => ["\u{2066}", '\u2066'];
+        yield 'pop directional isolate' => ["\u{2069}", '\u2069'];
+        yield 'nominal digit shapes' => ["\u{206F}", '\u206f'];
+        yield 'byte order mark' => ["\u{FEFF}", '\ufeff'];
+        yield 'first tag character' => ["\u{E0000}", '\udb40\udc00'];
+        yield 'tag latin capital letter a' => ["\u{E0041}", '\udb40\udc41'];
+        yield 'cancel tag' => ["\u{E007F}", '\udb40\udc7f'];
+    }
+
+    /**
+     * @throws MalformedBaselineFileException
+     * @throws UnsafeBaselineWriteException
+     */
+    #[DataProvider('visibleCharactersNextToTheInvisibleOnes')]
+    public function test_save_keeps_the_characters_next_to_the_invisible_ones_as_written(string $character): void
+    {
+        $path = $this->tmpDir.'/baseline.json';
+
+        (new Baseline($this->filesystem))->save($path, [[...$this->entry('SSA-AAA'), 'title' => 'a'.$character.'b']]);
+
+        $contents = file_get_contents($path);
+        self::assertIsString($contents);
+        self::assertStringContainsString('"title": "a'.$character.'b"', $contents);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function visibleCharactersNextToTheInvisibleOnes(): iterable
+    {
+        yield 'arabic semicolon, before the arabic letter mark' => ["\u{061B}"];
+        yield 'arabic question mark, after the arabic letter mark' => ["\u{061D}"];
+        yield 'hair space, before the zero width space' => ["\u{200A}"];
+        yield 'hyphen, after the right-to-left mark' => ["\u{2010}"];
+        yield 'narrow no-break space, after the right-to-left override' => ["\u{202F}"];
+        yield 'medium mathematical space, before the word joiner' => ["\u{205F}"];
+        yield 'superscript zero, after the nominal digit shapes' => ["\u{2070}"];
+        yield 'arabic presentation form, before the byte order mark' => ["\u{FEFE}"];
+        yield 'halfwidth form, after the byte order mark' => ["\u{FF00}"];
+        yield 'last character before the tags' => ["\u{DFFFF}"];
+        yield 'first character after the tags' => ["\u{E0080}"];
+    }
+
+    /**
+     * @throws MalformedBaselineFileException
      */
     public function test_load_throws_when_the_file_is_not_valid_json(): void
     {
@@ -135,6 +234,20 @@ final class BaselineTest extends TestCase
         $this->filesystem->dumpFile($path, '{not json');
 
         $this->expectException(MalformedBaselineFileException::class);
+
+        (new Baseline($this->filesystem))->load($path);
+    }
+
+    /**
+     * @throws MalformedBaselineFileException
+     */
+    public function test_load_refuses_a_file_past_thirty_two_mebibytes_without_decoding_it(): void
+    {
+        $path = $this->tmpDir.'/huge.json';
+        $this->filesystem->dumpFile($path, '['.str_repeat(' ', 33_554_431).']');
+
+        $this->expectException(MalformedBaselineFileException::class);
+        $this->expectExceptionMessage(\sprintf('Baseline file "%1$s" could not be read or written: File "%1$s" holds more than 33554432 bytes, so it was not read.', $path));
 
         (new Baseline($this->filesystem))->load($path);
     }
@@ -310,6 +423,26 @@ final class BaselineTest extends TestCase
 
     /**
      * @throws MalformedBaselineFileException
+     * @throws UnsafeBaselineWriteException
+     */
+    public function test_save_refuses_a_path_into_the_audited_project_through_a_symlinked_directory_above_its_parent(): void
+    {
+        $outsideDir = sys_get_temp_dir().'/baseline_symlink_security_'.uniqid('', true);
+        $this->filesystem->mkdir($outsideDir.'/baselines');
+        symlink($outsideDir, $this->tmpDir.'/security');
+
+        try {
+            $this->expectException(UnsafeBaselineWriteException::class);
+
+            (new Baseline($this->filesystem))->save($this->tmpDir.'/security/baselines/baseline.json', [$this->entry('SSA-AAA')], $this->tmpDir);
+        } finally {
+            self::assertSame([], glob($outsideDir.'/baselines/*'));
+            $this->filesystem->remove($outsideDir);
+        }
+    }
+
+    /**
+     * @throws MalformedBaselineFileException
      */
     public function test_feedback_is_empty_for_a_missing_file(): void
     {
@@ -436,6 +569,204 @@ final class BaselineTest extends TestCase
         $baselineEntry = new BaselineEntry('SSA-SAME', 'SSA-SAME', 'SSA-SAME');
 
         self::assertSame(['SSA-SAME'], $baselineEntry->fingerprints());
+    }
+
+    /**
+     * A baseline file is part of the audited repository, so a pull request
+     * controls its reasons — and every reason reaches the reviewer's system
+     * prompt. It is capped the way the reviewer's own triage memory is.
+     *
+     * @throws MalformedBaselineFileException
+     */
+    public function test_feedback_caps_a_reason_the_way_the_triage_memory_does(): void
+    {
+        $path = $this->tmpDir.'/baseline.json';
+        $this->filesystem->dumpFile($path, json_encode([[...$this->entry('SSA-AAA'), 'reason' => str_repeat('é', FilesystemTriageMemoryStore::MAX_REASON_LENGTH + 1)]], \JSON_THROW_ON_ERROR));
+
+        $reasons = array_map(
+            static fn (AcceptedFindingFeedback $acceptedFindingFeedback): string => $acceptedFindingFeedback->reason,
+            (new Baseline($this->filesystem))->feedback($path)->entries,
+        );
+
+        self::assertSame([str_repeat('é', FilesystemTriageMemoryStore::MAX_REASON_LENGTH)], $reasons);
+    }
+
+    /**
+     * Every field of a baseline entry is free text a pull request controls, and
+     * every one reaches the reviewer's system prompt, so each is capped — by
+     * code points, which a run of combining marks cannot inflate the way it
+     * inflates a grapheme cluster.
+     *
+     * @throws MalformedBaselineFileException
+     */
+    public function test_feedback_caps_every_field_by_code_points(): void
+    {
+        $graphemeOfManyCodePoints = 'a'.str_repeat("\u{0301}", 200);
+        $path = $this->tmpDir.'/baseline.json';
+        $this->filesystem->dumpFile($path, json_encode([[
+            ...$this->entry('SSA-AAA'),
+            'type' => str_repeat('t', 100),
+            'file' => str_repeat('f', 1_000),
+            'title' => str_repeat('T', 20_000),
+            'reason' => str_repeat($graphemeOfManyCodePoints, 6_000),
+        ]], \JSON_THROW_ON_ERROR));
+
+        $acceptedFindingFeedback = (new Baseline($this->filesystem))->feedback($path)->entries[0];
+
+        self::assertSame(str_repeat('t', 64), $acceptedFindingFeedback->type);
+        self::assertSame(str_repeat('f', 512), $acceptedFindingFeedback->file);
+        self::assertSame(str_repeat('T', 300), $acceptedFindingFeedback->title);
+        self::assertSame(FilesystemTriageMemoryStore::MAX_REASON_LENGTH, mb_strlen($acceptedFindingFeedback->reason));
+        self::assertStringStartsWith($graphemeOfManyCodePoints, $acceptedFindingFeedback->reason);
+    }
+
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    public function test_assert_writable_accepts_a_new_file_under_directories_that_do_not_exist_yet(): void
+    {
+        $path = $this->tmpDir.'/build/baselines/baseline.json';
+
+        (new Baseline($this->filesystem))->assertWritable($path, $this->tmpDir);
+
+        self::assertDirectoryExists($this->tmpDir.'/build/baselines');
+        self::assertFileDoesNotExist($path);
+    }
+
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    public function test_assert_writable_refuses_a_symlinked_baseline_file(): void
+    {
+        symlink($this->tmpDir.'/elsewhere.json', $this->tmpDir.'/baseline.json');
+
+        $this->expectException(UnsafeBaselineWriteException::class);
+
+        (new Baseline($this->filesystem))->assertWritable($this->tmpDir.'/baseline.json', $this->tmpDir);
+    }
+
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    public function test_assert_writable_refuses_a_path_into_the_audited_project_through_a_symlinked_directory_above_its_parent(): void
+    {
+        $outsideDir = sys_get_temp_dir().'/baseline_preflight_symlink_security_'.uniqid('', true);
+        $this->filesystem->mkdir($outsideDir);
+        symlink($outsideDir, $this->tmpDir.'/security');
+
+        try {
+            $this->expectException(UnsafeBaselineWriteException::class);
+
+            (new Baseline($this->filesystem))->assertWritable($this->tmpDir.'/security/baselines/baseline.json', $this->tmpDir);
+        } finally {
+            self::assertDirectoryDoesNotExist($outsideDir.'/baselines');
+            $this->filesystem->remove($outsideDir);
+        }
+    }
+
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    #[DataProvider('directorySeparators')]
+    public function test_assert_writable_refuses_a_path_that_names_a_directory(string $separator): void
+    {
+        $this->expectException(BaselineWriteFailedException::class);
+        $this->expectExceptionMessage('names a directory');
+
+        (new Baseline($this->filesystem))->assertWritable($this->tmpDir.'/baselines'.$separator, $this->tmpDir);
+    }
+
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    public function test_assert_writable_accepts_a_path_that_is_not_utf_8(): void
+    {
+        $path = $this->tmpDir."/b\xFF.json";
+
+        (new Baseline($this->filesystem))->assertWritable($path, $this->tmpDir);
+
+        self::assertFileDoesNotExist($path);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function directorySeparators(): iterable
+    {
+        yield 'a trailing slash' => ['/'];
+        yield 'a trailing backslash' => ['\\'];
+    }
+
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    public function test_assert_writable_refuses_a_path_beneath_a_regular_file(): void
+    {
+        $this->filesystem->dumpFile($this->tmpDir.'/blocking', 'x');
+
+        $this->expectException(BaselineWriteFailedException::class);
+        $this->expectExceptionMessage('its directory could not be created');
+
+        (new Baseline($this->filesystem))->assertWritable($this->tmpDir.'/blocking/baseline.json', $this->tmpDir);
+    }
+
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    public function test_assert_writable_refuses_an_existing_baseline_file_that_is_not_a_regular_file(): void
+    {
+        $pipe = $this->tmpDir.'/baseline.pipe';
+        posix_mkfifo($pipe, 0o600);
+
+        $this->expectException(BaselineWriteFailedException::class);
+        $this->expectExceptionMessage('choose a --generate-baseline path that is a writable file');
+
+        (new Baseline($this->filesystem))->assertWritable($pipe, $this->tmpDir);
+    }
+
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    public function test_assert_writable_accepts_a_character_device_such_as_dev_null_as_the_baseline_file(): void
+    {
+        $device = DiscardDevice::in($this->tmpDir);
+
+        (new Baseline($this->filesystem))->assertWritable($device, $this->tmpDir);
+
+        self::assertSame('char', filetype($device));
+    }
+
+    /**
+     * @throws MalformedBaselineFileException
+     * @throws UnsafeBaselineWriteException
+     */
+    public function test_a_baseline_saved_to_a_character_device_goes_to_the_device_and_leaves_it_in_place(): void
+    {
+        $device = DiscardDevice::in($this->tmpDir);
+
+        (new Baseline($this->filesystem))->save($device, [$this->entry('SSA-AAA')]);
+
+        self::assertSame('char', filetype($device));
+    }
+
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    public function test_assert_writable_refuses_a_directory_as_the_baseline_file(): void
+    {
+        $this->expectException(BaselineWriteFailedException::class);
+        $this->expectExceptionMessage('choose a --generate-baseline path that is a writable file');
+
+        (new Baseline($this->filesystem))->assertWritable($this->tmpDir, $this->tmpDir);
     }
 
     /**

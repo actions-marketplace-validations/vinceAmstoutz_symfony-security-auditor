@@ -23,9 +23,12 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidProjectFi
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\Exception\InvalidCacheConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemAttackerCache;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\FileSystem\Fixture\AssertsOwnerOnlyAccessTrait;
 
 final class FilesystemAttackerCacheTest extends TestCase
 {
+    use AssertsOwnerOnlyAccessTrait;
+
     private string $cacheDir;
 
     private FilesystemAttackerCache $filesystemAttackerCache;
@@ -762,6 +765,72 @@ final class FilesystemAttackerCacheTest extends TestCase
         $filesystemAttackerCache->store($chunk, [['type' => 'sql_injection']]);
 
         self::assertContains('Failed to write attacker cache entry', $warnings);
+    }
+
+    /**
+     * @throws InvalidCacheConfigurationException
+     * @throws InvalidProjectFileException
+     */
+    public function test_it_still_caches_when_a_directory_above_the_cache_is_a_symlink(): void
+    {
+        $base = sys_get_temp_dir().'/attacker_cache_symlinked_parent_'.uniqid('', true);
+        mkdir($base.'/real', recursive: true);
+        symlink($base.'/real', $base.'/link');
+        $filesystemAttackerCache = new FilesystemAttackerCache($base.'/link/cache', new Filesystem(), new NullLogger());
+        $chunk = [ProjectFile::create('src/A.php', '/app/src/A.php', 'X')];
+        $workingDirectory = getcwd();
+        self::assertIsString($workingDirectory);
+
+        chdir($base);
+        try {
+            $filesystemAttackerCache->store($chunk, [['type' => 'xss']]);
+
+            self::assertSame([['type' => 'xss']], $filesystemAttackerCache->get($chunk));
+        } finally {
+            chdir($workingDirectory);
+            (new Filesystem())->remove($base);
+        }
+    }
+
+    /**
+     * @throws InvalidCacheConfigurationException
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_relative_cache_directory_is_read_against_the_working_directory(): void
+    {
+        $base = sys_get_temp_dir().'/attacker_cache_relative_'.uniqid('', true);
+        mkdir($base);
+        $chunk = [ProjectFile::create('src/A.php', '/app/src/A.php', 'X')];
+        $workingDirectory = getcwd();
+        self::assertIsString($workingDirectory);
+
+        chdir($base);
+        try {
+            $filesystemAttackerCache = new FilesystemAttackerCache('var/cache', new Filesystem(), new NullLogger());
+            $filesystemAttackerCache->store($chunk, [['type' => 'xss']]);
+
+            self::assertSame([['type' => 'xss']], $filesystemAttackerCache->get($chunk));
+            self::assertDirectoryExists($base.'/var/cache');
+        } finally {
+            chdir($workingDirectory);
+            (new Filesystem())->remove($base);
+        }
+    }
+
+    /**
+     * @throws InvalidCacheConfigurationException
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_stored_entry_and_the_directories_made_for_it_are_owner_only(): void
+    {
+        $this->filesystemAttackerCache->store([ProjectFile::create('a.php', '/app/a.php', '<?php')], [['title' => 'SQL injection']]);
+
+        $entries = glob($this->cacheDir.'/*/*.json');
+        self::assertIsArray($entries);
+        self::assertCount(1, $entries);
+        self::assertOwnerOnlyFile($entries[0]);
+        self::assertOwnerOnlyDirectory(\dirname($entries[0]));
+        self::assertOwnerOnlyDirectory($this->cacheDir);
     }
 
     /**

@@ -18,7 +18,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditReport;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilitySeverity;
 
-use function Symfony\Component\String\u;
+use function Symfony\Component\String\b;
 
 /**
  * Renders an audit report as GitHub Actions workflow-command annotations — one
@@ -30,6 +30,10 @@ use function Symfony\Component\String\u;
  */
 final readonly class GithubAnnotationsReportRenderer implements ReportRendererInterface
 {
+    public function __construct(
+        private ReportPathPrefix $reportPathPrefix = new ReportPathPrefix(),
+    ) {}
+
     #[Override]
     public function format(): string
     {
@@ -39,10 +43,20 @@ final readonly class GithubAnnotationsReportRenderer implements ReportRendererIn
     #[Override]
     public function render(AuditReport $auditReport): string
     {
-        return implode("\n", array_map(
-            $this->annotation(...),
-            $auditReport->vulnerabilities(),
-        ));
+        return implode("\n", [
+            ...$this->incompleteWarning($auditReport),
+            ...array_map($this->annotation(...), $auditReport->vulnerabilities()),
+        ]);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function incompleteWarning(AuditReport $auditReport): array
+    {
+        $notice = IncompleteAuditNotice::for($auditReport);
+
+        return null === $notice ? [] : [\sprintf('::warning title=Audit incomplete::%s', $this->escapeData($notice))];
     }
 
     private function annotation(Vulnerability $vulnerability): string
@@ -63,7 +77,7 @@ final readonly class GithubAnnotationsReportRenderer implements ReportRendererIn
     private function properties(Vulnerability $vulnerability): string
     {
         $properties = [
-            'file' => $this->escapeProperty($vulnerability->filePath()),
+            'file' => $this->escapeProperty($this->reportPathPrefix->apply($vulnerability->filePath())),
             'line' => $vulnerability->lineStart(),
         ];
 
@@ -92,9 +106,8 @@ final readonly class GithubAnnotationsReportRenderer implements ReportRendererIn
 
     private function escapeData(string $value): string
     {
-        $encoded = u(mb_scrub($value, 'UTF-8'))
+        $encoded = b(mb_scrub($value, 'UTF-8'))
             ->replace('%', '%25')
-            ->replace("\r\n", '%0D%0A')
             ->replace("\r", '%0D')
             ->replace("\n", '%0A')
             ->toString();
@@ -104,7 +117,7 @@ final readonly class GithubAnnotationsReportRenderer implements ReportRendererIn
 
     private function escapeProperty(string $value): string
     {
-        return u($this->escapeData($value))
+        return b($this->escapeData($value))
             ->replace(':', '%3A')
             ->replace(',', '%2C')
             ->toString();

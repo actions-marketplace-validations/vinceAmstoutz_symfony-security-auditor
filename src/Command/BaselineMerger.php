@@ -21,7 +21,13 @@ use Symfony\Component\Clock\Clock;
  * Merges a JSON report's findings into a baseline file without re-running
  * the audit: existing entries are preserved verbatim — hand-written keys
  * such as `reason` survive — and only findings not yet covered by an entry
- * are appended.
+ * are appended. A prune drops only the entries whose finding the report
+ * shows gone: an entry whose file the report did not analyze is kept, the
+ * way `audit:diff` keeps such a finding apart as unverified. An entry a
+ * baseline written before 1.22 holds under a former name of the finding
+ * ({@see FormerFindingNames}) covers it as its own fingerprint would; those
+ * names are computed once per finding and looked up by fingerprint, so a merge
+ * grows with the size of the report and of the baseline, not their product.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -36,12 +42,12 @@ final readonly class BaselineMerger implements BaselineMergerInterface
     #[Override]
     public function plan(string $reportPath, string $baselinePath, bool $prune): BaselineMergePlan
     {
-        $findings = $this->reportFindingsLoader->load($reportPath);
+        $loadedReport = $this->reportFindingsLoader->load($reportPath);
         $entries = $this->baseline->entries($baselinePath);
 
-        [$keptEntries, $prunedCount] = $prune ? $this->pruned($entries, $findings) : [$entries, 0];
+        [$keptEntries, $prunedCount] = $prune ? $this->pruned($entries, $loadedReport) : [$entries, 0];
 
-        return new BaselineMergePlan($keptEntries, $this->notCovered($findings, $keptEntries), $prunedCount);
+        return new BaselineMergePlan($keptEntries, $this->notCovered($loadedReport, $keptEntries), $prunedCount);
     }
 
     #[Override]
@@ -61,25 +67,28 @@ final readonly class BaselineMerger implements BaselineMergerInterface
 
     /**
      * @param list<BaselineEntry> $entries
-     * @param list<DiffFinding>   $findings
      *
      * @return array{list<BaselineEntry>, int}
      */
-    private function pruned(array $entries, array $findings): array
+    private function pruned(array $entries, LoadedReport $loadedReport): array
     {
-        $remaining = $this->fingerprintCounts($findings);
+        $remaining = $this->fingerprintCounts($loadedReport);
+        $heldFindings = HeldFindings::of($loadedReport, FormerFindingNames::in($loadedReport, $entries));
         $keptEntries = [];
         $prunedCount = 0;
 
         foreach ($entries as $entry) {
-            $coveringFingerprint = $this->coveringFingerprint($remaining, $entry);
-            if (null === $coveringFingerprint) {
+            $coveringFingerprint = $this->coveringFingerprint($remaining, $entry, $heldFindings);
+            if (null !== $coveringFingerprint) {
+                --$remaining[$coveringFingerprint];
+            }
+
+            if (null === $coveringFingerprint && $this->reportVouchesForItsAbsence($entry, $loadedReport)) {
                 ++$prunedCount;
 
                 continue;
             }
 
-            --$remaining[$coveringFingerprint];
             $keptEntries[] = $entry;
         }
 
@@ -87,11 +96,35 @@ final readonly class BaselineMerger implements BaselineMergerInterface
     }
 
     /**
+     * An entry that names no file cannot be placed, so the report is trusted
+     * as it always was.
+     */
+    private function reportVouchesForItsAbsence(BaselineEntry $baselineEntry, LoadedReport $loadedReport): bool
+    {
+        $file = $baselineEntry->file();
+
+        return null === $file || $loadedReport->vouchesForAbsenceIn($file);
+    }
+
+    /**
+     * One of the entry's own fingerprints the report still lists, else the
+     * fingerprint of the first listed finding the entry holds under a former
+     * name.
+     *
      * @param array<string, int> $remaining
      */
-    private function coveringFingerprint(array $remaining, BaselineEntry $baselineEntry): ?string
+    private function coveringFingerprint(array $remaining, BaselineEntry $baselineEntry, HeldFindings $heldFindings): ?string
     {
-        foreach ($baselineEntry->fingerprints() as $fingerprint) {
+        return $this->firstWithCredit($remaining, [...$baselineEntry->fingerprints(), ...$heldFindings->heldBy($baselineEntry)]);
+    }
+
+    /**
+     * @param array<string, int> $remaining
+     * @param list<string>       $fingerprints
+     */
+    private function firstWithCredit(array $remaining, array $fingerprints): ?string
+    {
+        foreach ($fingerprints as $fingerprint) {
             if (\array_key_exists($fingerprint, $remaining) && $remaining[$fingerprint] > 0) {
                 return $fingerprint;
             }
@@ -101,12 +134,11 @@ final readonly class BaselineMerger implements BaselineMergerInterface
     }
 
     /**
-     * @param list<DiffFinding>   $findings
      * @param list<BaselineEntry> $keptEntries
      *
      * @return list<DiffFinding>
      */
-    private function notCovered(array $findings, array $keptEntries): array
+    private function notCovered(LoadedReport $loadedReport, array $keptEntries): array
     {
         $credits = [];
         foreach ($keptEntries as $keptEntry) {
@@ -115,10 +147,13 @@ final readonly class BaselineMerger implements BaselineMergerInterface
             }
         }
 
+        $formerFindingNames = FormerFindingNames::in($loadedReport, $keptEntries);
+        $holdingEntries = HoldingEntries::of($keptEntries);
         $newFindings = [];
-        foreach ($findings as $finding) {
-            if (\array_key_exists($finding->fingerprint, $credits) && $credits[$finding->fingerprint] > 0) {
-                --$credits[$finding->fingerprint];
+        foreach ($loadedReport->findings as $finding) {
+            $credit = $this->creditCovering($credits, $finding, $holdingEntries->holding($formerFindingNames->of($finding)));
+            if (null !== $credit) {
+                --$credits[$credit];
 
                 continue;
             }
@@ -130,18 +165,33 @@ final readonly class BaselineMerger implements BaselineMergerInterface
     }
 
     /**
-     * @param list<DiffFinding> $findings
+     * The finding's own fingerprint while an entry still accepts it, else the
+     * fingerprint of the first kept entry that holds it under a former name:
+     * the order `AuditContext::consumeBaselineCreditFor()` spends a baseline
+     * in.
+     *
+     * @param array<string, int> $credits
+     * @param list<string>       $holdingFingerprints the fingerprints of the kept entries holding it under a former name, in baseline order
+     */
+    private function creditCovering(array $credits, DiffFinding $diffFinding, array $holdingFingerprints): ?string
+    {
+        return $this->firstWithCredit($credits, [$diffFinding->fingerprint, ...$holdingFingerprints]);
+    }
+
+    /**
+     * Every occurrence the run found, whether its report lists the finding or
+     * leaves it out because the baseline accepted it or its type is muted — a
+     * finding left out counted under the baseline fingerprint that accepted
+     * it, which an entry written under another type or path holds.
      *
      * @return array<string, int>
      */
-    private function fingerprintCounts(array $findings): array
+    private function fingerprintCounts(LoadedReport $loadedReport): array
     {
-        $counts = [];
-        foreach ($findings as $finding) {
-            $counts[$finding->fingerprint] = ($counts[$finding->fingerprint] ?? 0) + 1;
-        }
-
-        return $counts;
+        return array_count_values([
+            ...array_map(static fn (DiffFinding $diffFinding): string => $diffFinding->fingerprint, $loadedReport->findings),
+            ...$loadedReport->suppressedBaselineFingerprints,
+        ]);
     }
 
     /**

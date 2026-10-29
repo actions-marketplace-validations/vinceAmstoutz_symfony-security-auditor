@@ -30,14 +30,22 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\CoverageRecorderI
  *
  *   2. If the cheap pass found anything, an expensive-model attacker
  *      (e.g. claude-opus-4-7) re-analyses ONLY the files the cheap pass
- *      flagged. Those re-runs benefit from the cheap findings being
- *      injected as previousFindings context, steering the deeper model
- *      at concrete locations to refine / escalate / discover related
- *      issues.
+ *      flagged. Those re-runs receive the cheap findings as
+ *      candidateFindings — leads to confirm, refine or discard, never
+ *      reviewer-validated context — so the deeper model re-reports what
+ *      it confirms instead of treating them as settled, and still hunts
+ *      for what the first pass missed.
  *
- *   3. The two result sets are merged by Vulnerability::id() (which is
- *      deterministic from type+file+lineStart): the expensive verdict
- *      wins on overlap, cheap findings on cold files pass through.
+ *   3. The two result sets are merged: every expensive finding is kept; a
+ *      cheap finding on a file the expensive pass analyzed (`analyzed` or
+ *      `cached`) is dropped, since the deep pass re-reports what it confirms
+ *      and its silence is a discard — so a refined location or type never
+ *      reaches the reviewer twice; cheap findings on files it did not judge
+ *      (cold files, hot files it errored on, or hot files it reached its
+ *      last tool round on without a finding) pass through, deduplicated
+ *      by Vulnerability::id(). A discarded cheap finding also leaves the
+ *      coverage recorder's recoverable findings, so draining them after the
+ *      pass cannot bring it back.
  *
  * Net effect: full-project coverage at roughly 1/3 to 1/5 of running the
  * expensive model on every chunk, with detection quality close to the
@@ -76,12 +84,50 @@ final readonly class EscalatingAttackerAgent implements AttackerAgentInterface
             'cold_files_skipped' => \count($files) - \count($hotFiles),
         ]);
 
-        $expensiveFindings = $this->expensiveAttacker->analyze(
-            $attackerAnalysisRequest->withFilesAndFindings($hotFiles, [...$attackerAnalysisRequest->previousFindings, ...$cheapFindings]),
-            $coverageRecorder,
-        );
+        $statusTrackingCoverageRecorder = new StatusTrackingCoverageRecorder($coverageRecorder);
 
-        return $this->merge($cheapFindings, $expensiveFindings);
+        try {
+            $expensiveFindings = $this->expensiveAttacker->analyze(
+                $attackerAnalysisRequest->withFilesAndCandidateFindings($hotFiles, $cheapFindings),
+                $statusTrackingCoverageRecorder,
+            );
+        } finally {
+            $analyzedByExpensive = $statusTrackingCoverageRecorder->conclusiveFiles();
+            $this->withdrawFromRecovery($coverageRecorder, array_filter(
+                $cheapFindings,
+                fn (Vulnerability $vulnerability): bool => $this->isJudged($vulnerability, $analyzedByExpensive),
+            ));
+        }
+
+        return $this->merge($cheapFindings, $expensiveFindings, $analyzedByExpensive);
+    }
+
+    /**
+     * A cheap finding the deep pass judged and dropped was recorded for
+     * recovery while the cheap pass ran. Left there, the orchestrator's drain
+     * of recovered findings would bring it back and undo the discard, so it
+     * leaves the buffer and only a finding this pass keeps, or one a chunk
+     * recorded but could not return, stays recoverable. A deep pass a budget
+     * cap or a provider failure stopped has judged the files it finished
+     * first, so their discards hold in the partial report too.
+     *
+     * @param array<Vulnerability> $discarded
+     */
+    private function withdrawFromRecovery(CoverageRecorderInterface $coverageRecorder, array $discarded): void
+    {
+        foreach ($coverageRecorder->drainFoundVulnerabilities() as $vulnerability) {
+            if (!\in_array($vulnerability, $discarded, true)) {
+                $coverageRecorder->recordFoundVulnerability($vulnerability);
+            }
+        }
+    }
+
+    /**
+     * @param list<string> $analyzedByExpensive
+     */
+    private function isJudged(Vulnerability $vulnerability, array $analyzedByExpensive): bool
+    {
+        return \in_array(EchoedFilePath::normalize($vulnerability->filePath()), $analyzedByExpensive, true);
     }
 
     /**
@@ -100,28 +146,24 @@ final readonly class EscalatingAttackerAgent implements AttackerAgentInterface
     private function filterToHotFiles(array $files, array $cheapFindings): array
     {
         $hotPaths = array_map(
-            static fn (Vulnerability $vulnerability): string => self::normalizePath($vulnerability->filePath()),
+            static fn (Vulnerability $vulnerability): string => EchoedFilePath::normalize($vulnerability->filePath()),
             $cheapFindings,
         );
 
         return array_values(array_filter(
             $files,
-            static fn (ProjectFile $projectFile): bool => \in_array(self::normalizePath($projectFile->relativePath()), $hotPaths, true),
+            static fn (ProjectFile $projectFile): bool => \in_array(EchoedFilePath::normalize($projectFile->relativePath()), $hotPaths, true),
         ));
-    }
-
-    private static function normalizePath(string $path): string
-    {
-        return str_starts_with($path, './') ? substr($path, 2) : $path;
     }
 
     /**
      * @param Vulnerability[] $cheap
      * @param Vulnerability[] $expensive
+     * @param list<string>    $analyzedByExpensive
      *
      * @return list<Vulnerability>
      */
-    private function merge(array $cheap, array $expensive): array
+    private function merge(array $cheap, array $expensive, array $analyzedByExpensive): array
     {
         $byId = [];
 
@@ -130,9 +172,11 @@ final readonly class EscalatingAttackerAgent implements AttackerAgentInterface
         }
 
         foreach ($cheap as $vulnerability) {
-            if (!\array_key_exists($vulnerability->id(), $byId)) {
-                $byId[$vulnerability->id()] = $vulnerability;
+            if ($this->isJudged($vulnerability, $analyzedByExpensive) || \array_key_exists($vulnerability->id(), $byId)) {
+                continue;
             }
+
+            $byId[$vulnerability->id()] = $vulnerability;
         }
 
         return array_values($byId);

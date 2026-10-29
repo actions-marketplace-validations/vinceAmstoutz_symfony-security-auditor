@@ -16,6 +16,9 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\Agent\Fixt
 use Override;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\CoverageRecorderInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\FailureReasonRecorderInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\InconclusiveAnalysisRecorderInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\RejectedFindingRecorderInterface;
 
 /**
  * Test fake: a real coverage recorder that keeps everything it is told in
@@ -24,16 +27,25 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\CoverageRecorderI
  * without mocking the port. Drain semantics mirror the production recorder
  * (return-and-clear).
  */
-final class RecordingCoverageRecorder implements CoverageRecorderInterface
+final class RecordingCoverageRecorder implements CoverageRecorderInterface, RejectedFindingRecorderInterface, FailureReasonRecorderInterface, InconclusiveAnalysisRecorderInterface
 {
     /** @var list<array{stage: string, filePath: string, status: string}> */
     public array $coverage = [];
+
+    /** @var list<array{stage: string, filePath: string, reason: string}> */
+    public array $failureReasons = [];
+
+    /** @var list<array{stage: string, filePath: string}> */
+    public array $inconclusive = [];
 
     /** @var list<Vulnerability> */
     public array $reviewed = [];
 
     /** @var list<Vulnerability> */
     public array $found = [];
+
+    /** @var list<Vulnerability> */
+    public array $rejected = [];
 
     #[Override]
     public function recordCoverage(string $stage, string $filePath, string $status): void
@@ -42,9 +54,27 @@ final class RecordingCoverageRecorder implements CoverageRecorderInterface
     }
 
     #[Override]
+    public function recordFailureReason(string $stage, string $filePath, string $reason): void
+    {
+        $this->failureReasons[] = ['stage' => $stage, 'filePath' => $filePath, 'reason' => $reason];
+    }
+
+    #[Override]
+    public function recordInconclusiveAnalysis(string $stage, string $filePath): void
+    {
+        $this->inconclusive[] = ['stage' => $stage, 'filePath' => $filePath];
+    }
+
+    #[Override]
     public function recordReviewedFinding(Vulnerability $vulnerability): void
     {
         $this->reviewed[] = $vulnerability;
+    }
+
+    #[Override]
+    public function recordRejectedFinding(Vulnerability $vulnerability): void
+    {
+        $this->rejected[] = $vulnerability;
     }
 
     #[Override]

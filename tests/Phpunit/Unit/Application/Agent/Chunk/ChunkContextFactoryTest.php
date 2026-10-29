@@ -20,9 +20,13 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerContext
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunk\ChunkContextFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunk\ChunkContextKeyDeriver;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\RiskMarkerIndex;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidCodeLocationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidProjectFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidRiskMarkerException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidVulnerabilityClassificationException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidVulnerabilityNarrativeException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AccessControlMap;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\CodeLocation;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\FormBinding;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFileInventory;
@@ -30,10 +34,18 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\RiskMarker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\RouteAccessControl;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\SymfonyMapping;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VoterCapability;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityClassification;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityNarrative;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilitySeverity;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityType;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\AttackerPromptBuilderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\CodeSlicerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\NullCodeSlicer;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\AttackerPromptBuilder;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\Exception\InvalidCustomRiskPatternException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\RegexStaticPreScanner;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Application\Agent\Chunk\Fixture\CountingAttackerPromptBuilder;
 
 final class ChunkContextFactoryTest extends TestCase
 {
@@ -151,8 +163,7 @@ final class ChunkContextFactoryTest extends TestCase
     /**
      * Project scanning makes no ordering guarantee, so two scans of the same
      * unchanged codebase must not produce different cache keys merely because
-     * the parsers visited the same routes and form bindings in a different
-     * order.
+     * the parsers visited the same form bindings in a different order.
      *
      * @throws InvalidProjectFileException
      */
@@ -175,7 +186,7 @@ final class ChunkContextFactoryTest extends TestCase
             formBindings: [$formBindingA, $formBindingB],
         )));
         $reverseOrder = new AttackerAnalysisRequest($chunk, SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap(
-            routeAccessMap: ['^/reports' => ['ROLE_USER'], '^/admin' => ['ROLE_ADMIN']],
+            routeAccessMap: ['^/admin' => ['ROLE_ADMIN'], '^/reports' => ['ROLE_USER']],
             formBindings: [$formBindingB, $formBindingA],
         )));
 
@@ -235,6 +246,78 @@ final class ChunkContextFactoryTest extends TestCase
 
     /**
      * @throws InvalidProjectFileException
+     * @throws InvalidRiskMarkerException
+     * @throws InvalidCustomRiskPatternException
+     */
+    public function test_a_file_the_pre_scanner_flags_on_every_line_stays_the_bulk_of_its_prompt(): void
+    {
+        $chunkContextFactory = new ChunkContextFactory(
+            new AttackerPromptBuilder(),
+            new NullCodeSlicer(),
+            new AttackerContextPromptRenderer(),
+            new ChunkContextKeyDeriver(),
+        );
+        $projectFile = ProjectFile::create(
+            'src/Controller/FloodController.php',
+            '/app/src/Controller/FloodController.php',
+            "<?php\nclass FloodController extends AbstractController\n{\n".str_repeat("\$request->x;\n", 8000)."}\n",
+        );
+        $chunk = [$projectFile];
+        $riskMarkers = (new RegexStaticPreScanner())->scan($chunk);
+        $attackerAnalysisRequest = new AttackerAnalysisRequest($chunk, SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()));
+
+        $chunkContext = $chunkContextFactory->create($chunk, $attackerAnalysisRequest, new RiskMarkerIndex($riskMarkers), true);
+
+        self::assertCount(8000, $riskMarkers);
+        self::assertGreaterThan(
+            \strlen($chunkContext->systemPrompt) + \strlen($chunkContext->userMessage),
+            2 * $chunkContext->promptedFileBytes,
+        );
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidRiskMarkerException
+     */
+    public function test_a_risk_marker_restores_the_multi_line_call_it_opens_up_to_its_closing_parenthesis(): void
+    {
+        $codeSlicer = self::createStub(CodeSlicerInterface::class);
+        $codeSlicer->method('slice')->willReturn(implode("\n", ['<?php', ...array_fill(0, 5, '// elided')]));
+
+        $chunkContextFactory = new ChunkContextFactory(
+            new AttackerPromptBuilder(),
+            $codeSlicer,
+            new AttackerContextPromptRenderer(),
+            new ChunkContextKeyDeriver(),
+        );
+
+        $projectFile = ProjectFile::create('src/Repository/UserRepository.php', '/app/src/Repository/UserRepository.php', implode("\n", [
+            '<?php',
+            'INERT_BEFORE_CALL',
+            '$rows = $this->connection->fetchFirstColumn(',
+            '    "SELECT id FROM users WHERE name = \'" . $name . "\'"',
+            ');',
+            'INERT_AFTER_CALL',
+        ]));
+        $chunk = [$projectFile];
+        $attackerAnalysisRequest = new AttackerAnalysisRequest($chunk, SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()));
+
+        $riskMarker = RiskMarker::create($projectFile->relativePath(), 3, 'sql_injection', 'raw query concatenation');
+        $chunkContext = $chunkContextFactory->create($chunk, $attackerAnalysisRequest, new RiskMarkerIndex([$riskMarker]), true);
+
+        $expectedBody = implode("\n", [
+            '  1 | <?php',
+            '  2 | // elided',
+            '  3 | $rows = $this->connection->fetchFirstColumn(',
+            '  4 |     "SELECT id FROM users WHERE name = \'" . $name . "\'"',
+            '  5 | );',
+            '  6 | // elided',
+        ]);
+        self::assertStringContainsString($expectedBody."\n</file>", $chunkContext->userMessage);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
      */
     public function test_a_file_without_risk_markers_keeps_the_slicer_output_verbatim(): void
     {
@@ -255,5 +338,213 @@ final class ChunkContextFactoryTest extends TestCase
         $chunkContext = $chunkContextFactory->create($chunk, $attackerAnalysisRequest, new RiskMarkerIndex([]), true);
 
         self::assertStringContainsString('SLICED_ONLY_TOKEN', $chunkContext->userMessage);
+        self::assertSame(\strlen("<?php\n// SLICED_ONLY_TOKEN"), $chunkContext->promptedFileBytes);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_candidate_findings_are_rendered_into_the_user_message_and_change_the_cache_key(): void
+    {
+        $chunkContextFactory = new ChunkContextFactory(
+            new AttackerPromptBuilder(),
+            new NullCodeSlicer(),
+            new AttackerContextPromptRenderer(),
+            new ChunkContextKeyDeriver(),
+        );
+        $chunk = [ProjectFile::create('src/Controller/A.php', '/app/src/Controller/A.php', '<?php class A {}')];
+        $symfonyMapping = SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap());
+
+        $chunkContext = $chunkContextFactory->create($chunk, new AttackerAnalysisRequest($chunk, $symfonyMapping), new RiskMarkerIndex([]), true);
+        $withCandidates = $chunkContextFactory->create($chunk, new AttackerAnalysisRequest($chunk, $symfonyMapping, candidateFindings: [$this->makeVulnerability()]), new RiskMarkerIndex([]), true);
+
+        self::assertStringNotContainsString('## Candidate Findings From a First-Pass Model', $chunkContext->userMessage);
+        self::assertStringContainsString('## Candidate Findings From a First-Pass Model', $withCandidates->userMessage);
+        self::assertStringContainsString('- sql_injection: src/Controller/A.php:1-2', $withCandidates->userMessage);
+        self::assertNotSame($chunkContext->contextKey, $withCandidates->contextKey);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidRiskMarkerException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     * @throws InvalidCodeLocationException
+     */
+    #[DataProvider('cacheCoordinatesCases')]
+    public function test_the_cache_coordinates_are_the_key_and_cacheability_the_context_carries(bool $withMarker, bool $withPreviousFinding, bool $bypassCache, bool $cacheIsContextAware): void
+    {
+        $chunkContextFactory = new ChunkContextFactory(new AttackerPromptBuilder(), new NullCodeSlicer(), new AttackerContextPromptRenderer(), new ChunkContextKeyDeriver());
+        $projectFile = ProjectFile::create('src/Controller/A.php', '/app/src/Controller/A.php', '<?php class A {}');
+        $chunk = [$projectFile];
+        $attackerAnalysisRequest = new AttackerAnalysisRequest($chunk, SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()), $bypassCache, $withPreviousFinding ? [$this->makeVulnerability()] : []);
+        $riskMarkerIndex = new RiskMarkerIndex($withMarker ? [RiskMarker::create($projectFile->relativePath(), 1, 'sql_injection', 'raw query concatenation')] : []);
+
+        $chunkContext = $chunkContextFactory->create($chunk, $attackerAnalysisRequest, $riskMarkerIndex, $cacheIsContextAware);
+        $chunkCacheCoordinates = $chunkContextFactory->cacheCoordinates($chunk, $attackerAnalysisRequest, $riskMarkerIndex, $cacheIsContextAware);
+
+        self::assertSame([$chunkContext->contextKey, $chunkContext->cacheable], [$chunkCacheCoordinates->contextKey, $chunkCacheCoordinates->cacheable]);
+    }
+
+    /** @return iterable<string, array{bool, bool, bool, bool}> */
+    public static function cacheCoordinatesCases(): iterable
+    {
+        yield 'a chunk with no context' => [false, false, false, false];
+        yield 'a chunk with risk markers' => [true, false, false, true];
+        yield 'a chunk with confirmed findings' => [false, true, false, true];
+        yield 'a context a cache that ignores context cannot key' => [true, true, false, false];
+        yield 'a run that bypasses the cache' => [false, false, true, true];
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_the_cache_coordinates_are_known_without_building_a_prompt(): void
+    {
+        $countingAttackerPromptBuilder = new CountingAttackerPromptBuilder();
+        $chunkContextFactory = new ChunkContextFactory($countingAttackerPromptBuilder, new NullCodeSlicer(), new AttackerContextPromptRenderer(), new ChunkContextKeyDeriver());
+        $chunk = [ProjectFile::create('src/Controller/A.php', '/app/src/Controller/A.php', '<?php class A {}')];
+
+        $chunkContextFactory->cacheCoordinates($chunk, new AttackerAnalysisRequest($chunk, SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap())), new RiskMarkerIndex([]), true);
+
+        self::assertSame(0, $countingAttackerPromptBuilder->userMessagesBuilt);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidRiskMarkerException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_the_preambles_precede_the_files_as_confirmed_then_rejected_then_candidates_then_markers(): void
+    {
+        $chunkContextFactory = new ChunkContextFactory(
+            new AttackerPromptBuilder(),
+            new NullCodeSlicer(),
+            new AttackerContextPromptRenderer(),
+            new ChunkContextKeyDeriver(),
+        );
+        $projectFile = ProjectFile::create('src/Controller/A.php', '/app/src/Controller/A.php', '<?php class A {}');
+        $chunk = [$projectFile];
+        $attackerAnalysisRequest = new AttackerAnalysisRequest(
+            $chunk,
+            SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()),
+            previousFindings: [$this->makeVulnerability()],
+            rejectedFindings: [$this->makeVulnerability()],
+            candidateFindings: [$this->makeVulnerability()],
+        );
+
+        $chunkContext = $chunkContextFactory->create($chunk, $attackerAnalysisRequest, new RiskMarkerIndex([RiskMarker::create($projectFile->relativePath(), 1, 'sql_injection', 'raw query concatenation')]), true);
+
+        $positions = array_map(
+            static fn (string $heading): int => (int) strpos($chunkContext->userMessage, $heading),
+            [
+                '## Patterns Already Confirmed in Earlier Iterations',
+                '## Findings Already Rejected by the Reviewer',
+                '## Candidate Findings From a First-Pass Model (Unverified)',
+                '## Pre-Scan Risk Markers (Deterministic Hints)',
+                '<?php class A {}',
+            ],
+        );
+        $sorted = $positions;
+        sort($sorted);
+        self::assertSame($sorted, $positions);
+        self::assertSame(0, $positions[0]);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_a_factory_reused_across_requests_renders_each_requests_own_findings(): void
+    {
+        $chunkContextFactory = new ChunkContextFactory(new AttackerPromptBuilder(), new NullCodeSlicer(), new AttackerContextPromptRenderer(), new ChunkContextKeyDeriver());
+        $chunk = [ProjectFile::create('src/Controller/A.php', '/app/src/Controller/A.php', '<?php class A {}')];
+        $symfonyMapping = SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap());
+        $first = new AttackerAnalysisRequest($chunk, $symfonyMapping, rejectedFindings: [$this->makeVulnerability('src/Rejected/First.php')]);
+        $second = new AttackerAnalysisRequest($chunk, $symfonyMapping, previousFindings: [$this->makeVulnerability('src/Confirmed/Second.php')]);
+
+        $chunkContext = $chunkContextFactory->create($chunk, $first, new RiskMarkerIndex([]), true);
+        $secondContext = $chunkContextFactory->create($chunk, $second, new RiskMarkerIndex([]), true);
+        $firstAgain = $chunkContextFactory->create($chunk, $first, new RiskMarkerIndex([]), true);
+
+        self::assertStringContainsString('src/Rejected/First.php', $chunkContext->userMessage);
+        self::assertStringNotContainsString('src/Rejected/First.php', $secondContext->userMessage);
+        self::assertStringContainsString('src/Confirmed/Second.php', $secondContext->userMessage);
+        self::assertStringNotContainsString('src/Confirmed/Second.php', $chunkContext->userMessage);
+        self::assertSame($chunkContext->userMessage, $firstAgain->userMessage);
+        self::assertSame($chunkContext->contextKey, $firstAgain->contextKey);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    private function makeVulnerability(string $filePath = 'src/Controller/A.php'): Vulnerability
+    {
+        return Vulnerability::of(
+            new VulnerabilityClassification(VulnerabilityType::SQL_INJECTION, VulnerabilitySeverity::HIGH, 'T', 0.9),
+            new CodeLocation($filePath, 1, 2),
+            new VulnerabilityNarrative('d', 'a', 'p', 'r'),
+            'c',
+        );
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_only_the_candidates_on_the_chunks_own_files_are_rendered(): void
+    {
+        $chunkContextFactory = new ChunkContextFactory(
+            new AttackerPromptBuilder(),
+            new NullCodeSlicer(),
+            new AttackerContextPromptRenderer(),
+            new ChunkContextKeyDeriver(),
+        );
+        $chunk = [ProjectFile::create('src/Controller/A.php', '/app/src/Controller/A.php', '<?php class A {}')];
+        $attackerAnalysisRequest = new AttackerAnalysisRequest(
+            $chunk,
+            SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap()),
+            candidateFindings: [$this->makeVulnerability('./src/Controller/A.php'), $this->makeVulnerability('src/Controller/B.php')],
+        );
+
+        $chunkContext = $chunkContextFactory->create($chunk, $attackerAnalysisRequest, new RiskMarkerIndex([]), true);
+
+        self::assertStringContainsString('- sql_injection: ./src/Controller/A.php:1-2', $chunkContext->userMessage);
+        self::assertStringNotContainsString('src/Controller/B.php', $chunkContext->userMessage);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_a_candidate_on_another_file_leaves_the_chunks_prompt_and_cache_key_untouched(): void
+    {
+        $chunkContextFactory = new ChunkContextFactory(
+            new AttackerPromptBuilder(),
+            new NullCodeSlicer(),
+            new AttackerContextPromptRenderer(),
+            new ChunkContextKeyDeriver(),
+        );
+        $chunk = [ProjectFile::create('src/Controller/A.php', '/app/src/Controller/A.php', '<?php class A {}')];
+        $symfonyMapping = SymfonyMapping::of(ProjectFileInventory::fromGroups([]), new AccessControlMap());
+
+        $chunkContext = $chunkContextFactory->create($chunk, new AttackerAnalysisRequest($chunk, $symfonyMapping), new RiskMarkerIndex([]), true);
+        $withACandidateElsewhere = $chunkContextFactory->create($chunk, new AttackerAnalysisRequest($chunk, $symfonyMapping, candidateFindings: [$this->makeVulnerability('src/Controller/B.php')]), new RiskMarkerIndex([]), true);
+
+        self::assertSame($chunkContext->userMessage, $withACandidateElsewhere->userMessage);
+        self::assertSame($chunkContext->contextKey, $withACandidateElsewhere->contextKey);
     }
 }

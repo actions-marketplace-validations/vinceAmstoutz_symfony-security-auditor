@@ -10,10 +10,18 @@
 .EXAMPLE
     irm https://raw.githubusercontent.com/vinceAmstoutz/symfony-security-auditor/main/install.ps1 | iex
 
+.EXAMPLE
+    One command to install *and* configure (installs the binary, then runs its guided `init`):
+    $env:SSA_INIT = '1'; irm https://raw.githubusercontent.com/vinceAmstoutz/symfony-security-auditor/main/install.ps1 | iex
+
 .NOTES
     Environment variables:
-      SSA_VERSION      release tag to install (default: latest)
+      SSA_VERSION      release tag to install (default: latest; "snapshot" for the latest snapshot)
       SSA_INSTALL_DIR  target directory (default: %LOCALAPPDATA%\Programs\symfony-security-auditor)
+      SSA_INIT         when "1", run "<binary> init" after installing so a single
+                       command installs and configures the tool; prompts read from
+                       the console when its input is not redirected, else fall back
+                       to "init --no-interaction" (needs composer, like init itself)
 #>
 
 Set-StrictMode -Version Latest
@@ -32,6 +40,8 @@ function Resolve-Asset {
 }
 
 function Get-Asset([string]$Url, [string]$OutFile) {
+    # Windows PowerShell 5.1 redraws the progress bar per received chunk, which slows Invoke-WebRequest downloads many times over.
+    $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
 }
 
@@ -58,6 +68,31 @@ function Test-Checksum([string]$File, [string]$ChecksumFile) {
 function Resolve-InstallDir {
     if ($env:SSA_INSTALL_DIR) { return $env:SSA_INSTALL_DIR }
     return Join-Path $env:LOCALAPPDATA "Programs\$BinaryName"
+}
+
+function Test-InitCanPrompt {
+    return -not [Console]::IsInputRedirected
+}
+
+function Invoke-Init([string]$Binary) {
+    if ($env:SSA_INIT -ne '1') { return }
+
+    Write-Host "Configuring $BinaryName (running 'init')…"
+    try {
+        if (Test-InitCanPrompt) {
+            & $Binary init
+        }
+        else {
+            & $Binary init --no-interaction
+        }
+        $completed = $LASTEXITCODE -eq 0
+    }
+    catch {
+        $completed = $false
+    }
+    if (-not $completed) {
+        Write-Warning "'$BinaryName init' did not complete — run it yourself to finish configuration."
+    }
 }
 
 function Install-Binary {
@@ -98,6 +133,9 @@ Some older releases ship without a native Windows binary. Options:
         Move-Item -Path "$tmp\$asset" -Destination $target -Force
 
         Write-Host "Installed $BinaryName to $target"
+
+        Invoke-Init $target
+
         $paths = ($env:Path -split ';')
         if ($paths -notcontains $installDir) {
             Write-Host "note: $installDir is not on your PATH — add it to run '$BinaryName' directly"

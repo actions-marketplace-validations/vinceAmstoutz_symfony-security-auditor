@@ -15,12 +15,16 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Standalone;
 
 use Override;
 use Symfony\Component\Console\Application;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Exception\ExceptionInterface;
 use Symfony\Component\Console\Formatter\OutputFormatter;
 use Symfony\Component\Console\Input\ArgvInput;
+use Symfony\Component\Console\Input\InputDefinition;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\ConsoleOutputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 use Throwable;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\EnvironmentVariableName;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\ConsoleBanner;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\ConsoleBannerInterface;
 
@@ -33,8 +37,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Command\ConsoleBannerInterface;
  * listener could not cover it.
  *
  * Mutable by design — non-readonly because the invocation is captured on the
- * way in and read back later: the command line if something throws, and
- * whether the run needs provider credentials when the audit command is built.
+ * way in and read back later: the command line if something throws, whether
+ * the run needs provider credentials when the audit command is built, whether
+ * it only describes the commands it would build, and which project it names.
  * See .claude/rules/php-classes.md for the opt-out policy.
  *
  * @internal not part of the BC promise — see docs/versioning.md
@@ -47,9 +52,29 @@ final class StandaloneApplication extends Application
      */
     private const array COMPLETION_COMMANDS = ['_complete', 'completion'];
 
+    /**
+     * Commands that read other commands' definitions without running them,
+     * matched the way the base class resolves an abbreviation. Running with
+     * no command name runs `list`, and shell completion reads definitions
+     * too.
+     */
+    private const array DESCRIBING_COMMANDS = ['help', 'list'];
+
+    private const string COMPLETION_REQUEST = '_complete';
+
+    /**
+     * The option naming the variable a key is read from, where a key pasted
+     * by mistake would otherwise be echoed back.
+     */
+    private const string VARIABLE_NAME_OPTION = '--env-var';
+
     private string $invocation = '';
 
-    private bool $dryRun = false;
+    private bool $reachesNoProvider = false;
+
+    private bool $describing = false;
+
+    private ?InputInterface $input = null;
 
     public function __construct(
         string $name,
@@ -69,8 +94,10 @@ final class StandaloneApplication extends Application
     #[Override]
     public function doRun(InputInterface $input, OutputInterface $output): int
     {
-        $this->invocation = $input instanceof ArgvInput ? (string) $input : '';
-        $this->dryRun = $input->hasParameterOption('--dry-run', true);
+        $this->input = $input;
+        $this->invocation = $input instanceof ArgvInput ? $this->echoable($input) : '';
+        $this->reachesNoProvider = $input->hasParameterOption(['--dry-run', '--show-scanned'], true);
+        $this->describing = $input->hasParameterOption(['--help', '-h'], true) || $this->namesADescribingCommand($this->getCommandName($input));
 
         if (!$this->completionRun($input)) {
             $this->consoleBanner->render($this->errorOutput($output));
@@ -79,16 +106,114 @@ final class StandaloneApplication extends Application
         return parent::doRun($input, $output);
     }
 
+    private function namesADescribingCommand(?string $name): bool
+    {
+        return null === $name || self::COMPLETION_REQUEST === $name || $this->abbreviatesADescribingCommand(strtolower($name));
+    }
+
     /**
-     * A `--dry-run` estimates cost from the scanned files and never reaches
-     * the provider, so the standalone configuration does not have to resolve
-     * a provider credential for it. Read here rather than from the command,
-     * because the failure it prevents happens while that command is still
-     * being built.
+     * The base class runs `hel audit` as `help audit`, matching an abbreviation
+     * case-insensitively when nothing else does, and no other command starts
+     * like `help` or `list`. Matching the prefix here, rather than through
+     * `find()`, keeps the lookup from building a command out of the
+     * configuration before this flag is set.
+     */
+    private function abbreviatesADescribingCommand(string $name): bool
+    {
+        foreach (self::DESCRIBING_COMMANDS as $describingCommand) {
+            if (str_starts_with($describingCommand, $name)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * A `--dry-run` estimates cost from the scanned files and `--show-scanned`
+     * lists them, and neither reaches the provider, so the standalone
+     * configuration does not have to resolve a provider credential for them.
+     * Read here rather than from the command, because the failure it
+     * prevents happens while that command is still being built.
      */
     public function needsProviderCredentials(): bool
     {
-        return !$this->dryRun;
+        return !$this->reachesNoProvider;
+    }
+
+    /**
+     * The `project-path` the command line gives the audit, read by binding a
+     * copy of it to the command's own definition — the only way to tell that
+     * argument from the value of an option — before the command is built from
+     * the configuration, which is where the audited project's own file has to
+     * be chosen. Null when none is given or the line does not bind, which the
+     * command itself then reports.
+     */
+    public function projectPathGivenTo(Command $command): ?string
+    {
+        $projectPath = $this->inputBoundTo($command)?->getArgument('project-path');
+
+        return \is_string($projectPath) && '' !== trim($projectPath) ? $projectPath : null;
+    }
+
+    /**
+     * The `--path` values the command line gives the audit command, read
+     * before the command is built so the project they lie in can supply its
+     * own configuration.
+     *
+     * @return list<string>
+     */
+    public function scanPathsGivenTo(Command $command): array
+    {
+        $scanPaths = [];
+        foreach ((array) $this->inputBoundTo($command)?->getOption('path') as $scanPath) {
+            if (\is_string($scanPath)) {
+                $scanPaths[] = $scanPath;
+            }
+        }
+
+        return $scanPaths;
+    }
+
+    private function inputBoundTo(Command $command): ?InputInterface
+    {
+        if (!$this->input instanceof InputInterface) {
+            return null;
+        }
+
+        $input = clone $this->input;
+
+        try {
+            $input->bind($this->definitionWithApplicationOf($command));
+        } catch (ExceptionInterface) {
+            return null;
+        }
+
+        return $input;
+    }
+
+    private function definitionWithApplicationOf(Command $command): InputDefinition
+    {
+        $inputDefinition = $this->getDefinition();
+        $commandDefinition = $command->getNativeDefinition();
+
+        return new InputDefinition([
+            ...$inputDefinition->getArguments(),
+            ...$commandDefinition->getArguments(),
+            ...$inputDefinition->getOptions(),
+            ...$commandDefinition->getOptions(),
+        ]);
+    }
+
+    /**
+     * Help, a listing and shell completion only describe commands, so a
+     * command built from the configuration can be described from its class
+     * instead — before `init` has written a configuration, or with one that
+     * would not boot. Mirrors the `--help` detection of the base class.
+     */
+    public function describesCommandsOnly(): bool
+    {
+        return $this->describing;
     }
 
     /**
@@ -109,6 +234,27 @@ final class StandaloneApplication extends Application
             \sprintf(' <comment>Command:</comment> %s %s', $this->getName(), OutputFormatter::escape($this->invocation)),
             OutputInterface::VERBOSITY_QUIET,
         );
+    }
+
+    /**
+     * The command line as it is echoed under an error, with the value of
+     * `--env-var` shown the way a refused variable name is: a key pasted
+     * there instead of its variable's name is masked, never printed into a
+     * terminal or a CI log.
+     */
+    private function echoable(ArgvInput $argvInput): string
+    {
+        $variableName = $argvInput->getParameterOption(self::VARIABLE_NAME_OPTION);
+        if (!\is_string($variableName)) {
+            return (string) $argvInput;
+        }
+
+        $shown = EnvironmentVariableName::shown($variableName);
+
+        return (string) new ArgvInput(['', ...array_map(
+            static fn (string $token): string => str_replace($variableName, $shown, $token),
+            $argvInput->getRawTokens(),
+        )]);
     }
 
     private function completionRun(InputInterface $input): bool

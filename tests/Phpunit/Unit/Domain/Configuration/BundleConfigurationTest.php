@@ -13,9 +13,11 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Domain\Configuration;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\BundleConfiguration;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\CustomAttackerSkill;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\ToolsScope;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditExecutionConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidRateLimitConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFileType;
@@ -118,6 +120,56 @@ final class BundleConfigurationTest extends TestCase
      * @throws InvalidAuditExecutionConfigurationException
      * @throws InvalidRateLimitConfigurationException
      */
+    public function test_from_array_leaves_the_tracked_ignored_files_out_by_default(): void
+    {
+        $bundleConfiguration = BundleConfiguration::fromArray($this->treeBuilderOutput());
+
+        self::assertFalse($bundleConfiguration->scan->includeTrackedIgnored);
+    }
+
+    /**
+     * @throws InvalidAuditExecutionConfigurationException
+     * @throws InvalidRateLimitConfigurationException
+     */
+    public function test_from_array_maps_the_tracked_ignored_files_opt_in(): void
+    {
+        $config = $this->treeBuilderOutput();
+        $config['scan']['include_tracked_ignored'] = true;
+
+        $bundleConfiguration = BundleConfiguration::fromArray($config);
+
+        self::assertTrue($bundleConfiguration->scan->includeTrackedIgnored);
+    }
+
+    /**
+     * @throws InvalidAuditExecutionConfigurationException
+     * @throws InvalidRateLimitConfigurationException
+     */
+    public function test_from_array_leaves_the_dot_files_out_by_default(): void
+    {
+        $bundleConfiguration = BundleConfiguration::fromArray($this->treeBuilderOutput());
+
+        self::assertFalse($bundleConfiguration->scan->includeDotfiles);
+    }
+
+    /**
+     * @throws InvalidAuditExecutionConfigurationException
+     * @throws InvalidRateLimitConfigurationException
+     */
+    public function test_from_array_maps_the_dot_files_opt_in(): void
+    {
+        $config = $this->treeBuilderOutput();
+        $config['scan']['include_dotfiles'] = true;
+
+        $bundleConfiguration = BundleConfiguration::fromArray($config);
+
+        self::assertTrue($bundleConfiguration->scan->includeDotfiles);
+    }
+
+    /**
+     * @throws InvalidAuditExecutionConfigurationException
+     * @throws InvalidRateLimitConfigurationException
+     */
     public function test_from_array_passes_scan_import_sarif_paths_through(): void
     {
         $config = $this->treeBuilderOutput();
@@ -140,6 +192,86 @@ final class BundleConfigurationTest extends TestCase
         $bundleConfiguration = BundleConfiguration::fromArray($config);
 
         self::assertSame(RiskLevel::High, $bundleConfiguration->audit->failOn);
+    }
+
+    /**
+     * @throws InvalidAuditExecutionConfigurationException
+     * @throws InvalidRateLimitConfigurationException
+     */
+    public function test_from_array_leaves_the_gate_and_report_settings_unset_when_keys_omitted(): void
+    {
+        $bundleConfiguration = BundleConfiguration::fromArray($this->treeBuilderOutput());
+
+        self::assertNull($bundleConfiguration->audit->minScore);
+        self::assertFalse($bundleConfiguration->audit->failOnIncomplete);
+        self::assertSame('console', $bundleConfiguration->audit->format);
+        self::assertNull($bundleConfiguration->audit->output);
+        self::assertNull($bundleConfiguration->audit->reportPathPrefix);
+    }
+
+    /**
+     * @throws InvalidAuditExecutionConfigurationException
+     * @throws InvalidRateLimitConfigurationException
+     */
+    public function test_from_array_keeps_the_tools_on_the_audited_files_when_the_key_is_omitted(): void
+    {
+        $bundleConfiguration = BundleConfiguration::fromArray($this->treeBuilderOutput());
+
+        self::assertSame(ToolsScope::Audited, $bundleConfiguration->audit->toolsScope);
+    }
+
+    /**
+     * @throws InvalidAuditExecutionConfigurationException
+     * @throws InvalidRateLimitConfigurationException
+     */
+    #[DataProvider('toolsScopes')]
+    public function test_from_array_maps_the_files_the_tools_may_open(string $configured, ToolsScope $toolsScope): void
+    {
+        $config = $this->treeBuilderOutput();
+        $config['audit']['tools_scope'] = $configured;
+
+        self::assertSame($toolsScope, BundleConfiguration::fromArray($config)->audit->toolsScope);
+    }
+
+    /**
+     * @return iterable<string, array{string, ToolsScope}>
+     */
+    public static function toolsScopes(): iterable
+    {
+        yield 'the audited files' => ['audited', ToolsScope::Audited];
+        yield 'every scanned file' => ['scanned', ToolsScope::Scanned];
+    }
+
+    /**
+     * @throws InvalidAuditExecutionConfigurationException
+     * @throws InvalidRateLimitConfigurationException
+     */
+    public function test_from_array_maps_the_folder_the_project_lives_in(): void
+    {
+        $config = $this->treeBuilderOutput();
+        $config['audit']['report_path_prefix'] = 'apps/shop';
+
+        self::assertSame('apps/shop', BundleConfiguration::fromArray($config)->audit->reportPathPrefix);
+    }
+
+    /**
+     * @throws InvalidAuditExecutionConfigurationException
+     * @throws InvalidRateLimitConfigurationException
+     */
+    public function test_from_array_maps_explicit_gate_and_report_settings(): void
+    {
+        $config = $this->treeBuilderOutput();
+        $config['audit']['min_score'] = 80;
+        $config['audit']['fail_on_incomplete'] = true;
+        $config['audit']['format'] = 'sarif';
+        $config['audit']['output'] = 'build/audit.sarif';
+
+        $bundleConfiguration = BundleConfiguration::fromArray($config);
+
+        self::assertSame(80, $bundleConfiguration->audit->minScore);
+        self::assertTrue($bundleConfiguration->audit->failOnIncomplete);
+        self::assertSame('sarif', $bundleConfiguration->audit->format);
+        self::assertSame('build/audit.sarif', $bundleConfiguration->audit->output);
     }
 
     /**
@@ -584,7 +716,7 @@ final class BundleConfigurationTest extends TestCase
      *     attacker_max_output_tokens?: int|null,
      *     reviewer_max_output_tokens?: int|null,
      *     provider_json_mode?: bool,
-     *     scan: array{included_paths: list<string>, respect_gitignore: bool, max_file_size_kb: int, import_sarif?: list<string>, custom_risk_patterns: array<string, array<string, array{regex: string, description: string}>>, secret_scrubbing: array{enabled: bool, additional_patterns: list<string>}},
+     *     scan: array{included_paths: list<string>, respect_gitignore: bool, include_tracked_ignored?: bool, include_dotfiles?: bool, max_file_size_kb: int, import_sarif?: list<string>, custom_risk_patterns: array<string, array<string, array{regex: string, description: string}>>, secret_scrubbing: array{enabled: bool, additional_patterns: list<string>}},
      *     audit: array{max_iterations: int|null, min_confidence: float, reviewer_batch_size: int, tools_enabled: bool, structured_collection?: bool, reviewer_structured_collection?: bool, stable_system_prompt?: bool, triage_memory?: bool, max_tool_iterations: int, reviewer_tools_enabled: bool, reviewer_max_tool_iterations: int, fail_on?: string, reviewer_max_concurrent: int|null, attacker_max_concurrent: int|null, static_prescan: array{enabled: bool, lean_mode: bool|null}, chunking: array{strategy: string}, poc_synthesis: array{enabled: bool|null, severity_floor: string}, fix_synthesis: array{enabled: bool, severity_floor: string}, code_slicing: array{enabled: bool|null, min_lines_before_slicing: int}, escalation: array{enabled: bool, cheap_model: string|null}, budget: array{max_tokens: int|null, max_cost_usd: float|null}, retry: array{max_attempts: int, initial_delay_ms: int, backoff_multiplier: float, jitter_ratio: float}, rate_limit: array{requests_per_minute: int|null, input_tokens_per_minute: int|null, output_tokens_per_minute: int|null}},
      *     cache: array{enabled: bool, dir: string, prompt_caching: bool},
      * }
@@ -616,7 +748,7 @@ final class BundleConfigurationTest extends TestCase
      *     attacker_max_output_tokens?: int|null,
      *     reviewer_max_output_tokens?: int|null,
      *     provider_json_mode?: bool,
-     *     scan: array{included_paths: list<string>, respect_gitignore: bool, max_file_size_kb: int, import_sarif?: list<string>, custom_risk_patterns: array<string, array<string, array{regex: string, description: string}>>, secret_scrubbing: array{enabled: bool, additional_patterns: list<string>}},
+     *     scan: array{included_paths: list<string>, respect_gitignore: bool, include_tracked_ignored?: bool, include_dotfiles?: bool, max_file_size_kb: int, import_sarif?: list<string>, custom_risk_patterns: array<string, array<string, array{regex: string, description: string}>>, secret_scrubbing: array{enabled: bool, additional_patterns: list<string>}},
      *     audit: array{max_iterations: int|null, min_confidence: float, reviewer_batch_size: int, tools_enabled: bool, structured_collection?: bool, reviewer_structured_collection?: bool, stable_system_prompt?: bool, triage_memory?: bool, max_tool_iterations: int, reviewer_tools_enabled: bool, reviewer_max_tool_iterations: int, fail_on?: string, reviewer_max_concurrent: int|null, attacker_max_concurrent: int|null, static_prescan: array{enabled: bool, lean_mode: bool|null}, chunking: array{strategy: string}, poc_synthesis: array{enabled: bool|null, severity_floor: string}, fix_synthesis: array{enabled: bool, severity_floor: string}, code_slicing: array{enabled: bool|null, min_lines_before_slicing: int}, escalation: array{enabled: bool, cheap_model: string|null}, budget: array{max_tokens: int|null, max_cost_usd: float|null}, retry: array{max_attempts: int, initial_delay_ms: int, backoff_multiplier: float, jitter_ratio: float}, rate_limit: array{requests_per_minute: int|null, input_tokens_per_minute: int|null, output_tokens_per_minute: int|null}},
      *     cache: array{enabled: bool, dir: string, prompt_caching: bool},
      * }

@@ -11,7 +11,7 @@
 
 declare(strict_types=1);
 
-use Psr\Clock\ClockInterface;
+use Symfony\Component\Clock\Clock;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Validator\Validation;
@@ -47,11 +47,12 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Telemetry\TokenUsageR
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\EstimateAuditCostUseCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\ListScannedFilesUseCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\RunAuditUseCase;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\SinceClosurePreview;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Configuration\ToolsScope;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditBudget;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\RiskLevel;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilitySeverity;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\PipelineInterface;
-use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\StageInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\AdvisoryDatabaseInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\AttackerPromptBuilderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\AttackerSkillPromptRendererInterface;
@@ -79,7 +80,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\AuditedPr
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\ComposerAuditRunnerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\DeferredAdvisoryDatabase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\InMemoryAdvisoryDatabase;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\IsolatedComposerAuditRunner;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\LockfileHashedAdvisoryCache;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\LockfileHasher;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\SymfonyProcessComposerAuditRunner;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemAttackerCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemReviewerCache;
@@ -87,7 +90,10 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemTr
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\NullAttackerCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\NullReviewerCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\AttackerAgentDefinitionFactory;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\PricingPlatformPass;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\UnselectedPlatformsPass;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Diff\ProcessGitChangedFilesResolver;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\GitTrackedIgnoredFiles;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\NullSecretScrubber;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\ProjectFileScanner;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\RegexSecretScrubber;
@@ -103,7 +109,6 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TokenEstimator
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TokenEstimator\MiniMaxTokenEstimator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TokenEstimator\MistralTokenEstimator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TokenEstimator\OpenAiTokenEstimator;
-use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TokenEstimator\ProviderTokenEstimatorInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TokenEstimator\ResolvingTokenEstimator;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\TransientFailureClassifier;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Pricing\ModelsDevPricingProvider;
@@ -153,8 +158,10 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\JsonReportR
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\JunitReportRenderer;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\MarkdownReportRenderer;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportPackage;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportPathPrefix;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportRendererInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\SarifReportRenderer;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\NestingDepthGuard;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\PhpParserControllerAccessControlParser;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\PhpParserFormBindingParser;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\PhpParserVoterCapabilityParser;
@@ -165,12 +172,14 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Tool\RecordReviewT
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Tool\RecordVulnerabilityToolFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Tool\SymfonyToolRegistryFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommand;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommandDefaults;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditExitCodeResolver;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditExitCodeResolverInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditPresenter;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditPresenterInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Baseline;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineCommand;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineFilePathsHolder;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineMerger;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineMergerInterface;
@@ -189,6 +198,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Command\Mcp\McpServerFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Mcp\McpServerFactoryInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Mcp\McpTransportFactoryInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Mcp\StdioMcpTransportFactory;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\OutputFormat;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\ReportDiffer;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\ReportDifferInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\ReportFindingsLoader;
@@ -204,6 +214,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Command\TrendPresenter;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\TrendPresenterInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\UnpricedModelBudgetGuard;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\UnpricedModelBudgetGuardInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\WorkflowCommandNeutralizer;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\WorkflowCommandNeutralizerInterface;
 
 use function Symfony\Component\DependencyInjection\Loader\Configurator\inline_service;
 use function Symfony\Component\DependencyInjection\Loader\Configurator\param;
@@ -218,14 +230,6 @@ return static function (ContainerConfigurator $containerConfigurator): void {
             ->private();
 
     $defaultsConfigurator
-        ->instanceof(StageInterface::class)
-        ->tag('symfony_security_auditor.pipeline_stage');
-
-    $defaultsConfigurator
-        ->instanceof(ProviderTokenEstimatorInterface::class)
-        ->tag('symfony_security_auditor.token_estimator');
-
-    $defaultsConfigurator
         ->instanceof(ReportRendererInterface::class)
         ->tag('symfony_security_auditor.report_renderer');
 
@@ -235,8 +239,16 @@ return static function (ContainerConfigurator $containerConfigurator): void {
 
     $defaultsConfigurator->set(TokenUsageRecorder::class);
 
+    $containerConfigurator->parameters()->set(PricingPlatformPass::PARAMETER, null);
+    $containerConfigurator->parameters()->set(UnselectedPlatformsPass::PARAMETER, []);
+
     $defaultsConfigurator->set(ModelsDevPricingProvider::class)
-        ->args([service('logger'), '%kernel.cache_dir%/models-dev.json']);
+        ->args([
+            service('logger'),
+            '%kernel.cache_dir%/models-dev.json',
+            ModelsDevPricingProvider::CATALOG_PACKAGE,
+            param(PricingPlatformPass::PARAMETER),
+        ]);
     $defaultsConfigurator->alias(PricingProviderInterface::class, ModelsDevPricingProvider::class);
 
     $defaultsConfigurator->set(CostCalculator::class)
@@ -295,13 +307,17 @@ return static function (ContainerConfigurator $containerConfigurator): void {
             param('symfony_security_auditor.scan.max_file_size_kb'),
             null,
             service(SecretScrubberInterface::class),
+            service(GitTrackedIgnoredFiles::class)->ignoreOnInvalid(),
+            param('symfony_security_auditor.scan.include_dotfiles'),
         ]);
     $defaultsConfigurator->alias(ProjectFileScannerInterface::class, ProjectFileScanner::class);
 
+    $defaultsConfigurator->set(BaselineFilePathsHolder::class);
     $defaultsConfigurator->set(VulnerabilityFactory::class)
         ->args([
             service('logger')->ignoreOnInvalid(),
             inline_service(ValidatorInterface::class)->factory([Validation::class, 'createValidator']),
+            service(BaselineFilePathsHolder::class),
         ]);
     $defaultsConfigurator->set(ApiResourceAttackerSkill::class);
     $defaultsConfigurator->set(AuthenticatorAttackerSkill::class);
@@ -372,6 +388,9 @@ return static function (ContainerConfigurator $containerConfigurator): void {
         ]);
     $defaultsConfigurator->alias(ReviewerPromptBuilderInterface::class, ReviewerPromptBuilder::class);
 
+    $defaultsConfigurator->set(ReportPathPrefix::class)
+        ->args([param('symfony_security_auditor.audit.report_path_prefix')]);
+
     $defaultsConfigurator->set(ConsoleReportRenderer::class);
     $defaultsConfigurator->set(JsonReportRenderer::class);
     $defaultsConfigurator->set(SarifReportRenderer::class);
@@ -381,6 +400,10 @@ return static function (ContainerConfigurator $containerConfigurator): void {
     $defaultsConfigurator->set(GithubAnnotationsReportRenderer::class);
     $defaultsConfigurator->set(GithubCommentReportRenderer::class);
     $defaultsConfigurator->set(ExecutiveSummaryReportRenderer::class);
+
+    $defaultsConfigurator->set(WorkflowCommandNeutralizer::class)
+        ->factory([WorkflowCommandNeutralizer::class, 'fromEnvironment']);
+    $defaultsConfigurator->alias(WorkflowCommandNeutralizerInterface::class, WorkflowCommandNeutralizer::class);
 
     $defaultsConfigurator->set(ReportWriter::class)
         ->args([tagged_iterator('symfony_security_auditor.report_renderer')]);
@@ -456,6 +479,9 @@ return static function (ContainerConfigurator $containerConfigurator): void {
             service(GitChangedFilesResolverInterface::class),
         ]);
 
+    $defaultsConfigurator->set(NestingDepthGuard::class)
+        ->args([service('logger')]);
+
     $defaultsConfigurator->set(PhpParserControllerAccessControlParser::class);
     $defaultsConfigurator->alias(ControllerAccessControlParserInterface::class, PhpParserControllerAccessControlParser::class);
 
@@ -484,6 +510,12 @@ return static function (ContainerConfigurator $containerConfigurator): void {
             param('symfony_security_auditor.audit.since_closure'),
         ]);
 
+    $defaultsConfigurator->set(SinceClosurePreview::class)
+        ->args([
+            service(MappingStage::class),
+            service(DependencyExpansionStage::class),
+        ]);
+
     $defaultsConfigurator->set(AuditOrchestrator::class)
         ->args([
             service(AttackerAgentInterface::class),
@@ -492,6 +524,9 @@ return static function (ContainerConfigurator $containerConfigurator): void {
             inline_service(AuditLoopSettings::class)->args([
                 param('symfony_security_auditor.audit.max_iterations'),
                 param('symfony_security_auditor.audit.min_confidence'),
+                inline_service(ToolsScope::class)
+                    ->factory([ToolsScope::class, 'from'])
+                    ->args([param('symfony_security_auditor.audit.tools_scope')]),
             ]),
             service(ProgressReporterInterface::class),
         ]);
@@ -575,25 +610,35 @@ return static function (ContainerConfigurator $containerConfigurator): void {
 
     $defaultsConfigurator->set(SymfonyProcessComposerAuditRunner::class);
 
+    $defaultsConfigurator->set(IsolatedComposerAuditRunner::class)
+        ->args([service(SymfonyProcessComposerAuditRunner::class), service(Filesystem::class)]);
+
     $defaultsConfigurator->set(InMemoryAdvisoryDatabase::class);
+
+    $defaultsConfigurator->set(Clock::class)->autowire(false);
 
     $defaultsConfigurator->set(LockfileHashedAdvisoryCache::class)
         ->args([
-            service(SymfonyProcessComposerAuditRunner::class),
+            service(IsolatedComposerAuditRunner::class),
             param('symfony_security_auditor.cache.advisory_dir'),
             service(Filesystem::class),
             service('logger'),
-            service(ClockInterface::class),
+            service(Clock::class),
         ]);
 
     $defaultsConfigurator->set(AuditedProjectPathHolder::class)
         ->args([param('kernel.project_dir')]);
+
+    $defaultsConfigurator->set(LockfileHasher::class)
+        ->args([service(Filesystem::class), service('logger')]);
 
     $defaultsConfigurator->set(DeferredAdvisoryDatabase::class)
         ->args([
             service(ComposerAuditRunnerInterface::class),
             service(AuditedProjectPathHolder::class),
             service('logger'),
+            service(LockfileHasher::class),
+            service(Clock::class),
         ]);
 
     $defaultsConfigurator->set(SymfonyToolRegistryFactory::class)
@@ -667,12 +712,16 @@ return static function (ContainerConfigurator $containerConfigurator): void {
             param('symfony_security_auditor.audit.tools_enabled'),
             EstimateAuditCostUseCase::DEFAULT_TOOL_ROUND_TRIP_RATIO,
             param('symfony_security_auditor.audit.max_tool_iterations'),
+            service(AttackerPromptBuilderInterface::class),
+            service(MappingStage::class),
+            service(SinceClosurePreview::class),
         ]);
 
     $defaultsConfigurator->set(ListScannedFilesUseCase::class)
         ->args([
             service(ProjectFileScannerInterface::class),
             service(GitChangedFilesResolverInterface::class),
+            service(SinceClosurePreview::class),
         ]);
 
     $defaultsConfigurator->set(RunAuditUseCase::class)
@@ -715,6 +764,15 @@ return static function (ContainerConfigurator $containerConfigurator): void {
                 ->args([param('symfony_security_auditor.audit.fail_on')]),
             param('symfony_security_auditor.audit.poc_synthesis.enabled'),
             param('symfony_security_auditor.audit.fix_synthesis.enabled'),
+            inline_service(AuditCommandDefaults::class)->args([
+                param('symfony_security_auditor.audit.min_score'),
+                param('symfony_security_auditor.audit.fail_on_incomplete'),
+                inline_service(OutputFormat::class)
+                    ->factory([OutputFormat::class, 'from'])
+                    ->args([param('symfony_security_auditor.audit.format')]),
+                param('symfony_security_auditor.audit.output'),
+            ]),
+            service(BaselineFilePathsHolder::class),
         ])
         ->tag('console.command');
 
@@ -743,6 +801,13 @@ return static function (ContainerConfigurator $containerConfigurator): void {
             service(RunAuditUseCase::class),
             service(JsonReportRenderer::class),
             service(AuditedProjectPathHolder::class),
+            service(BaselineProcessorInterface::class),
+            service(FindingTypeFilterInterface::class),
+            service(ReviewerFeedbackHolder::class),
+            service(UnpricedModelBudgetGuardInterface::class),
+            service('logger'),
+            service(BaselineFilePathsHolder::class),
+            service(ListScannedFilesUseCase::class),
         ]);
 
     $defaultsConfigurator->set(McpServerFactory::class)

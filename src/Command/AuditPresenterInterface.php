@@ -24,9 +24,29 @@ interface AuditPresenterInterface
     public function header(SymfonyStyle $symfonyStyle, string $projectPath): void;
 
     /**
+     * Says that the run audits the project enclosing the directory named,
+     * which is not a project, narrowed to the paths it names.
+     *
+     * @param list<string> $scanPaths project-relative, none when the project itself was named
+     */
+    public function enclosingProject(SymfonyStyle $symfonyStyle, string $folder, string $projectPath, array $scanPaths): void;
+
+    /**
      * @param list<string> $configNotices
      */
     public function preflightWarnings(SymfonyStyle $symfonyStyle, bool $secretScrubbingEnabled, array $configNotices = []): void;
+
+    /**
+     * Says that a `--min-score` below the 0 the normalized score starts at is
+     * honored as given, and gates no run.
+     */
+    public function minScoreBelowRange(SymfonyStyle $symfonyStyle, int $minScore): void;
+
+    /**
+     * Says that a `--min-score` above the 100 the normalized score ends at is
+     * honored as given, and fails every run.
+     */
+    public function minScoreAboveRange(SymfonyStyle $symfonyStyle, int $minScore): void;
 
     public function unsupportedModelWarnings(SymfonyStyle $symfonyStyle, AuditReport $auditReport): void;
 
@@ -45,11 +65,37 @@ interface AuditPresenterInterface
      */
     public function scannedFiles(SymfonyStyle $symfonyStyle, array $projectFiles): void;
 
+    /**
+     * Says that a scan listed no file, and under which project and `--path`
+     * values it looked, so a wrong folder or path shows at a glance.
+     *
+     * @param list<string> $scanPaths
+     */
+    public function noFilesMatched(SymfonyStyle $symfonyStyle, string $projectPath, array $scanPaths): void;
+
     public function scannedFilesHint(SymfonyStyle $symfonyStyle, int $fileCount): void;
 
     public function error(SymfonyStyle $symfonyStyle, Throwable $throwable): void;
 
-    public function result(SymfonyStyle $symfonyStyle, AuditReport $auditReport, int $exitCode): void;
+    /**
+     * @param string $failOnIncompleteSetting the flag or configuration key that failed an incomplete run, named when it did
+     */
+    public function result(SymfonyStyle $symfonyStyle, AuditReport $auditReport, int $exitCode, string $failOnIncompleteSetting): void;
+
+    /**
+     * Says so when the report could not analyze every file — and nothing
+     * otherwise. `result()` prints it itself; a run that shows no result — its
+     * report went to stdout, or it generated a baseline — calls it directly.
+     *
+     * @param string $failOnIncompleteSetting the flag or configuration key that failed an incomplete run, named when it did
+     */
+    public function incompleteRunNotice(SymfonyStyle $symfonyStyle, AuditReport $auditReport, int $exitCode, string $failOnIncompleteSetting): void;
 
     public function baselineGenerated(SymfonyStyle $symfonyStyle, string $path, int $fingerprintCount): void;
+
+    /**
+     * Says that a run with no verdict left the baseline at `$path` as it was,
+     * and why the run has none.
+     */
+    public function baselineKept(SymfonyStyle $symfonyStyle, string $path, AuditReport $auditReport): void;
 }

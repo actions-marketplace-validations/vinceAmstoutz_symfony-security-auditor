@@ -17,7 +17,10 @@ use Ergebnis\PHPUnit\SlowTestDetector\Attribute\MaximumDuration;
 use Override;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
+use ReflectionClass;
 use stdClass;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputDefinition;
 use Symfony\Component\Console\Tester\CommandTester;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\Filesystem\Filesystem;
@@ -25,10 +28,14 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\N
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandaloneConfig;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\StandalonePlatformConfig;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommand;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommandHelp;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\Mcp\McpServeCommand;
 use VinceAmstoutz\SymfonySecurityAuditor\Standalone\Exception\AmbiguousPlatformException;
 use VinceAmstoutz\SymfonySecurityAuditor\Standalone\Exception\MissingBundleExtensionException;
+use VinceAmstoutz\SymfonySecurityAuditor\Standalone\Exception\ProviderBridgeException;
 use VinceAmstoutz\SymfonySecurityAuditor\Standalone\Exception\UnknownPlatformProviderException;
 use VinceAmstoutz\SymfonySecurityAuditor\Standalone\Exception\UnresolvableAuditCommandException;
+use VinceAmstoutz\SymfonySecurityAuditor\Standalone\Exception\UnresolvableMcpServeCommandException;
 use VinceAmstoutz\SymfonySecurityAuditor\Standalone\StandaloneConsoleCommandFactory;
 use VinceAmstoutz\SymfonySecurityAuditor\Standalone\StandaloneContainerFactory;
 
@@ -54,6 +61,7 @@ final class StandaloneConsoleCommandFactoryTest extends TestCase
      * @throws UnknownPlatformProviderException
      * @throws UnresolvableAuditCommandException
      * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
      */
     #[RunInSeparateProcess]
     #[MaximumDuration(4000)]
@@ -76,6 +84,7 @@ final class StandaloneConsoleCommandFactoryTest extends TestCase
      * @throws UnknownPlatformProviderException
      * @throws UnresolvableAuditCommandException
      * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
      */
     #[RunInSeparateProcess]
     #[MaximumDuration(4000)]
@@ -95,6 +104,102 @@ final class StandaloneConsoleCommandFactoryTest extends TestCase
     }
 
     /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws UnresolvableMcpServeCommandException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_wraps_the_invokable_mcp_server_command_under_its_name(): void
+    {
+        $containerBuilder = (new StandaloneContainerFactory())->create(
+            new StandaloneConfig([], new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]])),
+            $this->cacheDir,
+        );
+
+        self::assertSame('mcp:serve', (new StandaloneConsoleCommandFactory())->createMcpServer($containerBuilder)->getName());
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws UnresolvableAuditCommandException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_describes_the_audit_command_exactly_as_the_container_builds_it(): void
+    {
+        $command = (new StandaloneConsoleCommandFactory())->create($this->containerBuilder());
+
+        self::assertEquals($this->describedSurface($command), $this->describedSurface((new StandaloneConsoleCommandFactory())->describe(AuditCommand::class)));
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws UnresolvableMcpServeCommandException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_it_describes_the_mcp_server_command_exactly_as_the_container_builds_it(): void
+    {
+        $command = (new StandaloneConsoleCommandFactory())->createMcpServer($this->containerBuilder());
+
+        self::assertEquals($this->describedSurface($command), $this->describedSurface((new StandaloneConsoleCommandFactory())->describe(McpServeCommand::class)));
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws UnresolvableAuditCommandException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    #[RunInSeparateProcess]
+    #[MaximumDuration(4000)]
+    public function test_the_audit_command_it_builds_carries_the_standalone_help(): void
+    {
+        self::assertSame(AuditCommandHelp::standalone(), (new StandaloneConsoleCommandFactory())->create($this->containerBuilder())->getHelp());
+    }
+
+    public function test_it_describes_the_audit_command_with_the_standalone_help(): void
+    {
+        self::assertSame(AuditCommandHelp::standalone(), (new StandaloneConsoleCommandFactory())->describe(AuditCommand::class)->getHelp());
+    }
+
+    public function test_it_describes_the_mcp_server_command_with_its_own_help(): void
+    {
+        self::assertSame(
+            (new Command(null, (new ReflectionClass(McpServeCommand::class))->newInstanceWithoutConstructor()))->getHelp(),
+            (new StandaloneConsoleCommandFactory())->describe(McpServeCommand::class)->getHelp(),
+        );
+    }
+
+    /**
+     * @throws UnresolvableMcpServeCommandException
+     */
+    public function test_it_rejects_a_container_whose_mcp_server_service_is_not_the_mcp_server_command(): void
+    {
+        $this->expectException(UnresolvableMcpServeCommandException::class);
+
+        $containerBuilder = new ContainerBuilder();
+        $containerBuilder->register(McpServeCommand::class, stdClass::class)->setPublic(true);
+        $containerBuilder->compile(true);
+
+        (new StandaloneConsoleCommandFactory())->createMcpServer($containerBuilder);
+    }
+
+    /**
      * @throws UnresolvableAuditCommandException
      */
     public function test_it_rejects_a_container_whose_audit_service_is_not_the_audit_command(): void
@@ -106,5 +211,28 @@ final class StandaloneConsoleCommandFactoryTest extends TestCase
         $containerBuilder->compile(true);
 
         (new StandaloneConsoleCommandFactory())->create($containerBuilder);
+    }
+
+    /**
+     * @throws AmbiguousPlatformException
+     * @throws MissingBundleExtensionException
+     * @throws UnknownPlatformProviderException
+     * @throws NonLocalPlatformEndpointException
+     * @throws ProviderBridgeException
+     */
+    private function containerBuilder(): ContainerBuilder
+    {
+        return (new StandaloneContainerFactory())->create(
+            new StandaloneConfig([], new StandalonePlatformConfig(['generic' => ['default' => ['base_url' => 'http://localhost']]])),
+            $this->cacheDir,
+        );
+    }
+
+    /**
+     * @return array{?string, array<mixed>, string, string, InputDefinition}
+     */
+    private function describedSurface(Command $command): array
+    {
+        return [$command->getName(), $command->getAliases(), $command->getDescription(), $command->getHelp(), $command->getDefinition()];
     }
 }

@@ -22,6 +22,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Diff\ProcessGitCha
 
 final class ProcessGitChangedFilesResolverTest extends TestCase
 {
+    private const int RACY_TIMESTAMP = 1_700_000_000;
+
     private string $tmpDir;
 
     private Filesystem $filesystem;
@@ -135,6 +137,21 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
     /**
      * @throws GitChangedFilesUnavailableException
      */
+    public function test_it_names_a_changed_file_whose_name_is_not_valid_utf8_the_way_the_scanner_does(): void
+    {
+        $this->initRepo();
+        $this->commit('src/Foo.php', '<?php // initial', 'init');
+        $this->createBranch('feature');
+        $this->commit("src/Bar\xFF.php", '<?php // odd name', 'add odd name');
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'main');
+
+        self::assertSame(['src/Barÿ.php'], $changed);
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
     public function test_it_includes_a_changed_file_whose_name_contains_a_double_quote(): void
     {
         $this->initRepo();
@@ -150,6 +167,55 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
     /**
      * @throws GitChangedFilesUnavailableException
      */
+    public function test_it_lists_a_committed_file_that_replaced_a_symlink(): void
+    {
+        $this->initRepo();
+        $this->commit('src/AController.php', '<?php // a', 'init');
+        $this->commitSymlink('src/BController.php', 'AController.php');
+        $this->createBranch('feature');
+        $this->replaceSymlinkWithFile('src/BController.php', '<?php // b');
+        $this->stage('src/BController.php');
+        $this->runGit(['git', 'commit', '-m', 'replace the link']);
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'main');
+
+        self::assertSame(['src/BController.php'], $changed);
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_lists_a_staged_file_that_replaced_a_symlink(): void
+    {
+        $this->initRepo();
+        $this->commit('src/AController.php', '<?php // a', 'init');
+        $this->commitSymlink('src/BController.php', 'AController.php');
+        $this->replaceSymlinkWithFile('src/BController.php', '<?php // b');
+        $this->stage('src/BController.php');
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'HEAD');
+
+        self::assertSame(['src/BController.php'], $changed);
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_lists_an_unstaged_file_that_replaced_a_symlink(): void
+    {
+        $this->initRepo();
+        $this->commit('src/AController.php', '<?php // a', 'init');
+        $this->commitSymlink('src/BController.php', 'AController.php');
+        $this->replaceSymlinkWithFile('src/BController.php', '<?php // b');
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'HEAD');
+
+        self::assertSame(['src/BController.php'], $changed);
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
     public function test_it_includes_uncommitted_changes_against_head(): void
     {
         $this->initRepo();
@@ -160,6 +226,50 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
         $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'HEAD');
 
         self::assertContains('src/Bar.php', $changed);
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_includes_a_new_file_that_was_never_staged(): void
+    {
+        $this->initRepo();
+        $this->commit('src/Foo.php', '<?php // initial', 'init');
+        $this->writeFile('src/Controller/NewController.php', '<?php // never added');
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'HEAD');
+
+        self::assertSame(['src/Controller/NewController.php'], $changed);
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_leaves_out_a_new_file_a_gitignore_excludes(): void
+    {
+        $this->initRepo();
+        $this->commit('.gitignore', "/var/\n", 'ignore var');
+        $this->writeFile('var/cache/Compiled.php', '<?php // ignored');
+        $this->writeFile('src/New.php', '<?php // never added');
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'HEAD');
+
+        self::assertSame(['src/New.php'], $changed);
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_lists_a_new_file_relative_to_an_audited_subdirectory_and_not_one_outside_it(): void
+    {
+        $this->initRepo();
+        $this->commit('src/Foo.php', '<?php // initial', 'init');
+        $this->writeFile('src/Sub/New.php', '<?php // never added');
+        $this->writeFile('other/Outside.php', '<?php // outside the audited directory');
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir.'/src', 'HEAD');
+
+        self::assertSame(['Sub/New.php'], $changed);
     }
 
     /**
@@ -229,6 +339,41 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
     }
 
     /**
+     * Git refuses a repository it considers unsafe — owned by another user, or
+     * using an extension it does not know — with its own reason and exit code
+     * 128: that reason, not a claim that the ref is missing, is what the user
+     * has to act on.
+     *
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_surfaces_the_reason_git_refuses_the_repository_instead_of_blaming_the_ref(): void
+    {
+        $this->initRepo();
+        $this->commit('src/Foo.php', '<?php', 'init');
+        $this->makeGitRefuseTheRepository();
+
+        $this->expectException(GitChangedFilesUnavailableException::class);
+        $this->expectExceptionMessageMatches('/^Git refused the repository of "'.preg_quote($this->tmpDir, '/').'": .*foobar/s');
+
+        (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'main');
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_surfaces_the_reason_git_refuses_the_repository_of_an_audited_subdirectory(): void
+    {
+        $this->initRepo();
+        $this->commit('src/Foo.php', '<?php', 'init');
+        $this->makeGitRefuseTheRepository();
+
+        $this->expectException(GitChangedFilesUnavailableException::class);
+        $this->expectExceptionMessageMatches('/^Git refused the repository of "'.preg_quote($this->tmpDir.'/src', '/').'": .*foobar/s');
+
+        (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir.'/src', 'main');
+    }
+
+    /**
      * @throws GitChangedFilesUnavailableException
      */
     public function test_it_throws_for_a_path_inside_the_git_directory_not_the_work_tree(): void
@@ -259,6 +404,38 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
 
         self::assertContains('src/Bar.php', $changed);
         self::assertNotContains('src/Foo.php', $changed);
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_lists_the_changed_files_although_a_file_is_named_head(): void
+    {
+        $this->initRepo();
+        $this->commit('src/A.php', '<?php', 'init');
+        $this->createBranch('feature');
+        $this->commit('HEAD', '', 'add a file named like the head');
+        $this->commit('src/B.php', '<?php', 'add b');
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'main');
+
+        self::assertSame(['HEAD', 'src/B.php'], $changed);
+    }
+
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_lists_the_changed_files_although_a_file_is_named_like_the_revision_range(): void
+    {
+        $this->initRepo();
+        $this->commit('src/A.php', '<?php', 'init');
+        $this->createBranch('feature');
+        $this->commit('main...HEAD', '', 'add a file named like the range');
+        $this->commit('src/B.php', '<?php', 'add b');
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'main');
+
+        self::assertSame(['main...HEAD', 'src/B.php'], $changed);
     }
 
     /**
@@ -329,6 +506,28 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
     }
 
     /**
+     * Listing the untracked files consults the same `core.fsmonitor` hook, so a
+     * repo that declares one runs its command on a bare `git ls-files
+     * --others` too.
+     *
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_does_not_execute_the_audited_repos_fsmonitor_hook_while_listing_untracked_files(): void
+    {
+        $this->initRepo();
+        $this->commit('src/Foo.php', '<?php // initial', 'init');
+
+        $marker = $this->tmpDir.'-fsmonitor-pwned';
+        $this->runGit(['git', 'config', 'core.fsmonitor', \sprintf('sh -c "touch %s"', $marker)]);
+        $this->writeFile('src/New.php', '<?php // never added');
+
+        $changed = (new ProcessGitChangedFilesResolver())->changedSince($this->tmpDir, 'HEAD');
+
+        self::assertSame(['src/New.php'], $changed);
+        self::assertFileDoesNotExist($marker);
+    }
+
+    /**
      * `core.fsmonitor=` (added above) only closes one config-driven command
      * hook. A `.gitattributes` `filter=` assignment plus a matching
      * `filter.<name>.clean` command in the same untrusted `.git/config`
@@ -360,6 +559,35 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
     }
 
     /**
+     * A checkout shipped with its own `.git` directory — an archive, a build
+     * context — can carry an index whose entries git finds racily clean once
+     * extracted and a `.git/config` that relaxes the stat check to what the
+     * extraction keeps, so `git diff-files` re-hashes the file through the
+     * repository's own clean filter.
+     *
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_does_not_execute_the_clean_filter_of_an_extracted_checkout_whose_index_is_racily_clean(): void
+    {
+        $this->initRepo();
+        $this->writeFile('.gitattributes', '*.php filter=dangerous');
+        $this->writeFile('src/Foo.php', '<?php // committed');
+        touch($this->tmpDir.'/src/Foo.php', self::RACY_TIMESTAMP);
+        $this->stage('.');
+        $this->runGit(['git', 'commit', '-m', 'init']);
+
+        $marker = $this->tmpDir.'-clean-filter-pwned';
+        $this->runGit(['git', 'config', 'filter.dangerous.clean', \sprintf('sh -c "touch %s; cat"', $marker)]);
+        $this->runGit(['git', 'config', 'core.checkStat', 'minimal']);
+        $this->runGit(['git', 'config', 'core.trustctime', 'false']);
+        touch($this->tmpDir.'/.git/index', self::RACY_TIMESTAMP);
+
+        (new ProcessGitChangedFilesResolver())->changedSince($this->extractedCheckout(), 'HEAD');
+
+        self::assertFileDoesNotExist($marker);
+    }
+
+    /**
      * @throws GitChangedFilesUnavailableException
      */
     public function test_it_wraps_a_git_diff_timeout_instead_of_leaking_a_raw_process_exception(): void
@@ -378,6 +606,29 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
         $processGitChangedFilesResolver->changedSince($this->tmpDir, 'main');
     }
 
+    /**
+     * @throws GitChangedFilesUnavailableException
+     */
+    public function test_it_gives_every_git_diff_the_configured_timeout(): void
+    {
+        $this->initRepo();
+        $this->commit('src/Foo.php', '<?php', 'init');
+        $processes = [];
+
+        $processGitChangedFilesResolver = new ProcessGitChangedFilesResolver(
+            timeoutSeconds: 7.5,
+            gitDiffProcessFactory: static function (array $argv, string $projectPath) use (&$processes): Process {
+                $processes[] = $process = Process::fromShellCommandline('true');
+
+                return $process;
+            },
+        );
+
+        $processGitChangedFilesResolver->changedSince($this->tmpDir, 'main');
+
+        self::assertSame([7.5, 7.5, 7.5, 7.5], array_map(static fn (Process $process): ?float => $process->getTimeout(), $processes));
+    }
+
     #[Override]
     protected function setUp(): void
     {
@@ -392,6 +643,7 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
         $this->filesystem->remove($this->tmpDir);
         $this->filesystem->remove($this->tmpDir.'-fsmonitor-pwned');
         $this->filesystem->remove($this->tmpDir.'-clean-filter-pwned');
+        $this->filesystem->remove([$this->tmpDir.'-checkout.tar', $this->tmpDir.'-extracted']);
     }
 
     private function initRepo(): void
@@ -406,9 +658,39 @@ final class ProcessGitChangedFilesResolverTest extends TestCase
         $this->runGit(['git', 'commit', '-m', $message]);
     }
 
+    private function commitSymlink(string $relativePath, string $target): void
+    {
+        $this->filesystem->symlink($target, $this->tmpDir.'/'.$relativePath);
+        $this->stage($relativePath);
+        $this->runGit(['git', 'commit', '-m', 'link']);
+    }
+
+    private function replaceSymlinkWithFile(string $relativePath, string $content): void
+    {
+        $this->filesystem->remove($this->tmpDir.'/'.$relativePath);
+        $this->writeFile($relativePath, $content);
+    }
+
+    private function makeGitRefuseTheRepository(): void
+    {
+        $this->runGit(['git', 'config', 'extensions.foobar', 'true']);
+        $this->runGit(['git', 'config', 'core.repositoryformatversion', '1']);
+    }
+
     private function createBranch(string $name): void
     {
         $this->runGit(['git', 'checkout', '-b', $name]);
+    }
+
+    private function extractedCheckout(): string
+    {
+        $archive = $this->tmpDir.'-checkout.tar';
+        $extracted = $this->tmpDir.'-extracted';
+        $this->filesystem->mkdir($extracted);
+        (new Process(['tar', '-cf', $archive, '-C', $this->tmpDir, '.']))->mustRun();
+        (new Process(['tar', '-xf', $archive, '-C', $extracted]))->mustRun();
+
+        return $extracted;
     }
 
     private function writeFile(string $relativePath, string $content): void

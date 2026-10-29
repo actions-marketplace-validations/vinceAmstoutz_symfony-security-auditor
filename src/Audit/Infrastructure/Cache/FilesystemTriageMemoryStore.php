@@ -25,6 +25,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ReviewerFeedbackProvi
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\TriageMemoryRecorderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\AuditedProjectPathHolder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\Exception\InvalidCacheConfigurationException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\PrivateFileWriter;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\SymlinkGuard;
 
 use function Symfony\Component\String\u;
 
@@ -117,7 +119,7 @@ final readonly class FilesystemTriageMemoryStore implements ReviewerFeedbackProv
             $entry = ['type' => $type, 'file' => $file, 'title' => $title, 'line' => $line, 'reason' => $this->cappedReason($reason)];
             $entries = $this->insertIfAbsent($this->readEntries(), $entry);
             $encoded = json_encode(\array_slice($entries, -$this->maxEntries), \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES);
-            $this->filesystem->dumpFile($path, $encoded);
+            PrivateFileWriter::write($this->filesystem, $path, $encoded);
         } catch (Throwable $throwable) {
             $this->logger->warning('Failed to write triage memory entry', [
                 'path' => $path,
@@ -151,6 +153,16 @@ final readonly class FilesystemTriageMemoryStore implements ReviewerFeedbackProv
             return [];
         }
 
+        return $this->arrayEntriesOf($decoded);
+    }
+
+    /**
+     * @param array<array-key, mixed> $decoded
+     *
+     * @return list<array<array-key, mixed>>
+     */
+    private function arrayEntriesOf(array $decoded): array
+    {
         $entries = [];
         foreach ($decoded as $entry) {
             if (\is_array($entry)) {
@@ -259,10 +271,12 @@ final readonly class FilesystemTriageMemoryStore implements ReviewerFeedbackProv
      * Mirrors {@see FilesystemReviewerCache}'s symlink guard: this path is
      * config-fixed rather than content-derived, but the same defense — never
      * read or write through a symlink — is cheap to keep as a matter of
-     * consistent practice.
+     * consistent practice. The configured `cache.dir`, this memory's parent,
+     * is the trusted root, as it is for the caches: a symlinked
+     * `triage-memory/` is still refused.
      */
     private function isSymlinkedPath(string $path): bool
     {
-        return is_link($path) || is_link(\dirname($path));
+        return SymlinkGuard::isThroughSymlink($path, \dirname($this->directory));
     }
 }

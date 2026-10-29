@@ -29,7 +29,24 @@ enum SecretPatternLabel: string
     case ConnectionUri = 'connection_uri';
     case BearerToken = 'bearer_token';
     case BasicAuthorization = 'basic_authorization';
+    case AuthorizationHeader = 'authorization_header';
+    case QueryCredential = 'query_credential';
     case OpenAiApiKey = 'openai_api_key';
     case SlackWebhookUrl = 'slack_webhook_url';
+    case GitlabToken = 'gitlab_token';
+    case HuggingFaceToken = 'huggingface_token';
+    case NpmToken = 'npm_token';
+    case SendgridApiKey = 'sendgrid_api_key';
+    case PypiToken = 'pypi_token';
+    case DiscordWebhookUrl = 'discord_webhook_url';
+    case XmlParameter = 'xml_parameter';
+    case CallArgument = 'call_argument';
+    case BlockScalar = 'block_scalar';
+    case SecretsVaultKey = 'secrets_vault_key';
     case Unscannable = 'unscannable';
+
+    public function placeholder(): string
+    {
+        return \sprintf('***REDACTED:%s***', $this->value);
+    }
 }

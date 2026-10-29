@@ -13,6 +13,8 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Progress;
 
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\TerminalTextSanitizer;
+
 /**
  * Typed, defensive reads of a progress-event context array. Reporters never
  * trust the payload shape (a custom emitter may pass anything), so a missing or
@@ -22,6 +24,8 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Progress;
  */
 final readonly class ProgressContext
 {
+    private const array NO_VERDICT_REVIEW_STATUSES = ['errored', 'aborted'];
+
     /** @param array<string, mixed> $context */
     public static function int(array $context, string $key): int
     {
@@ -55,5 +59,44 @@ final readonly class ProgressContext
         }
 
         return \sprintf(' (%ds)', (int) round($value));
+    }
+
+    /**
+     * Renders the reason a chunk failed as a trailing " — reason" suffix on one
+     * line, or an empty string when the event names none.
+     *
+     * @param array<string, mixed> $context
+     */
+    public static function failureReasonSuffix(array $context): string
+    {
+        $reason = trim(TerminalTextSanitizer::collapseToSingleLine(self::string($context, 'reason')));
+
+        return '' === $reason ? '' : \sprintf(' — %s', $reason);
+    }
+
+    /**
+     * Whether a `review.finding.reviewed` event reports a review that reached
+     * no verdict — its call failed, or an abort stopped it — rather than a
+     * finding the reviewer validated or rejected.
+     *
+     * @param array<string, mixed> $context
+     */
+    public static function reviewReachedNoVerdict(array $context): bool
+    {
+        return \in_array(self::string($context, 'status'), self::NO_VERDICT_REVIEW_STATUSES, true);
+    }
+
+    /**
+     * The tally of a `review.completed` event: the findings validated and
+     * rejected, then how many reviews failed when some did.
+     *
+     * @param array<string, mixed> $context
+     */
+    public static function reviewTally(array $context): string
+    {
+        $tally = \sprintf('%d validated, %d rejected', self::int($context, 'accepted'), self::int($context, 'rejected'));
+        $failed = self::int($context, 'failed');
+
+        return 0 === $failed ? $tally : \sprintf('%s, %d failed', $tally, $failed);
     }
 }

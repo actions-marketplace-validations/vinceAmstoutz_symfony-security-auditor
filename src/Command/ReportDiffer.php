@@ -29,14 +29,99 @@ final readonly class ReportDiffer implements ReportDifferInterface
     #[Override]
     public function diff(string $previousReportPath, string $currentReportPath): ReportDiff
     {
-        $previousFindings = $this->indexByFingerprint($this->reportFindingsLoader->load($previousReportPath));
-        $currentFindings = $this->indexByFingerprint($this->reportFindingsLoader->load($currentReportPath));
+        return $this->compare(
+            $this->reportFindingsLoader->load($previousReportPath),
+            $this->reportFindingsLoader->load($currentReportPath),
+        );
+    }
+
+    #[Override]
+    public function diffSeries(array $reportPaths): array
+    {
+        $reportDiffs = [];
+        $previousReport = null;
+        foreach ($reportPaths as $reportPath) {
+            $currentReport = $this->reportFindingsLoader->load($reportPath);
+            if ($previousReport instanceof LoadedReport) {
+                $reportDiffs[] = $this->compare($previousReport, $currentReport);
+            }
+
+            $previousReport = $currentReport;
+        }
+
+        return $reportDiffs;
+    }
+
+    private function compare(LoadedReport $loadedReport, LoadedReport $currentReport): ReportDiff
+    {
+        $previousFindings = $this->indexByFingerprint($loadedReport->findings);
+        $currentFindings = $this->indexByFingerprint($currentReport->findings);
+
+        [$suppressed, $disappeared] = $this->partitionBySuppression($this->only($previousFindings, $currentFindings), $currentReport->suppressedFingerprints);
+        [$fixed, $unverified] = $this->partitionByAnalysis($disappeared, $currentReport);
 
         return new ReportDiff(
             $this->only($currentFindings, $previousFindings),
-            $this->only($previousFindings, $currentFindings),
+            $fixed,
             $this->intersect($currentFindings, $previousFindings),
+            [...$suppressed, ...$unverified],
         );
+    }
+
+    /**
+     * A finding the current run found again and left out of its report —
+     * accepted by the baseline, or muted by type — is not fixed. Each
+     * fingerprint the report lists as suppressed shelters one disappeared
+     * finding, the way a baseline entry covers one finding.
+     *
+     * @param list<DiffFinding> $disappeared
+     * @param list<string>      $suppressedFingerprints
+     *
+     * @return array{list<DiffFinding>, list<DiffFinding>}
+     */
+    private function partitionBySuppression(array $disappeared, array $suppressedFingerprints): array
+    {
+        $credits = array_count_values($suppressedFingerprints);
+        $suppressed = [];
+        $remaining = [];
+        foreach ($disappeared as $finding) {
+            if (\array_key_exists($finding->fingerprint, $credits) && $credits[$finding->fingerprint] > 0) {
+                --$credits[$finding->fingerprint];
+                $suppressed[] = $finding;
+
+                continue;
+            }
+
+            $remaining[] = $finding;
+        }
+
+        return [$suppressed, $remaining];
+    }
+
+    /**
+     * A finding that disappeared from a file the current run never finished
+     * analyzing, or never looked at, is not fixed — nobody looked — so it is
+     * kept apart from the ones whose file was analyzed and came back clean.
+     *
+     * @param list<DiffFinding> $disappeared
+     *
+     * @return array{list<DiffFinding>, list<DiffFinding>}
+     */
+    private function partitionByAnalysis(array $disappeared, LoadedReport $loadedReport): array
+    {
+        $fixed = [];
+        $unverified = [];
+        foreach ($disappeared as $finding) {
+            if ($loadedReport->vouchesForAbsenceIn($finding->file)) {
+                $fixed[] = $finding;
+
+                continue;
+            }
+
+            $unverified[] = $finding;
+        }
+
+        return [$fixed, $unverified];
     }
 
     /**
@@ -56,7 +141,9 @@ final readonly class ReportDiffer implements ReportDifferInterface
     {
         $result = [];
         foreach ($findings as $fingerprint => $group) {
-            $result = [...$result, ...\array_slice($group, \count($excluded[$fingerprint] ?? []))];
+            foreach (\array_slice($group, \count($excluded[$fingerprint] ?? [])) as $finding) {
+                $result[] = $finding;
+            }
         }
 
         return $result;
@@ -72,7 +159,9 @@ final readonly class ReportDiffer implements ReportDifferInterface
     {
         $result = [];
         foreach ($findings as $fingerprint => $group) {
-            $result = [...$result, ...\array_slice($group, 0, \count($other[$fingerprint] ?? []))];
+            foreach (\array_slice($group, 0, \count($other[$fingerprint] ?? [])) as $finding) {
+                $result[] = $finding;
+            }
         }
 
         return $result;

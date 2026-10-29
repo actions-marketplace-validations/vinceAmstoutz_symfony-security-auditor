@@ -33,6 +33,8 @@ final readonly class RegexCodeSlicer implements CodeSlicerInterface
 {
     public const int DEFAULT_MIN_LINES_BEFORE_SLICING = 80;
 
+    public const int CACHE_VERSION = 1;
+
     private const string ELIDED_PLACEHOLDER = '// elided';
 
     public function __construct(
@@ -68,7 +70,7 @@ final readonly class RegexCodeSlicer implements CodeSlicerInterface
 
             $heredocIdentifier = $this->heredocLineTracker->identifierOpenedBy($blockCommentState['line']);
             $retain = $this->lineRetentionDecider->isRetained($line, new LineRetentionContext($openParenDepth, null !== $heredocIdentifier));
-            $output[] = $retain ? $line : self::ELIDED_PLACEHOLDER;
+            $output[] = $this->retainedOrElided($line, $retain);
 
             if (null !== $heredocIdentifier) {
                 $openHeredocIdentifier = $heredocIdentifier;
@@ -80,6 +82,11 @@ final readonly class RegexCodeSlicer implements CodeSlicerInterface
         }
 
         return implode("\n", $output);
+    }
+
+    private function retainedOrElided(string $line, bool $retain): string
+    {
+        return $retain ? $line : self::ELIDED_PLACEHOLDER;
     }
 
     private function shouldSlice(ProjectFile $projectFile): bool

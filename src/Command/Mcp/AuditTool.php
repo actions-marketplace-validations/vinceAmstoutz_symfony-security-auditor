@@ -13,43 +13,161 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Command\Mcp;
 
+use Mcp\Exception\ToolCallException;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Symfony\Component\Filesystem\Path;
+use Throwable;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\AuditAbortedByBudgetException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\AuditAbortedByProviderException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\AuditAbortedExceptionInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\ListScannedFilesUseCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\UseCase\RunAuditUseCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditContextException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditCostException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidTokenUsageException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditReport;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\AuditedProjectPathHolder;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\ProjectFileScanner;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\Reviewer\ReviewerFeedbackHolder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportRendererInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditTarget;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineFilePathsHolder;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\BaselineProcessorInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\AuditWithoutVerdictException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\InvalidProjectPathException;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\ScanPathOutsideProjectException;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\FindingTypeFilterInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\ScanPathResolver;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\UnpricedModelBudgetGuardInterface;
 
 /** @internal not part of the BC promise — the MCP tool *name* (`audit`) is public, but the PHP class itself is for internal use only. */
 final readonly class AuditTool
 {
+    private const string FAILURE_WITH_PARTIAL_REPORT = "%s\n\nPartial report of the run that stopped early:\n%s";
+
     public function __construct(
         private RunAuditUseCase $runAuditUseCase,
         private ReportRendererInterface $reportRenderer,
         private AuditedProjectPathHolder $auditedProjectPathHolder,
+        private BaselineProcessorInterface $baselineProcessor,
+        private FindingTypeFilterInterface $findingTypeFilter,
+        private ReviewerFeedbackHolder $reviewerFeedbackHolder,
+        private UnpricedModelBudgetGuardInterface $unpricedModelBudgetGuard,
+        private LoggerInterface $logger = new NullLogger(),
+        private BaselineFilePathsHolder $baselineFilePathsHolder = new BaselineFilePathsHolder(),
+        private ListScannedFilesUseCase $listScannedFilesUseCase = new ListScannedFilesUseCase(new ProjectFileScanner(new NullLogger())),
     ) {}
 
     /**
-     * @throws AuditAbortedByBudgetException
-     * @throws AuditAbortedByProviderException
-     * @throws InvalidAuditContextException
-     * @throws InvalidAuditCostException
-     * @throws InvalidProjectPathException
-     * @throws InvalidTokenUsageException
+     * `mcp/sdk` answers a tool that throws anything but its own
+     * `ToolCallException` with a bare "Error while executing tool", so every
+     * failure — a relative path, an exhausted budget, a refused credential, a
+     * run with no verdict — is rethrown as one, and its reason reaches the
+     * client that asked. A run a budget cap or a provider failure stopped
+     * keeps the findings it had validated: its reason is followed by the
+     * partial report, as `audit:run` still writes it.
+     *
+     * @throws ToolCallException
      */
     public function audit(string $path): string
+    {
+        try {
+            return $this->reportRenderer->render($this->auditReport(AuditTarget::named($this->canonicalPath($path), [], $this->holdsScanFiles(...))));
+        } catch (AuditAbortedExceptionInterface $auditAbortedException) {
+            throw $this->abortedRunFailure($auditAbortedException);
+        } catch (Throwable $throwable) {
+            throw $this->toolCallFailure($throwable);
+        }
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    private function holdsScanFiles(string $directory): bool
+    {
+        return $this->listScannedFilesUseCase->holdsAFile($directory);
+    }
+
+    private function abortedRunFailure(AuditAbortedExceptionInterface $auditAbortedException): ToolCallException
+    {
+        try {
+            $partialReport = $this->baselineProcessor->apply($this->findingTypeFilter->apply($auditAbortedException->partialReport()), null)->report;
+
+            return new ToolCallException(
+                \sprintf(self::FAILURE_WITH_PARTIAL_REPORT, $auditAbortedException->getMessage(), $this->reportRenderer->render($partialReport)),
+                previous: $auditAbortedException,
+            );
+        } catch (Throwable) {
+            return $this->toolCallFailure($auditAbortedException);
+        }
+    }
+
+    private function toolCallFailure(Throwable $throwable): ToolCallException
+    {
+        return new ToolCallException($throwable->getMessage(), previous: $throwable);
+    }
+
+    /**
+     * Runs the audit as `audit:run` does without options: the configured
+     * baseline's reasons reach the reviewer and the findings it accepts skip
+     * the reviewer and leave the report, the muted finding types leave it too,
+     * and a run with no verdict returns no report. A budgeted run on a model
+     * with no published price still runs, as it always did, and the log says
+     * the cap cannot be enforced; `audit:run` refuses it under
+     * `--no-interaction`.
+     *
+     * @throws AuditAbortedByBudgetException
+     * @throws AuditAbortedByProviderException
+     * @throws AuditWithoutVerdictException
+     * @throws InvalidAuditContextException
+     * @throws InvalidAuditCostException
+     * @throws InvalidTokenUsageException
+     * @throws ScanPathOutsideProjectException
+     */
+    private function auditReport(AuditTarget $auditTarget): AuditReport
+    {
+        $projectPath = $auditTarget->projectPath;
+        $this->auditedProjectPathHolder->set($projectPath);
+        $this->unpricedModelBudgetGuard->warnWhenBudgetCannotBeEnforced($this->logger);
+        $this->reviewerFeedbackHolder->set($this->baselineProcessor->feedback(null));
+        $this->baselineFilePathsHolder->set($projectPath, $this->baselineProcessor->filePaths(null));
+
+        $auditReport = $this->findingTypeFilter->apply(
+            $this->runAuditUseCase->execute($projectPath, ScanPathResolver::resolve($auditTarget->scanPaths, $projectPath), acceptedFingerprints: $this->baselineProcessor->acceptedFingerprints(null)),
+        );
+        $this->assertVerdict($auditReport);
+
+        return $this->baselineProcessor->apply($auditReport, null)->report;
+    }
+
+    /**
+     * `audit:run` fails a run whose scan found no file, or that analyzed none
+     * of its files and found nothing: a SAFE report there vouches for code
+     * nobody read. A run that holds a finding returns its incomplete report.
+     *
+     * @throws AuditWithoutVerdictException
+     */
+    private function assertVerdict(AuditReport $auditReport): void
+    {
+        if (0 === $auditReport->filesDiscovered()) {
+            throw AuditWithoutVerdictException::forNoFileDiscovered($auditReport->projectPath());
+        }
+
+        if ($auditReport->hasNoVerdict()) {
+            throw AuditWithoutVerdictException::forNoFileAnalyzed($auditReport->projectPath(), $auditReport->filesScanned());
+        }
+    }
+
+    /**
+     * @throws InvalidProjectPathException
+     */
+    private function canonicalPath(string $path): string
     {
         if (!Path::isAbsolute($path)) {
             throw InvalidProjectPathException::forNonAbsolutePath($path);
         }
 
-        $canonicalPath = Path::canonicalize($path);
-        $this->auditedProjectPathHolder->set($canonicalPath);
-
-        return $this->reportRenderer->render($this->runAuditUseCase->execute($canonicalPath));
+        return Path::canonicalize($path);
     }
 }

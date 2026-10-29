@@ -15,6 +15,7 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Review;
 
 use Psr\Log\LoggerInterface;
 use Throwable;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\RecordingToolClients;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\RecordReviewToolFactoryInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\Exception\BudgetExceededException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidToolRegistryException;
@@ -22,6 +23,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\LLMProviderExcep
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\CoverageRecorderInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMResponse;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ReviewerPromptBuilderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\Tool\ToolRegistry;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ToolBatchCapableLLMClientInterface;
@@ -50,6 +52,7 @@ final readonly class ConcurrentStructuredReviewAnalyzer
         private LoggerInterface $logger,
         private int $maxConcurrent,
         private int $maxToolIterations,
+        private RecordingToolClients $recordingToolClients,
     ) {}
 
     /**
@@ -163,12 +166,17 @@ final readonly class ConcurrentStructuredReviewAnalyzer
             }
 
             foreach ($indexes as $index) {
-                $vulnerability = $concurrentReviewBatch->vulnerabilities[$index];
-                $recovered = $this->reviewOutcomeRecorder->recoverDrainedVerdict($vulnerability, $concurrentReviewBatch->sessions[$index], $coverageRecorder, $concurrentReviewBatch->codeContextForCache($index));
-                if (!$recovered instanceof Vulnerability) {
-                    $this->reviewOutcomeRecorder->recordUnreached($vulnerability, $status, $coverageRecorder);
-                }
+                $this->recordUnreachedUnlessRecovered($index, $concurrentReviewBatch, $status, $coverageRecorder);
             }
+        }
+    }
+
+    private function recordUnreachedUnlessRecovered(int $index, ConcurrentReviewBatch $concurrentReviewBatch, string $status, CoverageRecorderInterface $coverageRecorder): void
+    {
+        $vulnerability = $concurrentReviewBatch->vulnerabilities[$index];
+        $recovered = $this->reviewOutcomeRecorder->recoverDrainedVerdict($vulnerability, $concurrentReviewBatch->sessions[$index], $coverageRecorder, $concurrentReviewBatch->codeContextForCache($index));
+        if (!$recovered instanceof Vulnerability) {
+            $this->reviewOutcomeRecorder->recordUnreached($vulnerability, $status, $coverageRecorder);
         }
     }
 
@@ -183,7 +191,7 @@ final readonly class ConcurrentStructuredReviewAnalyzer
     private function dispatchPending(ConcurrentReviewBatch $concurrentReviewBatch, CoverageRecorderInterface $coverageRecorder, array $reviewed): array
     {
         try {
-            $this->toolBatchCapableLLMClient->completeBatchWithTools($concurrentReviewBatch->requests, $this->maxConcurrent, $this->maxToolIterations);
+            $responses = $this->toolBatchCapableLLMClient->completeBatchWithTools($concurrentReviewBatch->requests, $this->maxConcurrent, $this->maxToolIterations);
         } catch (BudgetExceededException $budgetExceededException) {
             throw $budgetExceededException;
         } catch (LLMProviderException $llmProviderException) {
@@ -192,31 +200,60 @@ final readonly class ConcurrentStructuredReviewAnalyzer
             return $this->recordPendingErrors($concurrentReviewBatch, $exception, $coverageRecorder, $reviewed);
         }
 
-        foreach ($concurrentReviewBatch->pendingIndexes as $index) {
-            $reviewed[$index] = $this->recordPendingVerdictOrError($index, $concurrentReviewBatch, $coverageRecorder);
+        $this->noteRecordingToolReach($concurrentReviewBatch);
+        foreach ($concurrentReviewBatch->pendingIndexes as $position => $index) {
+            $reviewed[$index] = $this->recordPendingVerdictOrError($index, $responses[$position], $concurrentReviewBatch, $coverageRecorder);
         }
 
         return $reviewed;
     }
 
-    private function recordPendingVerdictOrError(int $index, ConcurrentReviewBatch $concurrentReviewBatch, CoverageRecorderInterface $coverageRecorder): Vulnerability
+    /**
+     * A client that offered the recording tool for one request of the window
+     * offered it for all of them, though it may have built the schemas once.
+     */
+    private function noteRecordingToolReach(ConcurrentReviewBatch $concurrentReviewBatch): void
+    {
+        foreach ($concurrentReviewBatch->pendingIndexes as $index) {
+            $this->recordingToolClients->note($this->toolBatchCapableLLMClient, $concurrentReviewBatch->sessions[$index]->recordingToolReached());
+        }
+    }
+
+    private function recordPendingVerdictOrError(int $index, LLMResponse $llmResponse, ConcurrentReviewBatch $concurrentReviewBatch, CoverageRecorderInterface $coverageRecorder): Vulnerability
     {
         try {
-            return $this->recordPendingVerdict($index, $concurrentReviewBatch, $coverageRecorder);
+            return $this->recordPendingVerdict($index, $llmResponse, $concurrentReviewBatch, $coverageRecorder);
         } catch (Throwable $throwable) {
             return $this->recoveredOrErroredVerdict($index, $concurrentReviewBatch, $throwable, $coverageRecorder);
         }
     }
 
-    private function recordPendingVerdict(int $index, ConcurrentReviewBatch $concurrentReviewBatch, CoverageRecorderInterface $coverageRecorder): Vulnerability
+    /**
+     * A conversation cut short (tool-loop cap, token limit, content filter,
+     * no content) that recorded no verdict is an error, not a rejection: the
+     * finding is recorded as errored and left out of the cache. A verdict the
+     * model did record before the cut-off is genuine and applied as usual. A
+     * client that never offered the tool has its answer read as the JSON path
+     * reads it.
+     */
+    private function recordPendingVerdict(int $index, LLMResponse $llmResponse, ConcurrentReviewBatch $concurrentReviewBatch, CoverageRecorderInterface $coverageRecorder): Vulnerability
     {
-        $verdicts = $concurrentReviewBatch->sessions[$index]->drain();
-        $verdict = array_pop($verdicts);
-        if (!$concurrentReviewBatch->bypassCache) {
-            $this->reviewerVerdictCache->store($concurrentReviewBatch->vulnerabilities[$index], $concurrentReviewBatch->codeContexts[$index], $verdict);
+        if ($this->recordingToolClients->ignoresTools($this->toolBatchCapableLLMClient)) {
+            return $this->reviewOutcomeRecorder->applyResponse($concurrentReviewBatch->vulnerabilities[$index], $llmResponse, $coverageRecorder, $concurrentReviewBatch->codeContextForCache($index));
         }
 
-        return $this->reviewOutcomeRecorder->recordVerdict($concurrentReviewBatch->vulnerabilities[$index], $verdict, $coverageRecorder);
+        $verdicts = $concurrentReviewBatch->sessions[$index]->drain();
+        $verdict = array_pop($verdicts);
+        if (null === $verdict && $llmResponse->isDegraded()) {
+            return $this->reviewOutcomeRecorder->recordIncompleteResponse($concurrentReviewBatch->vulnerabilities[$index], $llmResponse, $coverageRecorder);
+        }
+
+        $cacheContext = ReviewerVerdictCache::contextFor($llmResponse, $concurrentReviewBatch->codeContextForCache($index));
+        if (null !== $cacheContext) {
+            $this->reviewerVerdictCache->store($concurrentReviewBatch->vulnerabilities[$index], $cacheContext, $verdict);
+        }
+
+        return $this->reviewOutcomeRecorder->recordVerdict($concurrentReviewBatch->vulnerabilities[$index], $verdict, $coverageRecorder, $llmResponse->reachedToolCap());
     }
 
     /**

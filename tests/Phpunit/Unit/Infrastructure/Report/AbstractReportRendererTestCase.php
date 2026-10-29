@@ -18,12 +18,14 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\Filesystem\Filesystem;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditContextException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidCodeLocationException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidProjectFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidVulnerabilityClassificationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidVulnerabilityNarrativeException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditContext;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditCost;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditReport;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\CodeLocation;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityClassification;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityNarrative;
@@ -64,6 +66,39 @@ abstract class AbstractReportRendererTestCase extends TestCase
     /**
      * @throws InvalidAuditContextException
      */
+    protected function makeIncompleteReport(Vulnerability ...$vulnerabilities): AuditReport
+    {
+        $auditContext = $this->buildContext(...$vulnerabilities);
+        $auditContext->recordCoverage('attacker', 'src/Controller/Analyzed.php', 'analyzed');
+        $auditContext->recordCoverage('attacker', 'src/Controller/Failed.php', 'errored');
+        $auditContext->recordCoverage('attacker', 'src/Controller/Unreached.php', 'aborted');
+
+        return AuditReport::fromContext($auditContext);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    protected function makeReportThatAnalyzedNoFile(Vulnerability ...$vulnerabilities): AuditReport
+    {
+        $auditContext = $this->buildContext(...$vulnerabilities);
+        $auditContext->recordCoverage('attacker', 'src/Controller/Failed.php', 'errored');
+        $auditContext->recordCoverage('attacker', 'src/Controller/Unreached.php', 'aborted');
+
+        return AuditReport::fromContext($auditContext);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    protected function makeReportOfAScanThatFoundNoFile(): AuditReport
+    {
+        return AuditReport::fromContext(AuditContext::forProject($this->tmpDir));
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
     protected function makeReportWithCost(AuditCost $auditCost, Vulnerability ...$vulnerabilities): AuditReport
     {
         return AuditReport::fromContext($this->buildContext(...$vulnerabilities), $auditCost);
@@ -94,10 +129,20 @@ abstract class AbstractReportRendererTestCase extends TestCase
     private function buildContext(Vulnerability ...$vulnerabilities): AuditContext
     {
         $auditContext = AuditContext::forProject($this->tmpDir);
+        $this->scanOneFile($auditContext);
         foreach ($vulnerabilities as $vulnerability) {
             $auditContext->addVulnerability($vulnerability);
         }
 
         return $auditContext;
+    }
+
+    private function scanOneFile(AuditContext $auditContext): void
+    {
+        try {
+            $auditContext->setProjectFiles([ProjectFile::create('src/Foo.php', $this->tmpDir.'/src/Foo.php', '<?php')]);
+        } catch (InvalidProjectFileException $invalidProjectFileException) {
+            self::fail($invalidProjectFileException->getMessage());
+        }
     }
 }

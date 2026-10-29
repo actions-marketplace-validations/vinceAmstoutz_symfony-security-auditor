@@ -34,9 +34,12 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityType;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\Exception\InvalidCacheConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\FilesystemReviewerCache;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\Reviewer\ReviewerFeedbackHolder;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\FileSystem\Fixture\AssertsOwnerOnlyAccessTrait;
 
 final class FilesystemReviewerCacheTest extends TestCase
 {
+    use AssertsOwnerOnlyAccessTrait;
+
     private string $cacheDir;
 
     private FilesystemReviewerCache $filesystemReviewerCache;
@@ -127,6 +130,30 @@ final class FilesystemReviewerCacheTest extends TestCase
         $this->filesystemReviewerCache->store($vulnerability, 'code', ['accepted' => true]);
 
         self::assertNull($this->cacheWithFeedback('accepted risk')->get($vulnerability, 'code'));
+    }
+
+    /**
+     * The feedback section of the reviewer prompt changed in 1.21, so a verdict
+     * cached under feedback is keyed under a new feedback version: those runs
+     * review their findings once more, while a run without feedback — whose
+     * prompt did not change — keeps its cache.
+     *
+     * @throws InvalidCacheConfigurationException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_the_key_folds_the_feedback_under_its_own_version(): void
+    {
+        $vulnerability = $this->makeVulnerability('src/A.php');
+        $finding = $vulnerability->toArray();
+        unset($finding['id'], $finding['detected_at']);
+        $digest = (new ReviewerFeedback([new AcceptedFindingFeedback('sql_injection', 'src/Foo.php', 'Accepted', 'accepted risk')]))->digest();
+        $expectedKey = hash('sha256', json_encode($finding, \JSON_THROW_ON_ERROR)."\0code\0feedback-v2-".$digest);
+
+        $this->cacheWithFeedback('accepted risk')->store($vulnerability, 'code', ['accepted' => true]);
+
+        self::assertFileExists(\sprintf('%s/%s/%s.json', $this->cacheDir, substr($expectedKey, 0, 2), $expectedKey));
     }
 
     /**
@@ -773,6 +800,76 @@ final class FilesystemReviewerCacheTest extends TestCase
             $vulnerableCode,
             $detectedAt,
         );
+    }
+
+    /**
+     * @throws InvalidCacheConfigurationException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_still_caches_when_a_directory_above_the_cache_is_a_symlink(): void
+    {
+        $base = sys_get_temp_dir().'/reviewer_cache_symlinked_parent_'.uniqid('', true);
+        mkdir($base.'/real', recursive: true);
+        symlink($base.'/real', $base.'/link');
+        $filesystemReviewerCache = new FilesystemReviewerCache($base.'/link/cache', new Filesystem(), new NullLogger());
+        $vulnerability = $this->makeVulnerability('src/A.php');
+        $workingDirectory = getcwd();
+        self::assertIsString($workingDirectory);
+
+        chdir($base);
+        try {
+            $filesystemReviewerCache->store($vulnerability, 'code', ['accepted' => true]);
+
+            self::assertSame(['accepted' => true], $filesystemReviewerCache->get($vulnerability, 'code'));
+        } finally {
+            chdir($workingDirectory);
+            (new Filesystem())->remove($base);
+        }
+    }
+
+    /**
+     * @throws InvalidCacheConfigurationException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_refuses_its_own_directory_below_the_cache_root_when_that_is_a_symlink(): void
+    {
+        $base = sys_get_temp_dir().'/reviewer_cache_symlinked_self_'.uniqid('', true);
+        mkdir($base.'/elsewhere', recursive: true);
+        mkdir($base.'/cache');
+        symlink($base.'/elsewhere', $base.'/cache/reviewer');
+        $filesystemReviewerCache = new FilesystemReviewerCache($base.'/cache/reviewer', new Filesystem(), new NullLogger());
+        $vulnerability = $this->makeVulnerability('src/A.php');
+
+        try {
+            $filesystemReviewerCache->store($vulnerability, 'code', ['accepted' => true]);
+
+            self::assertSame(['.', '..'], scandir($base.'/elsewhere'));
+            self::assertNull($filesystemReviewerCache->get($vulnerability, 'code'));
+        } finally {
+            (new Filesystem())->remove($base);
+        }
+    }
+
+    /**
+     * @throws InvalidCacheConfigurationException
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_a_stored_verdict_and_the_directories_made_for_it_are_owner_only(): void
+    {
+        $this->filesystemReviewerCache->store($this->makeVulnerability('src/A.php'), 'code', ['accepted' => true]);
+
+        $entries = glob($this->cacheDir.'/*/*.json');
+        self::assertIsArray($entries);
+        self::assertCount(1, $entries);
+        self::assertOwnerOnlyFile($entries[0]);
+        self::assertOwnerOnlyDirectory(\dirname($entries[0]));
+        self::assertOwnerOnlyDirectory($this->cacheDir);
     }
 
     /**

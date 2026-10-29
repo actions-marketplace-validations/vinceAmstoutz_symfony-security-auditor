@@ -33,6 +33,14 @@ final class AuditCostTest extends TestCase
         self::assertSame('gpt-4o', $auditCost->primaryModel());
     }
 
+    /**
+     * @throws InvalidAuditCostException
+     */
+    public function test_a_total_past_the_largest_token_count_is_held_at_it(): void
+    {
+        self::assertSame(\PHP_INT_MAX, AuditCost::of(\PHP_INT_MAX, 1, 0.0, 'gpt-4o')->totalTokens());
+    }
+
     public function test_zero_factory_constructs_empty_cost_for_model(): void
     {
         $auditCost = AuditCost::zero('claude-haiku-4-5-20251001');
@@ -164,6 +172,18 @@ final class AuditCostTest extends TestCase
     /**
      * @throws InvalidAuditCostException
      */
+    public function test_has_published_pricing_spots_an_unpriced_role_whose_spend_is_past_the_largest_token_count(): void
+    {
+        $auditCost = AuditCost::of(\PHP_INT_MAX, 1, 0.0, 'ollama/llama3.2', [
+            'attacker' => ['model' => 'ollama/llama3.2', 'input_tokens' => \PHP_INT_MAX, 'output_tokens' => 1, 'estimated_cost_usd' => 0.0],
+        ]);
+
+        self::assertFalse($auditCost->hasPublishedPricing());
+    }
+
+    /**
+     * @throws InvalidAuditCostException
+     */
     public function test_has_published_pricing_still_falls_back_to_the_aggregate_without_any_breakdown(): void
     {
         $auditCost = AuditCost::of(120_000, 8_000, 1.87, 'claude-opus-5');
@@ -213,6 +233,22 @@ final class AuditCostTest extends TestCase
     }
 
     /**
+     * @throws InvalidAuditCostException
+     */
+    public function test_to_array_names_the_models_each_configured_model_was_billed_as(): void
+    {
+        $auditCost = AuditCost::of(3_000, 0, 0.0, 'openrouter/auto')->withUsageByModel([
+            'openrouter/auto' => ['model' => 'openrouter/auto', 'input_tokens' => 2_000, 'output_tokens' => 0, 'estimated_cost_usd' => 0.0, 'billed_models' => ['anthropic/claude-sonnet-4.5', 'openai/gpt-4o']],
+            'legacy-entry' => ['model' => 'legacy-entry', 'input_tokens' => 1_000, 'output_tokens' => 0, 'estimated_cost_usd' => 0.0],
+        ]);
+
+        self::assertSame(
+            ['openrouter/auto' => ['anthropic/claude-sonnet-4.5', 'openai/gpt-4o'], 'legacy-entry' => []],
+            array_column((array) $auditCost->toArray()['by_model'], 'billed_models', 'model'),
+        );
+    }
+
+    /**
      * The top-level cost and the dry-run's per-role costs are both rounded to
      * six decimals, so accumulated float noise must not leave one field in the
      * same document reading `0.10491600000000001` while another reads
@@ -227,7 +263,7 @@ final class AuditCostTest extends TestCase
         ]);
 
         self::assertEquals(
-            (object) ['claude-opus-5' => ['model' => 'claude-opus-5', 'input_tokens' => 1_111, 'output_tokens' => 777, 'cache_read_tokens' => 0, 'cache_creation_tokens' => 0, 'estimated_cost_usd' => 0.104916]],
+            (object) ['claude-opus-5' => ['model' => 'claude-opus-5', 'input_tokens' => 1_111, 'output_tokens' => 777, 'cache_read_tokens' => 0, 'cache_creation_tokens' => 0, 'estimated_cost_usd' => 0.104916, 'billed_models' => []]],
             $auditCost->toArray()['by_model'],
         );
     }
@@ -245,7 +281,7 @@ final class AuditCostTest extends TestCase
         ]);
 
         self::assertEquals(
-            (object) ['gemini-flash-lite' => ['model' => 'gemini-flash-lite', 'input_tokens' => 1, 'output_tokens' => 0, 'cache_read_tokens' => 0, 'cache_creation_tokens' => 0, 'estimated_cost_usd' => 0.0]],
+            (object) ['gemini-flash-lite' => ['model' => 'gemini-flash-lite', 'input_tokens' => 1, 'output_tokens' => 0, 'cache_read_tokens' => 0, 'cache_creation_tokens' => 0, 'estimated_cost_usd' => 0.0, 'billed_models' => []]],
             $auditCost->toArray()['by_model'],
         );
     }

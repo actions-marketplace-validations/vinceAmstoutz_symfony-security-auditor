@@ -14,14 +14,34 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\Scan;
 
 use Override;
+use PhpParser\Node;
+use PhpParser\ParserFactory;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidProjectFileException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\RouteAccessControl;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\PhpParserControllerAccessControlParser;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\ThisCallReachability;
+use VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\Scan\Fixture\CountingNodeFinder;
 
 final class PhpParserControllerAccessControlParserTest extends TestCase
 {
+    private const string WIPE_CONTROLLER = <<<'PHP'
+        <?php
+        namespace App\Controller;
+        use Symfony\Component\Routing\Attribute\Route;
+        class WipeController
+        {
+            private const DEFAULTS = [];
+            #[Route('/admin/wipe', name: 'admin_wipe', methods: ['POST'])]
+            public function wipe(): void
+            {
+            }
+        }
+
+        PHP;
+
     private PhpParserControllerAccessControlParser $phpParserControllerAccessControlParser;
 
     #[Override]
@@ -1321,6 +1341,93 @@ final class PhpParserControllerAccessControlParserTest extends TestCase
     /**
      * @throws InvalidProjectFileException
      */
+    public function test_it_records_the_class_constants_a_guard_names_as_its_attribute(): void
+    {
+        $source = <<<'PHP'
+            <?php
+            namespace App\Controller;
+            use App\Security\PostVoter;
+            use Symfony\Component\Routing\Attribute\Route;
+            use Symfony\Component\Security\Http\Attribute\IsGranted;
+            #[IsGranted(PostVoter::VIEW)]
+            final class PostController extends AbstractController {
+                #[Route('/post/{id}/edit')]
+                #[IsGranted(subject: 'post', attribute: PostVoter::EDIT)]
+                #[IsGranted('ROLE_USER', subject: PostVoter::SUBJECT)]
+                #[IsGranted(PostVoter::SHARE, 'post')]
+                public function edit($post) {
+                    $this->check($post);
+                    $this->denyAccessUnlessGranted(\App\Security\CommentVoter::DELETE, $post);
+                }
+                private function check($post): void { $this->isGranted(PostVoter::PUBLISH, $post); }
+            }
+            PHP;
+
+        $entries = $this->phpParserControllerAccessControlParser->parse($this->makeFile('src/Controller/PostController.php', $source));
+
+        self::assertSame(
+            ['App\Security\PostVoter::EDIT', 'App\Security\PostVoter::SHARE', 'App\Security\PostVoter::VIEW', 'App\Security\CommentVoter::DELETE', 'App\Security\PostVoter::PUBLISH'],
+            $entries[0]->guardConstants(),
+        );
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_it_records_no_class_constant_for_a_guard_that_names_none(): void
+    {
+        $source = <<<'PHP'
+            <?php
+            namespace App\Controller;
+            use App\Security\PostVoter;
+            use Symfony\Component\Routing\Attribute\Route;
+            use Symfony\Component\Security\Http\Attribute\IsGranted;
+            final class PostController extends AbstractController {
+                const PATH = '/post';
+                #[Route(path: self::PATH, name: PostVoter::ROUTE)]
+                #[IsGranted('ROLE_USER')]
+                #[IsGranted(new Expression('is_granted("ROLE_ADMIN")'))]
+                public function edit($post, $attribute, $voter, $name) {
+                    $this->denyAccessUnlessGranted();
+                    $this->denyAccessUnlessGranted($attribute);
+                    $this->denyAccessUnlessGranted('POST_EDIT', PostVoter::SUBJECT);
+                    $this->denyAccessUnlessGranted($voter::EDIT);
+                    $this->denyAccessUnlessGranted(PostVoter::{$name});
+                }
+            }
+            PHP;
+
+        $entries = $this->phpParserControllerAccessControlParser->parse($this->makeFile('src/Controller/PostController.php', $source));
+
+        self::assertSame([], $entries[0]->guardConstants());
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_an_invokable_controller_routed_from_its_class_keeps_the_class_constants_its_guards_name(): void
+    {
+        $source = <<<'PHP'
+            <?php
+            namespace App\Controller;
+            use App\Security\PostVoter;
+            use Symfony\Component\Routing\Attribute\Route;
+            use Symfony\Component\Security\Http\Attribute\IsGranted;
+            #[Route('/post/publish')]
+            final class PublishPostController extends AbstractController {
+                #[IsGranted(PostVoter::PUBLISH)]
+                public function __invoke() {}
+            }
+            PHP;
+
+        $entries = $this->phpParserControllerAccessControlParser->parse($this->makeFile('src/Controller/PublishPostController.php', $source));
+
+        self::assertSame(['App\Security\PostVoter::PUBLISH'], $this->invokeEntry($entries)->guardConstants());
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
     public function test_it_treats_an_abstract_action_without_a_body_as_lacking_deny_access(): void
     {
         $source = <<<'PHP'
@@ -1422,6 +1529,175 @@ final class PhpParserControllerAccessControlParserTest extends TestCase
     /**
      * @throws InvalidProjectFileException
      */
+    #[DataProvider('publicAccessGuardCases')]
+    public function test_a_guard_granting_only_public_access_leaves_the_route_lacking_an_access_check(string $classAttribute, string $methodAttribute, string $body): void
+    {
+        $source = <<<PHP
+            <?php
+            namespace App\Controller;
+            use Symfony\Component\Routing\Attribute\Route;
+            use Symfony\Component\Security\Http\Attribute\IsGranted;
+            use Symfony\Component\ExpressionLanguage\Expression;
+            use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
+            {$classAttribute}
+            final class AdminController extends AbstractController {
+                #[Route(path: '/admin/delete-all', methods: ['POST'])]
+                {$methodAttribute}
+                public function wipe(): void {
+                    {$body}
+                }
+            }
+            PHP;
+        $projectFile = $this->makeFile('src/Controller/AdminController.php', $source);
+
+        $entries = $this->phpParserControllerAccessControlParser->parse($projectFile);
+
+        self::assertCount(1, $entries);
+        self::assertTrue($entries[0]->lacksAccessCheck());
+        self::assertFalse($entries[0]->classHasIsGranted());
+        self::assertFalse($entries[0]->methodHasIsGrantedAttribute());
+        self::assertFalse($entries[0]->methodHasDenyAccess());
+        self::assertSame([], $entries[0]->guardAttributes());
+    }
+
+    /** @return iterable<string, array{0: string, 1: string, 2: string}> */
+    public static function publicAccessGuardCases(): iterable
+    {
+        yield 'a method attribute naming PUBLIC_ACCESS' => ['', "#[IsGranted('PUBLIC_ACCESS')]", ''];
+        yield 'a method attribute naming IS_AUTHENTICATED_ANONYMOUSLY' => ['', "#[IsGranted('IS_AUTHENTICATED_ANONYMOUSLY')]", ''];
+        yield 'a method attribute naming PUBLIC_ACCESS by argument name' => ['', "#[IsGranted(attribute: 'PUBLIC_ACCESS', statusCode: 404)]", ''];
+        yield 'a class attribute naming PUBLIC_ACCESS' => ["#[IsGranted('PUBLIC_ACCESS')]", '', ''];
+        yield 'a class attribute naming IS_AUTHENTICATED_ANONYMOUSLY' => ["#[IsGranted('IS_AUTHENTICATED_ANONYMOUSLY')]", '', ''];
+        yield 'a denyAccessUnlessGranted call for IS_AUTHENTICATED_ANONYMOUSLY' => ['', '', "\$this->denyAccessUnlessGranted('IS_AUTHENTICATED_ANONYMOUSLY');"];
+        yield 'an isGranted call for PUBLIC_ACCESS' => ['', '', "if (!\$this->isGranted('PUBLIC_ACCESS')) { throw \$this->createAccessDeniedException(); }"];
+        yield 'a nullsafe isGranted call for PUBLIC_ACCESS' => ['', '', "\$this?->isGranted('PUBLIC_ACCESS');"];
+        yield 'a method attribute with a PUBLIC_ACCESS expression' => ['', '#[IsGranted(new Expression("is_granted(\'PUBLIC_ACCESS\')"))]', ''];
+        yield 'a method attribute with an IS_AUTHENTICATED_ANONYMOUSLY expression' => ['', "#[IsGranted(new Expression('is_granted(\"IS_AUTHENTICATED_ANONYMOUSLY\")'))]", ''];
+        yield 'a method attribute with a padded expression' => ['', '#[IsGranted(new Expression("  is_granted( \'PUBLIC_ACCESS\' )  "))]', ''];
+        yield 'a method attribute with an expression given by argument name' => ['', '#[IsGranted(new Expression(expression: "is_granted(\'PUBLIC_ACCESS\')"))]', ''];
+        yield 'a class attribute with a PUBLIC_ACCESS expression' => ['#[IsGranted(new Expression("is_granted(\'PUBLIC_ACCESS\')"))]', '', ''];
+        yield 'a method Security attribute with a PUBLIC_ACCESS expression' => ['', '#[Security("is_granted(\'PUBLIC_ACCESS\')")]', ''];
+        yield 'a method Security attribute with an expression given by argument name' => ['', '#[Security(expression: "is_granted(\'IS_AUTHENTICATED_ANONYMOUSLY\')")]', ''];
+        yield 'a denyAccessUnlessGranted call naming PUBLIC_ACCESS after the subject' => ['', '', "\$this->denyAccessUnlessGranted(subject: \$post, attribute: 'PUBLIC_ACCESS');"];
+        yield 'an isGranted call naming PUBLIC_ACCESS after the subject' => ['', '', "if (!\$this->isGranted(subject: \$post, attribute: 'PUBLIC_ACCESS')) { throw \$this->createAccessDeniedException(); }"];
+        yield 'a denyAccessUnlessGranted call with a PUBLIC_ACCESS expression' => ['', '', '$this->denyAccessUnlessGranted(new Expression("is_granted(\'PUBLIC_ACCESS\')"));'];
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    #[DataProvider('guardsGrantingMoreThanPublicAccessCases')]
+    public function test_a_guard_granting_more_than_public_access_still_counts_as_an_access_check(string $methodAttribute, string $body): void
+    {
+        $source = <<<PHP
+            <?php
+            namespace App\Controller;
+            use Symfony\Component\Routing\Attribute\Route;
+            use Symfony\Component\Security\Http\Attribute\IsGranted;
+            use Symfony\Component\ExpressionLanguage\Expression;
+            use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
+            final class AdminController extends AbstractController {
+                #[Route(path: '/admin/delete-all', methods: ['POST'])]
+                {$methodAttribute}
+                public function wipe(): void {
+                    {$body}
+                }
+            }
+            PHP;
+        $projectFile = $this->makeFile('src/Controller/AdminController.php', $source);
+
+        $entries = $this->phpParserControllerAccessControlParser->parse($projectFile);
+
+        self::assertCount(1, $entries);
+        self::assertFalse($entries[0]->lacksAccessCheck());
+    }
+
+    /** @return iterable<string, array{0: string, 1: string}> */
+    public static function guardsGrantingMoreThanPublicAccessCases(): iterable
+    {
+        yield 'an expression naming a role' => ['#[IsGranted(new Expression("is_granted(\'ROLE_ADMIN\')"))]', ''];
+        yield 'an expression naming public access and a role' => ['#[Security("is_granted(\'PUBLIC_ACCESS\') and is_granted(\'ROLE_ADMIN\')")]', ''];
+        yield 'an expression refusing public access' => ['#[Security("not is_granted(\'PUBLIC_ACCESS\')")]', ''];
+        yield 'an expression naming public access on a subject' => ['#[Security("is_granted(\'PUBLIC_ACCESS\', post)")]', ''];
+        yield 'an expression naming public access by a different function' => ['#[Security("has_role(\'PUBLIC_ACCESS\')")]', ''];
+        yield 'an expression that is not a literal' => ['#[IsGranted(new Expression($expression))]', ''];
+        yield 'an expression without arguments' => ['#[IsGranted(new Expression())]', ''];
+        yield 'an expression whose argument is named otherwise' => ['#[IsGranted(new Expression(text: "is_granted(\'PUBLIC_ACCESS\')"))]', ''];
+        yield 'an expression written as a first-class callable' => ['', '$this->denyAccessUnlessGranted(new Expression(...));'];
+        yield 'an expression built by another class' => ['#[IsGranted(new Other("is_granted(\'PUBLIC_ACCESS\')"))]', ''];
+        yield 'an expression built by a class held in a variable' => ['', '$this->denyAccessUnlessGranted(new $expressionClass("is_granted(\'PUBLIC_ACCESS\')"));'];
+        yield 'a denyAccessUnlessGranted call naming a role after the subject' => ['', "\$this->denyAccessUnlessGranted(subject: \$post, attribute: 'ROLE_ADMIN');"];
+        yield 'a denyAccessUnlessGranted call with an attribute that is not a literal after the subject' => ['', '$this->denyAccessUnlessGranted(subject: $post, attribute: $attribute);'];
+        yield 'a denyAccessUnlessGranted call naming PUBLIC_ACCESS as its subject' => ['', "\$this->denyAccessUnlessGranted(subject: 'PUBLIC_ACCESS', attribute: 'ROLE_ADMIN');"];
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_real_guard_next_to_a_public_access_guard_still_counts_as_an_access_check(): void
+    {
+        $source = <<<'PHP'
+            <?php
+            namespace App\Controller;
+            use Symfony\Component\Routing\Attribute\Route;
+            use Symfony\Component\Security\Http\Attribute\IsGranted;
+            #[IsGranted('PUBLIC_ACCESS'), IsGranted('ROLE_USER')]
+            final class AdminController extends AbstractController {
+                #[Route(path: '/admin/delete-all')]
+                #[IsGranted('PUBLIC_ACCESS')]
+                #[IsGranted('ROLE_ADMIN')]
+                public function wipe(): void {
+                    $this->denyAccessUnlessGranted('IS_AUTHENTICATED_ANONYMOUSLY');
+                    $this->denyAccessUnlessGranted('DELETE_ALL');
+                }
+            }
+            PHP;
+        $projectFile = $this->makeFile('src/Controller/AdminController.php', $source);
+
+        $entries = $this->phpParserControllerAccessControlParser->parse($projectFile);
+
+        self::assertFalse($entries[0]->lacksAccessCheck());
+        self::assertTrue($entries[0]->classHasIsGranted());
+        self::assertTrue($entries[0]->methodHasIsGrantedAttribute());
+        self::assertTrue($entries[0]->methodHasDenyAccess());
+        self::assertSame(['ROLE_ADMIN', 'ROLE_USER', 'DELETE_ALL'], $entries[0]->guardAttributes());
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_deny_access_call_without_a_literal_attribute_still_counts_as_an_access_check(): void
+    {
+        $source = <<<'PHP'
+            <?php
+            namespace App\Controller;
+            use Symfony\Component\Routing\Attribute\Route;
+            final class AdminController extends AbstractController {
+                #[Route(path: '/admin/a')]
+                public function withoutArgument(): void {
+                    $this->isGranted();
+                }
+
+                #[Route(path: '/admin/b')]
+                public function withUnpackedArguments(array $arguments): void {
+                    $this->denyAccessUnlessGranted(...$arguments);
+                }
+            }
+            PHP;
+        $projectFile = $this->makeFile('src/Controller/AdminController.php', $source);
+
+        $entries = $this->phpParserControllerAccessControlParser->parse($projectFile);
+
+        self::assertCount(2, $entries);
+        self::assertTrue($entries[0]->methodHasDenyAccess());
+        self::assertTrue($entries[1]->methodHasDenyAccess());
+        self::assertSame([], $entries[0]->guardAttributes());
+        self::assertSame([], $entries[1]->guardAttributes());
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
     public function test_it_resolves_route_paths_from_multiple_self_class_constants(): void
     {
         $source = <<<'PHP'
@@ -1496,9 +1772,187 @@ final class PhpParserControllerAccessControlParserTest extends TestCase
     /**
      * @throws InvalidProjectFileException
      */
+    public function test_every_action_of_a_chain_of_helpers_ending_in_a_guard_is_guarded(): void
+    {
+        $source = <<<'PHP'
+            <?php
+            namespace App\Controller;
+            use Symfony\Component\Routing\Attribute\Route;
+            final class ChainController {
+                #[Route('/first')]
+                public function first(): void { $this->second(); }
+                #[Route('/second')]
+                public function second(): void { $this->third(); }
+                private function third(): void { $this->fourth(); }
+                private function fourth(): void { $this->denyAccessUnlessGranted('EDIT'); }
+                #[Route('/unrelated')]
+                public function unrelated(): void { $this->unrelatedHelper(); }
+                private function unrelatedHelper(): void {}
+            }
+            PHP;
+
+        $entries = $this->phpParserControllerAccessControlParser->parse($this->makeFile('src/Controller/ChainController.php', $source));
+
+        self::assertSame(
+            ['first' => ['EDIT'], 'second' => ['EDIT'], 'unrelated' => []],
+            array_column(array_map(static fn (RouteAccessControl $routeAccessControl): array => [$routeAccessControl->methodName(), $routeAccessControl->guardAttributes()], $entries), 1, 0),
+        );
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_chain_of_public_actions_costs_a_bounded_number_of_tree_walks(): void
+    {
+        $actionCount = 400;
+        $source = $this->chainOfPublicActions($actionCount);
+        $countingNodeFinder = new CountingNodeFinder();
+        $phpParserControllerAccessControlParser = new PhpParserControllerAccessControlParser(nodeFinder: $countingNodeFinder, thisCallReachability: new ThisCallReachability($countingNodeFinder));
+
+        $entries = $phpParserControllerAccessControlParser->parse($this->makeFile('src/Controller/ChainController.php', $source));
+
+        self::assertCount($actionCount + 1, $entries);
+        self::assertLessThan(8 * $this->nodeCount($source), $countingNodeFinder->visitedNodes);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_route_keeps_every_guard_attribute_up_to_the_cap(): void
+    {
+        $attributes = array_map(static fn (int $index): string => 'ATTR_'.$index, range(0, 99));
+
+        self::assertSame($attributes, $this->guardAttributesOfAnActionCalling($attributes));
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_route_drops_the_guard_attributes_past_the_cap(): void
+    {
+        $attributes = array_map(static fn (int $index): string => 'ATTR_'.$index, range(0, 100));
+
+        self::assertSame(\array_slice($attributes, 0, 100), $this->guardAttributesOfAnActionCalling($attributes));
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_repeated_guard_attribute_counts_once_against_the_cap(): void
+    {
+        $attributes = [...array_fill(0, 150, 'EDIT'), 'PUBLISH'];
+
+        self::assertSame(['EDIT', 'PUBLISH'], $this->guardAttributesOfAnActionCalling($attributes));
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_a_chain_of_actions_each_guarding_its_own_attribute_caps_what_each_route_reaches(): void
+    {
+        $actionCount = 150;
+        $source = "<?php\nnamespace App\\Controller;\nuse Symfony\\Component\\Routing\\Attribute\\Route;\nfinal class ChainController extends AbstractController {\n";
+        for ($i = 0; $i < $actionCount; ++$i) {
+            $source .= \sprintf("#[Route('/r%d')]\npublic function m%d() { \$this->denyAccessUnlessGranted('ATTR_%d'); \$this->m%d(); }\n", $i, $i, $i, $i + 1);
+        }
+
+        $entries = $this->phpParserControllerAccessControlParser->parse($this->makeFile('src/Controller/ChainController.php', $source."public function m150() {}\n}\n"));
+
+        self::assertSame(
+            array_map(static fn (int $index): int => min(100, $actionCount - $index), range(0, $actionCount - 1)),
+            array_map(static fn (RouteAccessControl $routeAccessControl): int => \count($routeAccessControl->guardAttributes()), \array_slice($entries, 0, $actionCount)),
+        );
+        self::assertSame('ATTR_99', $entries[0]->guardAttributes()[99]);
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_it_skips_a_file_nested_too_deeply_to_parse_safely(): void
+    {
+        $nesting = str_repeat('f(', 33000).'1'.str_repeat(')', 33000);
+        $source = <<<PHP
+            <?php
+            namespace App\Controller;
+            use Symfony\Component\Routing\Attribute\Route;
+            final class AdminController {
+                #[Route('/admin')]
+                public function dashboard() { return {$nesting}; }
+            }
+            PHP;
+        $projectFile = $this->makeFile('src/Controller/AdminController.php', $source);
+
+        self::assertSame([], $this->phpParserControllerAccessControlParser->parse($projectFile));
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_it_skips_a_file_holding_a_flood_of_unmatched_closing_brackets(): void
+    {
+        $source = <<<'PHP'
+            <?php
+            namespace App\Controller;
+            use Symfony\Component\Routing\Attribute\Route;
+            final class AdminController {
+                #[Route('/admin')]
+                public function dashboard() { return 1; }
+            }
+            PHP;
+        $projectFile = $this->makeFile('src/Controller/AdminController.php', $source.str_repeat(')', 16000));
+
+        self::assertSame([], $this->phpParserControllerAccessControlParser->parse($projectFile));
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_it_maps_a_controller_whose_unmatched_closing_brackets_sit_in_a_comment(): void
+    {
+        $projectFile = $this->makeFile('src/Controller/WipeController.php', self::WIPE_CONTROLLER.'/* '.str_repeat(')', 16000)." */\n");
+
+        self::assertSame(['/admin/wipe'], array_map(static fn (RouteAccessControl $routeAccessControl): ?string => $routeAccessControl->routePath(), $this->phpParserControllerAccessControlParser->parse($projectFile)));
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
+    public function test_it_maps_a_controller_holding_an_array_literal_nested_a_thousand_levels_deep(): void
+    {
+        $source = str_replace('DEFAULTS = []', 'DEFAULTS = '.str_repeat('[', 1000).str_repeat(']', 1000), self::WIPE_CONTROLLER);
+
+        self::assertSame(['/admin/wipe'], array_map(static fn (RouteAccessControl $routeAccessControl): ?string => $routeAccessControl->routePath(), $this->phpParserControllerAccessControlParser->parse($this->makeFile('src/Controller/WipeController.php', $source))));
+    }
+
+    /**
+     * @throws InvalidProjectFileException
+     */
     private function makeFile(string $relativePath, string $content): ProjectFile
     {
         return ProjectFile::create($relativePath, '/app/'.$relativePath, $content);
+    }
+
+    /**
+     * @param list<string> $attributes
+     *
+     * @return list<string>
+     *
+     * @throws InvalidProjectFileException
+     */
+    private function guardAttributesOfAnActionCalling(array $attributes): array
+    {
+        $body = implode(' ', array_map(static fn (string $attribute): string => \sprintf("\$this->denyAccessUnlessGranted('%s');", $attribute), $attributes));
+        $source = <<<PHP
+            <?php
+            namespace App\Controller;
+            use Symfony\Component\Routing\Attribute\Route;
+            final class GuardedController extends AbstractController {
+                #[Route('/guarded')]
+                public function guarded(): void { {$body} }
+            }
+            PHP;
+
+        return $this->phpParserControllerAccessControlParser->parse($this->makeFile('src/Controller/GuardedController.php', $source))[0]->guardAttributes();
     }
 
     /**
@@ -1513,5 +1967,22 @@ final class PhpParserControllerAccessControlParserTest extends TestCase
         }
 
         self::fail('No __invoke entry was parsed.');
+    }
+
+    private function chainOfPublicActions(int $actionCount): string
+    {
+        $source = "<?php\nnamespace App\\Controller;\nuse Symfony\\Component\\Routing\\Attribute\\Route;\nfinal class ChainController extends AbstractController {\n";
+        for ($i = 0; $i < $actionCount; ++$i) {
+            $source .= \sprintf("#[Route('/r%d')]\npublic function m%d() { return \$this->m%d(); }\n", $i, $i, $i + 1);
+        }
+
+        return $source.\sprintf("public function m%d() { return 1; }\n}\n", $actionCount);
+    }
+
+    private function nodeCount(string $source): int
+    {
+        $ast = (new ParserFactory())->createForNewestSupportedVersion()->parse($source) ?? [];
+
+        return \count((new CountingNodeFinder())->findInstanceOf($ast, Node::class));
     }
 }

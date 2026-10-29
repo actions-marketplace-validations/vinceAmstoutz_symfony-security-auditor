@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://raw.githubusercontent.com/vinceamstoutz/symfony-security-auditor/1.20.1/resources/schema.json",
+  "$id": "https://raw.githubusercontent.com/vinceamstoutz/symfony-security-auditor/1.22.0/resources/schema.json",
   "title": "symfony-security-auditor bundle configuration",
   "description": "Configuration for the symfony_security_auditor bundle (config/packages/symfony_security_auditor.yaml).",
   "type": "object",
@@ -16,7 +16,7 @@
         },
         "model": {
           "type": "string",
-          "description": "Model id used for both the attacker and reviewer roles, e.g. claude-opus-5."
+          "description": "Model id used for both the attacker and reviewer roles, e.g. claude-opus-5-5."
         },
         "attacker_model": {
           "type": ["string", "null"],
@@ -43,7 +43,7 @@
         },
         "provider_json_mode": {
           "type": "boolean",
-          "description": "Send response_format: {type: json_object} on every call (honored by OpenAI/Mistral/Ollama). Default: false."
+          "description": "Send response_format: {type: json_object} on every call to a Claude/Anthropic-dialect model (its name contains claude) a gateway serves. Not sent on the anthropic and bedrock platforms, which have no JSON-object mode for Claude, and a no-op for every other model. Default: false."
         },
         "scan": {
           "type": "object",
@@ -58,6 +58,14 @@
             "respect_gitignore": {
               "type": "boolean",
               "description": "Skip files ignored by .gitignore."
+            },
+            "include_tracked_ignored": {
+              "type": "boolean",
+              "description": "Effective only with respect_gitignore: true. Also audit a file git tracks although a .gitignore pattern matches it (runs git ls-files in the project). Default: false."
+            },
+            "include_dotfiles": {
+              "type": "boolean",
+              "description": "Also audit the dot files and dot directories inside the included directories (src/Controller/.helpers.php, templates/admin/.row.html.twig). Version-control directories (.git, .svn, .hg, .bzr, CVS, _darcs) stay out either way. Default: false."
             },
             "max_file_size_kb": {
               "type": "integer",
@@ -134,6 +142,10 @@
               "type": "boolean",
               "description": "Give the attacker cross-file investigation tools. Default: true."
             },
+            "tools_scope": {
+              "enum": ["audited", "scanned"],
+              "description": "Which files read_file, grep and list_files may open. audited limits them to the files the run audits (the narrowed set on a --since, --path or escalated run). scanned lets them open every file the scan found, which sends those files to the provider on request. Default: audited."
+            },
             "structured_collection": {
               "type": "boolean",
               "description": "Attacker records findings via the schema-enforced record_vulnerability tool. Default: true."
@@ -182,18 +194,158 @@
               "enum": ["safe", "low", "medium", "high", "critical"],
               "description": "Minimum aggregate risk level that makes audit:run exit 1 (the CI gate). Default: critical (only a CRITICAL risk level fails; planned to become high in the next major). The --fail-on CLI option overrides this."
             },
+            "min_score": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 100,
+              "description": "Minimum normalized score (0-100) below which audit:run exits 1, in addition to the fail_on risk gate: the audit fails when either gate trips. Default: null (gates on the risk level alone). The --min-score CLI option overrides this."
+            },
+            "fail_on_incomplete": {
+              "type": "boolean",
+              "description": "When true, audit:run exits 3 if some file could not be fully analyzed (a scan or LLM call failed), so a partial report cannot pass CI; a tripped fail_on or min_score gate still exits 1. Default: false. The --fail-on-incomplete and --no-fail-on-incomplete CLI options override this."
+            },
+            "format": {
+              "enum": [
+                "console",
+                "executive",
+                "json",
+                "sarif",
+                "html",
+                "markdown",
+                "junit",
+                "github",
+                "github-comment"
+              ],
+              "description": "Default report format when --format is not given. The --format CLI option overrides this, even when it names the default. Default: console."
+            },
+            "output": {
+              "type": ["string", "null"],
+              "description": "Default path the report is written to when --output is not given. Default: null (the report is printed). The --output CLI option overrides this. In the standalone binary a project config may not set it."
+            },
+            "report_path_prefix": {
+              "type": ["string", "null"],
+              "description": "Folder, relative to the repository root, the audited project lives in (for example backend for a project-path of backend). Put in front of every file path in the SARIF and github annotation reports, which GitHub resolves from the repository root. Default: null (paths stay relative to the project). The other formats and the JSON report are never prefixed."
+            },
             "since_closure": {
               "enum": ["none", "direct"],
               "description": "When a --since diff-mode run is active, whether to widen the audited file set beyond the raw git diff. none audits exactly the changed files. direct additionally pulls in a changed voter's first-degree dependents (controllers guarded by an #[IsGranted] attribute the voter's supports() accepts) from the full project mapping. Default: profile-dependent (balanced/fast: none, thorough: direct)."
             },
             "excluded_types": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string",
+                "enum": [
+                  "sql_injection",
+                  "command_injection",
+                  "ldap_injection",
+                  "xpath_injection",
+                  "twig_injection",
+                  "header_injection",
+                  "xss",
+                  "broken_access_control",
+                  "missing_voter",
+                  "voter_bypass",
+                  "role_escalation",
+                  "insecure_direct_object_reference",
+                  "missing_csrf_protection",
+                  "json_hijacking",
+                  "business_logic_flaw",
+                  "race_condition",
+                  "insecure_workflow",
+                  "price_manipulation",
+                  "state_machine_bypass",
+                  "mass_assignment",
+                  "insecure_deserialization",
+                  "unsafe_parameter_binding",
+                  "exposed_internal_service",
+                  "misconfigured_firewall",
+                  "insecure_redirect",
+                  "over_permissive_serializer_group",
+                  "sensitive_data_exposure",
+                  "log_injection",
+                  "path_traversal",
+                  "ssrf",
+                  "xxe",
+                  "open_redirect",
+                  "weak_cryptography",
+                  "insecure_random",
+                  "hardcoded_secret",
+                  "missing_signature_verification",
+                  "messenger_handler_unsafe",
+                  "missing_rate_limiting",
+                  "cache_poisoning",
+                  "mailer_header_injection",
+                  "webhook_replay",
+                  "authenticator_bypass",
+                  "host_header_injection",
+                  "trusted_proxy_misconfiguration",
+                  "weak_password_hashing",
+                  "permissive_cors_origin",
+                  "weak_content_security_policy",
+                  "missing_transport_security",
+                  "debug_mode_enabled",
+                  "permissive_mercure_topic_selector"
+                ]
+              },
               "description": "Vulnerability types dropped from the report and the exit code, even when validated. Mutes a noisy class (e.g. missing_rate_limiting) without per-finding baselines. Wins over included_types. Default: [] (mutes nothing)."
             },
             "included_types": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string",
+                "enum": [
+                  "sql_injection",
+                  "command_injection",
+                  "ldap_injection",
+                  "xpath_injection",
+                  "twig_injection",
+                  "header_injection",
+                  "xss",
+                  "broken_access_control",
+                  "missing_voter",
+                  "voter_bypass",
+                  "role_escalation",
+                  "insecure_direct_object_reference",
+                  "missing_csrf_protection",
+                  "json_hijacking",
+                  "business_logic_flaw",
+                  "race_condition",
+                  "insecure_workflow",
+                  "price_manipulation",
+                  "state_machine_bypass",
+                  "mass_assignment",
+                  "insecure_deserialization",
+                  "unsafe_parameter_binding",
+                  "exposed_internal_service",
+                  "misconfigured_firewall",
+                  "insecure_redirect",
+                  "over_permissive_serializer_group",
+                  "sensitive_data_exposure",
+                  "log_injection",
+                  "path_traversal",
+                  "ssrf",
+                  "xxe",
+                  "open_redirect",
+                  "weak_cryptography",
+                  "insecure_random",
+                  "hardcoded_secret",
+                  "missing_signature_verification",
+                  "messenger_handler_unsafe",
+                  "missing_rate_limiting",
+                  "cache_poisoning",
+                  "mailer_header_injection",
+                  "webhook_replay",
+                  "authenticator_bypass",
+                  "host_header_injection",
+                  "trusted_proxy_misconfiguration",
+                  "weak_password_hashing",
+                  "permissive_cors_origin",
+                  "weak_content_security_policy",
+                  "missing_transport_security",
+                  "debug_mode_enabled",
+                  "permissive_mercure_topic_selector"
+                ]
+              },
               "description": "Allowlist of vulnerability types: when non-empty, only findings whose type is listed are reported and counted toward the exit code. Default: [] (includes every type)."
             },
             "custom_skills": {
@@ -205,6 +357,29 @@
                 "properties": {
                   "file_type": {
                     "type": "string",
+                    "enum": [
+                      "controller",
+                      "api_resource",
+                      "live_component",
+                      "entity",
+                      "voter",
+                      "repository",
+                      "form",
+                      "authenticator",
+                      "ldap_service",
+                      "sonata_admin",
+                      "easyadmin_crud",
+                      "messenger_handler",
+                      "webhook_consumer",
+                      "event_subscriber",
+                      "normalizer",
+                      "scheduler",
+                      "twig_extension",
+                      "template",
+                      "config",
+                      "php",
+                      "other"
+                    ],
                     "description": "File-type bucket the skill applies to (controller, voter, entity, repository, form, template, config, php, …)."
                   },
                   "instructions": {

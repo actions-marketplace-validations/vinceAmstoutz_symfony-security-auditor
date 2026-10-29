@@ -23,6 +23,8 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ContextAwareAttackerCacheInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\Exception\InvalidCacheConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\Exception\UnsafeCacheWriteException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\PrivateFileWriter;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\SymlinkGuard;
 
 use function Symfony\Component\String\u;
 
@@ -106,8 +108,7 @@ final readonly class FilesystemAttackerCache implements ContextAwareAttackerCach
         try {
             $this->assertSafeToWrite($path);
             $encoded = json_encode($rawVulnerabilities, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES);
-            $this->filesystem->mkdir(\dirname($path));
-            $this->filesystem->dumpFile($path, $encoded);
+            PrivateFileWriter::write($this->filesystem, $path, $encoded);
             $this->logger->debug('Attacker cache stored', ['path' => $path]);
         } catch (Throwable $throwable) {
             $this->logger->warning('Failed to write attacker cache entry', [
@@ -140,11 +141,14 @@ final readonly class FilesystemAttackerCache implements ContextAwareAttackerCach
      * `Filesystem::readFile()` also transparently follows a symlink, so the
      * same pre-planted symlink that would otherwise corrupt a write turns an
      * ordinary cache read into an arbitrary-file read whose content is
-     * trusted as a real, previously-computed finding.
+     * trusted as a real, previously-computed finding. The cache directory is
+     * the trusted root: it and the directories above it are taken as
+     * configured, so a symlinked `var/` or `~/.cache` does not turn the cache
+     * off, while a symlink planted below it is still refused.
      */
     private function isSymlinkedPath(string $path): bool
     {
-        return is_link($path) || is_link(\dirname($path));
+        return SymlinkGuard::isThroughSymlink($path, $this->cacheDir);
     }
 
     /**

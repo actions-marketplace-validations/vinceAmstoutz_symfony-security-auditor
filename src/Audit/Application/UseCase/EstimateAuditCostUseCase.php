@@ -17,7 +17,7 @@ use Psr\Log\LoggerInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAgent;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunking\FileChunker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\CostCalculator;
-use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Scan\ScanPathFilter;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Scan\ScopedScan;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditContextException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditCostException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AgentRole;
@@ -26,6 +26,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditCost;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditReport;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFileType;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\SymfonyMapping;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\StageInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\AttackerPromptBuilderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\AttackerSkillPromptRendererInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\GitChangedFilesResolverInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ProjectFileScannerInterface;
@@ -101,17 +104,21 @@ final readonly class EstimateAuditCostUseCase
         private bool $toolsEnabled = true,
         private float $toolRoundTripRatio = self::DEFAULT_TOOL_ROUND_TRIP_RATIO,
         private int $maxToolIterations = AttackerAgent::DEFAULT_MAX_TOOL_ITERATIONS,
+        private ?AttackerPromptBuilderInterface $attackerPromptBuilder = null,
+        private ?StageInterface $mappingStage = null,
+        private ?SinceClosurePreview $sinceClosurePreview = null,
     ) {}
 
     /**
-     * @param list<string> $scanPaths    optional project-relative subdirectories
-     *                                   to restrict the estimate to; empty list
-     *                                   (the default) estimates over the whole
-     *                                   project
+     * @param list<string> $scanPaths    optional project-relative paths to scope
+     *                                   the estimate to, as a run does; empty list
+     *                                   (the default) estimates over the configured
+     *                                   scan surface
      * @param ?string      $diffSinceRef when set, mirrors `IngestionStage` by
      *                                   narrowing the estimate to files changed
      *                                   against this git ref, matching what an
-     *                                   `audit:run --since` would actually scan
+     *                                   `audit:run --since` would actually scan,
+     *                                   with the files `audit.since_closure` adds
      *
      * @throws InvalidAuditContextException
      * @throws InvalidAuditCostException
@@ -121,34 +128,41 @@ final readonly class EstimateAuditCostUseCase
         $this->logger->info('Estimating audit cost (dry-run)', ['project' => $projectPath, 'scan_paths' => $scanPaths]);
 
         $auditContext = AuditContext::forProject($projectPath, $scanPaths, diffSinceRef: $diffSinceRef);
-        $files = $this->filterByScanPaths($this->projectFileScanner->scan($projectPath), $scanPaths);
+        $auditContext->markAsCostEstimate();
+
+        $scopedScanResult = ScopedScan::resolve($this->projectFileScanner, $projectPath, $scanPaths);
+        $scannedFiles = $scopedScanResult->audited->files;
+        $files = $scannedFiles;
         if (null !== $diffSinceRef && $this->gitChangedFilesResolver instanceof GitChangedFilesResolverInterface) {
             $files = $this->filterByGitDiff($projectPath, $diffSinceRef, $files);
+            $files = $this->sinceClosurePreview?->auditedFiles($projectPath, $scanPaths, $diffSinceRef, $files, $scopedScanResult->mappingFiles) ?? $files;
         }
 
         $auditContext->setProjectFiles($files);
+        $auditContext->setFilesDiscovered(\count($scannedFiles));
 
         $fileContentPerRoundInput = 0;
         foreach ($files as $file) {
             $fileContentPerRoundInput += $this->tokenEstimator->estimateTokens($file->content(), $this->primaryModel);
         }
 
-        $attackerPerRoundInput = $fileContentPerRoundInput + $this->skillPromptTokensAcrossChunks($files);
+        $chunks = $this->fileChunker->chunk($files);
+        $attackerPerRoundInput = $fileContentPerRoundInput + $this->systemPromptTokens($chunks) + (\count($chunks) * $this->mappingPromptTokens($projectPath, $scanPaths, $scopedScanResult->mappingFiles));
 
         if ($this->toolsEnabled) {
-            $attackerPerRoundInput = (int) ceil($attackerPerRoundInput * $this->toolRoundTripMultiplier());
+            $attackerPerRoundInput = $this->tokenCount($attackerPerRoundInput * $this->toolRoundTripMultiplier());
         }
 
-        $attackerInputTokens = $attackerPerRoundInput * $this->maxIterations;
+        $attackerInputTokens = $this->tokenCount($attackerPerRoundInput * $this->maxIterations);
         $attackerOutputTokens = (int) ceil($attackerInputTokens * $this->outputRatio);
         $attackerCostUsd = $this->costCalculator->costForCall($attackerInputTokens, $attackerOutputTokens, $this->primaryModel);
 
         $reviewerModel = '' === $this->reviewerModel ? $this->primaryModel : $this->reviewerModel;
-        $reviewerInputTokens = (int) ceil($fileContentPerRoundInput * $this->maxIterations * $this->reviewerInputRatio);
+        $reviewerInputTokens = $this->tokenCount($fileContentPerRoundInput * $this->maxIterations * $this->reviewerInputRatio);
         $reviewerOutputTokens = (int) ceil($reviewerInputTokens * $this->outputRatio);
         $reviewerCostUsd = $this->costCalculator->costForCall($reviewerInputTokens, $reviewerOutputTokens, $reviewerModel);
 
-        $estimatedInputTokens = $attackerInputTokens + $reviewerInputTokens;
+        $estimatedInputTokens = $this->tokenCount($attackerInputTokens + $reviewerInputTokens);
         $estimatedOutputTokens = $attackerOutputTokens + $reviewerOutputTokens;
         $estimatedCostUsd = $attackerCostUsd + $reviewerCostUsd;
 
@@ -182,6 +196,20 @@ final readonly class EstimateAuditCostUseCase
     }
 
     /**
+     * A count the arithmetic above carried past the largest integer, which
+     * only an iteration setting far beyond any run reaches, is held at that
+     * integer; any other count is the one it computed, rounded up.
+     */
+    private function tokenCount(int|float $tokens): int
+    {
+        if (\is_int($tokens)) {
+            return $tokens;
+        }
+
+        return $tokens < \PHP_INT_MAX ? (int) ceil($tokens) : \PHP_INT_MAX;
+    }
+
+    /**
      * `audit.max_tool_iterations` caps the tool-call rounds a chunk may take,
      * so it caps the conversation those rounds re-send. Scaling the calibrated
      * ratio by the configured bound keeps the estimate honest for a user who
@@ -194,23 +222,53 @@ final readonly class EstimateAuditCostUseCase
     }
 
     /**
-     * The real run renders the skill block per chunk, filtered to that
-     * chunk's own file types (`AttackerPromptBuilder::skillsForFiles()`).
-     * Summing a per-chunk render here, instead of rendering once from the
-     * whole project's type union and multiplying by the chunk count, keeps
-     * the estimate accurate when `stable_system_prompt` is `false` and each
-     * chunk pulls in a smaller skill subset than the project as a whole.
+     * What the system prompt of each chunk adds to the files it carries. With a
+     * prompt builder, the prompt the real run sends: its base text and the
+     * skill blocks of that chunk's own file types. Without one, the skill
+     * blocks alone.
      *
-     * @param list<ProjectFile> $files
+     * @param list<list<ProjectFile>> $chunks
      */
-    private function skillPromptTokensAcrossChunks(array $files): int
+    private function systemPromptTokens(array $chunks): int
     {
         $total = 0;
-        foreach ($this->fileChunker->chunk($files) as $chunkFiles) {
-            $total += $this->skillPromptTokens($chunkFiles);
+        foreach ($chunks as $chunk) {
+            $total += $this->attackerPromptBuilder instanceof AttackerPromptBuilderInterface
+                ? $this->tokenEstimator->estimateTokens($this->attackerPromptBuilder->buildSystemPrompt($chunk), $this->primaryModel)
+                : $this->skillPromptTokens($chunk);
         }
 
         return $total;
+    }
+
+    /**
+     * The project mapping every chunk's user message carries — the firewall,
+     * route access-control, voter and form sections — which grows with the
+     * routes of the project, not with the chunk. The pipeline maps every file
+     * it scanned, however a git diff then narrows the files to audit, and the
+     * configured scope besides when `--path` scopes the scan, with the
+     * `--path` values that pick the configuration of a monorepo application.
+     *
+     * @param list<string>      $scanPaths
+     * @param list<ProjectFile> $mappingFiles
+     *
+     * @throws InvalidAuditContextException
+     */
+    private function mappingPromptTokens(string $projectPath, array $scanPaths, array $mappingFiles): int
+    {
+        if (!$this->attackerPromptBuilder instanceof AttackerPromptBuilderInterface || !$this->mappingStage instanceof StageInterface) {
+            return 0;
+        }
+
+        $auditContext = AuditContext::forProject($projectPath, $scanPaths);
+        $auditContext->setMappingFiles($mappingFiles);
+
+        $this->mappingStage->process($auditContext);
+        $symfonyMapping = $auditContext->mapping();
+
+        return $symfonyMapping instanceof SymfonyMapping
+            ? $this->tokenEstimator->estimateTokens($this->attackerPromptBuilder->buildUserMessage([], $symfonyMapping), $this->primaryModel)
+            : 0;
     }
 
     /**
@@ -226,17 +284,6 @@ final readonly class EstimateAuditCostUseCase
         $skillPrompt = $this->attackerSkillPromptRenderer->render($presentTypes, $this->emitAllSkills);
 
         return '' === $skillPrompt ? 0 : $this->tokenEstimator->estimateTokens($skillPrompt, $this->primaryModel);
-    }
-
-    /**
-     * @param list<ProjectFile> $files
-     * @param list<string>      $scanPaths
-     *
-     * @return list<ProjectFile>
-     */
-    private function filterByScanPaths(array $files, array $scanPaths): array
-    {
-        return ScanPathFilter::apply($files, $scanPaths);
     }
 
     /**

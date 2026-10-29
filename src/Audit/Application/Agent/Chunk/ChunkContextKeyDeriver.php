@@ -13,22 +13,39 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\Chunk;
 
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AccessControlRule;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ApplicationAccessControl;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\FormBinding;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\RouteAccessControl;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\SymfonyMapping;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VoterCapability;
+use WeakMap;
 
 /**
  * Derives the `ChunkContext` cache key everything that isn't the chunk's own
- * file content contributes to: the marker/rejected/previous preambles
- * {@see ChunkContextFactory} renders, plus a fingerprint of the mapping's
- * access-control data. Stateless — every input arrives as a parameter.
+ * file content contributes to: the marker/rejected/previous/candidate
+ * preambles {@see ChunkContextFactory} renders, plus a fingerprint of the
+ * mapping's access-control data. Every chunk of a request shares the
+ * request's mapping, so its fingerprint is computed once per mapping instance
+ * and remembered in a `WeakMap` that lets go of it with the mapping.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
 final readonly class ChunkContextKeyDeriver
 {
+    /**
+     * The fingerprint of every mapping this deriver has seen, dropped with it.
+     *
+     * @var WeakMap<SymfonyMapping, string>
+     */
+    private WeakMap $weakMap;
+
+    public function __construct()
+    {
+        $this->weakMap = new WeakMap();
+    }
+
     /**
      * Hashing each input individually before joining fixes each to 64 hex
      * characters, which can never contain the raw-text join's own separator —
@@ -43,17 +60,22 @@ final readonly class ChunkContextKeyDeriver
      * `StaticPreScannerInterface` implementation (a documented extension
      * point) starts flagging a file differently on an unchanged content hash.
      * The mapping fingerprint serves the same purpose for the access-control
-     * data {@see self::mappingFingerprint()} folds in.
+     * data {@see self::mappingFingerprint()} folds in. The candidate preamble
+     * only exists in an escalation deep pass, so it joins the key only when it
+     * is there: every other chunk keeps the key earlier releases derived, and
+     * their cache entries still hit.
      */
-    public function derive(string $markerPreamble, string $rejectedPreamble, string $previousPreamble, SymfonyMapping $symfonyMapping): string
+    public function derive(string $markerPreamble, string $rejectedPreamble, string $previousPreamble, string $candidatePreamble, SymfonyMapping $symfonyMapping): string
     {
         $mappingFingerprint = $this->mappingFingerprint($symfonyMapping);
 
-        if ('' === $markerPreamble && '' === $rejectedPreamble && '' === $previousPreamble && '' === $mappingFingerprint) {
+        if ('' === $markerPreamble && '' === $rejectedPreamble && '' === $previousPreamble && '' === $candidatePreamble && '' === $mappingFingerprint) {
             return '';
         }
 
-        return hash('sha256', hash('sha256', $markerPreamble).hash('sha256', $rejectedPreamble).hash('sha256', $previousPreamble).hash('sha256', $mappingFingerprint));
+        $candidateHash = '' === $candidatePreamble ? '' : hash('sha256', $candidatePreamble);
+
+        return hash('sha256', hash('sha256', $markerPreamble).hash('sha256', $rejectedPreamble).hash('sha256', $previousPreamble).$candidateHash.hash('sha256', $mappingFingerprint));
     }
 
     /**
@@ -77,11 +99,22 @@ final readonly class ChunkContextKeyDeriver
      */
     private function mappingFingerprint(SymfonyMapping $symfonyMapping): string
     {
+        if (!$this->weakMap->offsetExists($symfonyMapping)) {
+            $this->weakMap[$symfonyMapping] = $this->computeMappingFingerprint($symfonyMapping);
+        }
+
+        return $this->weakMap[$symfonyMapping];
+    }
+
+    private function computeMappingFingerprint(SymfonyMapping $symfonyMapping): string
+    {
         $applicationSecurityMap = $symfonyMapping->toApplicationSecurityMap();
 
         $signatures = [
             ...$applicationSecurityMap->perimeterRules(),
-            ...$this->routeAccessMapSignatures($symfonyMapping->routeAccessMap()),
+            ...$this->accessControlSignatures('', $symfonyMapping->routeAccessMap(), $symfonyMapping->accessControlRules()),
+            ...$this->unreadableConfigurationSignatures($symfonyMapping->unreadableConfigurationFiles()),
+            ...$this->applicationAccessControlSignatures($symfonyMapping->applicationAccessControls()),
             ...$this->routeAccessControlSignatures($symfonyMapping->routeAccessControls()),
             ...$this->voterCapabilitySignatures($applicationSecurityMap->authorizationRules()),
             ...$this->formBindingSignatures($symfonyMapping->formBindings()),
@@ -98,15 +131,52 @@ final readonly class ChunkContextKeyDeriver
     }
 
     /**
+     * The application applies the first `access_control` rule that matches a
+     * request, so the rules count in the order they are declared: the map and
+     * the declared rules each go into one signature that keeps that order,
+     * rather than one per rule that the fingerprint would sort.
+     *
      * @param array<string, list<string>> $routeAccessMap
+     * @param list<AccessControlRule>     $accessControlRules
+     *
+     * @return list<string> none for a mapping without access control rules
+     */
+    private function accessControlSignatures(string $owner, array $routeAccessMap, array $accessControlRules): array
+    {
+        if ([] === $routeAccessMap && [] === $accessControlRules) {
+            return [];
+        }
+
+        return [
+            \sprintf('%saccess control map: %s', $owner, serialize($routeAccessMap)),
+            \sprintf('%saccess control rules: %s', $owner, serialize($accessControlRules)),
+        ];
+    }
+
+    /**
+     * @param list<string> $unreadableConfigurationFiles
      *
      * @return list<string>
      */
-    private function routeAccessMapSignatures(array $routeAccessMap): array
+    private function unreadableConfigurationSignatures(array $unreadableConfigurationFiles): array
+    {
+        return array_map(static fn (string $path): string => \sprintf('unreadable configuration: %s', $path), $unreadableConfigurationFiles);
+    }
+
+    /**
+     * @param array<string, ApplicationAccessControl> $applicationAccessControls
+     *
+     * @return list<string>
+     */
+    private function applicationAccessControlSignatures(array $applicationAccessControls): array
     {
         $signatures = [];
-        foreach ($routeAccessMap as $pattern => $roles) {
-            $signatures[] = \sprintf('%s=%s', $pattern, implode(',', $roles));
+        foreach ($applicationAccessControls as $applicationFolder => $applicationAccessControl) {
+            $signatures = [...$signatures, ...$this->accessControlSignatures(\sprintf('application %s ', $applicationFolder), $applicationAccessControl->routeAccessMap, $applicationAccessControl->accessControlRules)];
+
+            foreach ($applicationAccessControl->firewallRules as $firewallRule) {
+                $signatures[] = \sprintf('application %s firewall: %s', $applicationFolder, $firewallRule);
+            }
         }
 
         return $signatures;

@@ -26,6 +26,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityNarrati
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilitySeverity;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityType;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\GithubAnnotationsReportRenderer;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportPathPrefix;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportRendererInterface;
 
 final class GithubAnnotationsReportRendererTest extends AbstractReportRendererTestCase
@@ -51,6 +52,38 @@ final class GithubAnnotationsReportRendererTest extends AbstractReportRendererTe
 
     /**
      * @throws InvalidAuditContextException
+     */
+    public function test_render_warns_that_an_audit_without_findings_did_not_finish(): void
+    {
+        self::assertStringStartsWith('::warning title=Audit incomplete::Audit incomplete: 2 file(s)', $this->renderer->render($this->makeIncompleteReport()));
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_render_warns_that_a_scan_found_no_file_to_audit(): void
+    {
+        self::assertSame(
+            '::warning title=Audit incomplete::Audit incomplete: the scan found no file to audit, so this report has no verdict and cannot vouch that the project is free of vulnerabilities.',
+            $this->renderer->render($this->makeReportOfAScanThatFoundNoFile()),
+        );
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_render_puts_the_incomplete_warning_on_its_own_line_before_the_findings(): void
+    {
+        $lines = explode("\n", $this->renderer->render($this->makeIncompleteReport($this->makeValidatedVuln())));
+
+        self::assertStringStartsWith('::error ', $lines[1]);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
      * @throws InvalidCodeLocationException
      * @throws InvalidVulnerabilityClassificationException
      * @throws InvalidVulnerabilityNarrativeException
@@ -66,7 +99,7 @@ final class GithubAnnotationsReportRendererTest extends AbstractReportRendererTe
 
         $output = $this->renderer->render($this->makeReport($vulnerability));
 
-        self::assertStringStartsWith('::error ', $output);
+        self::assertSame('::error file=src/Foo.php,line=1,endLine=5,title=Bad?Title::desc%0A%0ARemediation: fix', $output);
     }
 
     /**
@@ -106,6 +139,38 @@ final class GithubAnnotationsReportRendererTest extends AbstractReportRendererTe
         $output = $this->renderer->render($this->makeReport($vulnerability));
 
         self::assertSame('::error file=src/Repo.php,line=12,title=Test Vuln::desc%0A%0ARemediation: fix', $output);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_puts_the_configured_folder_before_the_annotated_file(): void
+    {
+        $githubAnnotationsReportRenderer = new GithubAnnotationsReportRenderer(new ReportPathPrefix('backend'));
+        $vulnerability = $this->makeValidatedVuln(filePath: 'src/Repo.php', lineStart: 12);
+
+        $output = $githubAnnotationsReportRenderer->render($this->makeReport($vulnerability));
+
+        self::assertStringStartsWith('::error file=backend/src/Repo.php,line=12,', $output);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_it_escapes_the_configured_folder_as_part_of_the_file_property(): void
+    {
+        $githubAnnotationsReportRenderer = new GithubAnnotationsReportRenderer(new ReportPathPrefix("apps/a,b:c\nd"));
+        $vulnerability = $this->makeValidatedVuln(filePath: 'src/Repo.php');
+
+        $output = $githubAnnotationsReportRenderer->render($this->makeReport($vulnerability));
+
+        self::assertStringStartsWith('::error file=apps/a%2Cb%3Ac%0Ad/src/Repo.php,line=1,', $output);
     }
 
     /**
@@ -317,5 +382,71 @@ final class GithubAnnotationsReportRendererTest extends AbstractReportRendererTe
         self::assertStringNotContainsString("\u{202D}", $output);
         self::assertStringContainsString('title=[31mTitlerev', $output);
         self::assertStringContainsString('::[2Kdesc%0A%0ARemediation: fix', $output);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    #[DataProvider('invisibleCharactersBetweenACarriageReturnAndALineFeed')]
+    public function test_it_escapes_a_carriage_return_and_a_line_feed_separated_by_an_invisible_character(string $invisible): void
+    {
+        $vulnerability = Vulnerability::of(
+            new VulnerabilityClassification(VulnerabilityType::TWIG_INJECTION, VulnerabilitySeverity::MEDIUM, "t\r".$invisible."\nt", 0.9),
+            new CodeLocation('src/Tpl.php', 3, 3),
+            new VulnerabilityNarrative("a\r".$invisible."\nb", 'vector', 'proof', 'fix'),
+            '{{ raw }}',
+        )->withReviewerValidation(true);
+
+        $output = $this->renderer->render($this->makeReport($vulnerability));
+
+        self::assertSame('::warning file=src/Tpl.php,line=3,title=t%0D'.$invisible.'%0At::a%0D'.$invisible.'%0Ab%0A%0ARemediation: fix', $output);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function invisibleCharactersBetweenACarriageReturnAndALineFeed(): iterable
+    {
+        yield 'zero width space' => ["\u{200B}"];
+        yield 'byte order mark' => ["\u{FEFF}"];
+        yield 'word joiner' => ["\u{2060}"];
+        yield 'soft hyphen' => ["\u{00AD}"];
+        yield 'left-to-right mark' => ["\u{200E}"];
+        yield 'variation selector' => ["\u{FE0F}"];
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    #[DataProvider('delimitersFollowedByACombiningMark')]
+    public function test_it_escapes_a_delimiter_followed_by_a_combining_mark(string $delimiter, string $escapedInTitle, string $escapedInMessage): void
+    {
+        $vulnerability = Vulnerability::of(
+            new VulnerabilityClassification(VulnerabilityType::TWIG_INJECTION, VulnerabilitySeverity::MEDIUM, 'a'.$delimiter."\u{0300}b", 0.9),
+            new CodeLocation('src/Tpl.php', 3, 3),
+            new VulnerabilityNarrative('d'.$delimiter."\u{0301}e", 'vector', 'proof', 'fix'),
+            '{{ raw }}',
+        )->withReviewerValidation(true);
+
+        $output = $this->renderer->render($this->makeReport($vulnerability));
+
+        self::assertSame('::warning file=src/Tpl.php,line=3,title=a'.$escapedInTitle."\u{0300}b::d".$escapedInMessage."\u{0301}e%0A%0ARemediation: fix", $output);
+    }
+
+    /**
+     * @return iterable<string, array{string, string, string}>
+     */
+    public static function delimitersFollowedByACombiningMark(): iterable
+    {
+        yield 'line feed' => ["\n", '%0A', '%0A'];
+        yield 'percent sign' => ['%', '%25', '%25'];
+        yield 'comma' => [',', '%2C', ','];
+        yield 'colon' => [':', '%3A', ':'];
     }
 }

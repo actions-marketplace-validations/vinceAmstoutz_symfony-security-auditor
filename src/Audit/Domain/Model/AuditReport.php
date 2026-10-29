@@ -25,13 +25,12 @@ final readonly class AuditReport
 
     /**
      * @param list<array{stage: string, file: string, status: string}> $coverage
-     * @param list<string>                                             $consumedBaselineFingerprints
      */
     private function __construct(
         private ReportIdentity $reportIdentity,
         private array $coverage,
         ?AuditCost $auditCost,
-        private array $consumedBaselineFingerprints,
+        private SuppressedFindings $suppressedFindings,
         Vulnerability ...$vulnerabilities,
     ) {
         $this->vulnerabilities = $this->orderedMostSevereFirst(array_values($vulnerabilities));
@@ -62,11 +61,14 @@ final readonly class AuditReport
                 $auditContext->startedAt(),
                 new DateTimeImmutable(),
                 \count($auditContext->projectFiles()),
-                \count($auditContext->mappingFiles()),
+                $auditContext->filesDiscovered(),
+                $auditContext->isCostEstimate(),
+                $auditContext->diffSinceRef(),
+                $auditContext->scanPaths(),
             ),
             $auditContext->coverage(),
             $auditCost,
-            $auditContext->consumedBaselineFingerprints(),
+            new SuppressedFindings($auditContext->baselineAcceptedFindings()),
             ...$auditContext->validatedVulnerabilities(),
         );
     }
@@ -81,7 +83,30 @@ final readonly class AuditReport
      */
     public function consumedBaselineFingerprints(): array
     {
-        return $this->consumedBaselineFingerprints;
+        return $this->suppressedFindings->baselineFingerprintsAcceptedBeforeReview();
+    }
+
+    /**
+     * Copy of the report naming each finding the baseline accepted before the
+     * review after the entry whose credit it spent — see
+     * {@see SuppressedFindings::withAcceptedBeforeReviewNamedBy()}. Before the
+     * review, a finding the reviewer had reclassified carries the type the
+     * attacker reports, which only the entry ties to the fingerprint a report
+     * lists the finding under.
+     *
+     * @internal not part of the BC promise — see docs/versioning.md
+     *
+     * @param array<string, list<string>> $entryFingerprintsByBaselineFingerprint
+     */
+    public function withFindingsAcceptedBeforeReviewNamedBy(array $entryFingerprintsByBaselineFingerprint): self
+    {
+        return new self(
+            $this->reportIdentity,
+            $this->coverage,
+            $this->auditCost,
+            $this->suppressedFindings->withAcceptedBeforeReviewNamedBy($entryFingerprintsByBaselineFingerprint),
+            ...$this->vulnerabilities,
+        );
     }
 
     public function auditId(): string
@@ -131,6 +156,68 @@ final readonly class AuditReport
         return $this->coverage;
     }
 
+    /**
+     * Files some stage set out to analyze and never finished — see
+     * {@see UnanalyzedFiles}. A finding can hide in any of them, so a report
+     * listing one cannot vouch for the absence of vulnerabilities.
+     *
+     * @return list<string>
+     */
+    public function unanalyzedFiles(): array
+    {
+        return UnanalyzedFiles::in($this->coverage);
+    }
+
+    /**
+     * Whether every file in scope was analyzed: no stage left one unfinished —
+     * a run stopped before its first LLM call records its files as aborted —
+     * and the report is not a cost estimate of files it never analyzed. A
+     * `--since` run whose diff left no file to analyze has nothing left
+     * unfinished, and neither has a host pipeline that records no coverage.
+     */
+    public function isComplete(): bool
+    {
+        return [] === $this->unanalyzedFiles() && !$this->estimatesFilesItNeverAnalyzed();
+    }
+
+    /**
+     * Whether the run reached no verdict: it analyzed none of the files it
+     * had to — every attacker call failed or was cut short, or none was made —
+     * and holds no finding. A SAFE there would vouch for code nobody read. A
+     * run that holds a finding is a partial run even when it analyzed no file
+     * in full: a response cut short keeps the findings it recorded, while its
+     * chunk is recorded as errored. A scan that found no file at all is
+     * {@see self::foundNoFile()}, which this does not answer.
+     */
+    public function hasNoVerdict(): bool
+    {
+        return !$this->isComplete() && [] === $this->vulnerabilities && [] === AnalyzedFiles::in($this->coverage);
+    }
+
+    /**
+     * Whether the scan found no file at all, before a `--since` diff narrowed
+     * them: nothing was examined.
+     */
+    public function foundNoFile(): bool
+    {
+        return 0 === $this->reportIdentity->filesDiscovered;
+    }
+
+    /**
+     * Whether the report can vouch for nothing: the scan found no file, or the
+     * run reached no verdict ({@see self::hasNoVerdict()}). Neither may be
+     * presented as a clean result.
+     */
+    public function isWithoutVerdict(): bool
+    {
+        return $this->foundNoFile() || $this->hasNoVerdict();
+    }
+
+    private function estimatesFilesItNeverAnalyzed(): bool
+    {
+        return $this->reportIdentity->costEstimate && $this->reportIdentity->filesScanned > 0;
+    }
+
     /** @return list<Vulnerability> */
     public function vulnerabilities(): array
     {
@@ -165,10 +252,12 @@ final readonly class AuditReport
         $remainingByFingerprint = array_count_values($fingerprints);
 
         $kept = [];
+        $removed = [];
         foreach ($this->vulnerabilities as $vulnerability) {
-            $fingerprint = $vulnerability->fingerprint();
-            if (\array_key_exists($fingerprint, $remainingByFingerprint) && $remainingByFingerprint[$fingerprint] > 0) {
-                --$remainingByFingerprint[$fingerprint];
+            $creditedFingerprint = $this->creditedFingerprint($vulnerability, $remainingByFingerprint);
+            if (null !== $creditedFingerprint) {
+                --$remainingByFingerprint[$creditedFingerprint];
+                $removed[] = new SuppressedFinding($vulnerability->fingerprint(), $creditedFingerprint);
 
                 continue;
             }
@@ -180,9 +269,23 @@ final readonly class AuditReport
             $this->reportIdentity,
             $this->coverage,
             $this->auditCost,
-            $this->consumedBaselineFingerprints,
+            $this->suppressedFindings->withRemovedFindings($removed),
             ...$kept,
         );
+    }
+
+    /**
+     * @param array<string, int> $remainingByFingerprint
+     */
+    private function creditedFingerprint(Vulnerability $vulnerability, array $remainingByFingerprint): ?string
+    {
+        foreach ($vulnerability->fingerprintCandidates() as $fingerprintCandidate) {
+            if (\array_key_exists($fingerprintCandidate, $remainingByFingerprint) && $remainingByFingerprint[$fingerprintCandidate] > 0) {
+                return $fingerprintCandidate;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -198,15 +301,15 @@ final readonly class AuditReport
     {
         $kept = array_filter(
             $this->vulnerabilities,
-            static fn (Vulnerability $vulnerability): bool => ([] === $includedTypes || \in_array($vulnerability->type(), $includedTypes, true))
-                && !\in_array($vulnerability->type(), $excludedTypes, true),
+            static fn (Vulnerability $vulnerability): bool => ([] === $includedTypes || $vulnerability->matchesAnyType($includedTypes))
+                && !$vulnerability->matchesAnyType($excludedTypes),
         );
 
         return new self(
             $this->reportIdentity,
             $this->coverage,
             $this->auditCost,
-            $this->consumedBaselineFingerprints,
+            $this->suppressedFindings->withRemoved(array_diff_key($this->vulnerabilities, $kept)),
             ...$kept,
         );
     }
@@ -299,6 +402,8 @@ final readonly class AuditReport
             'completed_at' => $this->reportIdentity->completedAt->format(DateTimeInterface::ATOM),
             'duration_seconds' => $this->durationSeconds(),
             'files_scanned' => $this->reportIdentity->filesScanned,
+            'files_discovered' => $this->reportIdentity->filesDiscovered,
+            'complete' => $this->isComplete(),
             'risk_score' => $this->riskScore(),
             'risk_level' => $this->riskLevel(),
             'score' => $this->normalizedScore(),
@@ -310,7 +415,13 @@ final readonly class AuditReport
                 $this->vulnerabilities,
             ),
             'cost' => $this->auditCost->toArray(),
+            'scope' => [
+                'since' => $this->reportIdentity->diffSinceRef,
+                'paths' => $this->reportIdentity->scanPaths,
+            ],
             'coverage' => $this->coverage,
+            'suppressed_fingerprints' => $this->suppressedFindings->fingerprints(),
+            'suppressed_baseline_fingerprints' => $this->suppressedFindings->baselineFingerprints(),
         ];
     }
 }

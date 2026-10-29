@@ -16,15 +16,22 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan;
 use Override;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
-use Symfony\Component\Yaml\Exception\ParseException;
-use Symfony\Component\Yaml\Yaml;
-use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\SecurityConfigParserInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AccessControlRule;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProductionConfiguration;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ImportAwareSecurityConfigParserInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\RuleOrderAwareSecurityConfigParserInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan\Exception\UnreadableYamlException;
 
 /** @internal not part of the BC promise — see docs/versioning.md */
-final readonly class SymfonyYamlSecurityConfigParser implements SecurityConfigParserInterface
+final readonly class SymfonyYamlSecurityConfigParser implements ImportAwareSecurityConfigParserInterface, RuleOrderAwareSecurityConfigParserInterface
 {
+    private const string PRODUCTION_ENVIRONMENT_BLOCK = 'when@prod';
+
     public function __construct(
         private LoggerInterface $logger = new NullLogger(),
+        private AccessControlRequirementReader $accessControlRequirementReader = new AccessControlRequirementReader(),
+        private KernelConfigurationLoader $kernelConfigurationLoader = new KernelConfigurationLoader(),
+        private RepositoryYamlReader $repositoryYamlReader = new RepositoryYamlReader(),
     ) {}
 
     #[Override]
@@ -36,6 +43,38 @@ final readonly class SymfonyYamlSecurityConfigParser implements SecurityConfigPa
         }
 
         return $routeAccessMap;
+    }
+
+    #[Override]
+    public function isLoadedInProduction(string $relativePath): bool
+    {
+        return KernelConfigurationLoader::isLoadedByTheKernel($relativePath);
+    }
+
+    #[Override]
+    public function loadRank(string $relativePath): int
+    {
+        return KernelConfigurationLoader::loadRank($relativePath);
+    }
+
+    #[Override]
+    public function productionConfiguration(array $files, array $scanPaths): ProductionConfiguration
+    {
+        return $this->kernelConfigurationLoader->filesInLoadOrder($files, $scanPaths);
+    }
+
+    /**
+     * Every rule with a path or a route, those that check nothing included.
+     */
+    #[Override]
+    public function parseAccessControlRules(string $configContent): array
+    {
+        $accessControlRules = [];
+        foreach ($this->securitySections($configContent) as $section) {
+            $accessControlRules = [...$accessControlRules, ...$this->accessControlRulesOf($section)];
+        }
+
+        return $accessControlRules;
     }
 
     #[Override]
@@ -62,11 +101,6 @@ final readonly class SymfonyYamlSecurityConfigParser implements SecurityConfigPa
     private const string PUBLIC_ACCESS_MARKER = 'PUBLIC';
 
     /**
-     * @var list<string>
-     */
-    private const array REQUIREMENT_KEYS = ['roles', 'role', 'allow_if', 'methods', 'ips', 'requires_channel', 'host', 'port'];
-
-    /**
      * Symfony evaluates `access_control` first-match-wins, so a later rule for
      * an already-seen path applies only to requests the earlier rule's
      * constraints (methods, ips, …) did not match — it is appended as a single
@@ -79,48 +113,90 @@ final readonly class SymfonyYamlSecurityConfigParser implements SecurityConfigPa
      */
     private function accessControlOf(array $section, array $routeAccessMap): array
     {
-        $entries = $section['access_control'] ?? null;
-        if (!\is_array($entries)) {
-            return $routeAccessMap;
-        }
+        foreach ($this->recordedEntriesOf($section) as [$target, $requirements]) {
+            if (\array_key_exists($target, $routeAccessMap)) {
+                $routeAccessMap[$target][] = \sprintf('or: %s', implode(', ', $requirements));
 
-        foreach ($entries as $entry) {
-            $routeAccessMap = $this->recordAccessControlEntry($this->mapOf($entry), $routeAccessMap);
+                continue;
+            }
+
+            $routeAccessMap[$target] = $requirements;
         }
 
         return $routeAccessMap;
     }
 
     /**
-     * @param array<string, mixed>        $entry
-     * @param array<string, list<string>> $routeAccessMap
+     * @param array<string, mixed> $section
      *
-     * @return array<string, list<string>>
+     * @return list<array{string, list<string>}> the target and requirements of each entry that has both, in the order declared
      */
-    private function recordAccessControlEntry(array $entry, array $routeAccessMap): array
+    private function recordedEntriesOf(array $section): array
+    {
+        $entries = $section['access_control'] ?? null;
+
+        $recordedEntries = [];
+        foreach (\is_array($entries) ? $entries : [] as $entry) {
+            $recordedEntries[] = $this->recordAccessControlEntry($this->mapOf($entry));
+        }
+
+        return array_merge(...$recordedEntries);
+    }
+
+    /**
+     * @param array<string, mixed> $entry
+     *
+     * @return list<array{string, list<string>}> the entry's target and requirements, or none for an entry without a target or a requirement
+     */
+    private function recordAccessControlEntry(array $entry): array
     {
         $target = $this->targetOf($entry);
-        if (null === $target || !$this->hasAnyRequirementKey($entry)) {
-            return $routeAccessMap;
+        if (null === $target || !$this->accessControlRequirementReader->hasAnyRequirementKey($entry)) {
+            return [];
         }
 
-        $requirements = $this->requirementsOf($entry);
+        $requirements = $this->accessControlRequirementReader->requirementsOf($entry);
 
-        if (\array_key_exists($target, $routeAccessMap)) {
-            $orRequirements = [] === $requirements ? [self::PUBLIC_ACCESS_MARKER] : $requirements;
-            $routeAccessMap[$target][] = \sprintf('or: %s', implode(', ', $orRequirements));
-
-            return $routeAccessMap;
-        }
-
-        $routeAccessMap[$target] = [] === $requirements ? [self::PUBLIC_ACCESS_MARKER] : $requirements;
-
-        return $routeAccessMap;
+        return [[$target, [] === $requirements ? [self::PUBLIC_ACCESS_MARKER] : $requirements]];
     }
 
     /**
-     * The `security` blocks of the document: the root one plus every
-     * environment-scoped `when@<env>` override. A bare root-level
+     * @param array<string, mixed> $section
+     *
+     * @return list<AccessControlRule>
+     */
+    private function accessControlRulesOf(array $section): array
+    {
+        $entries = $section['access_control'] ?? null;
+
+        $accessControlRules = [];
+        foreach (\is_array($entries) ? $entries : [] as $entry) {
+            $accessControlRules[] = $this->accessControlRuleOf($this->mapOf($entry));
+        }
+
+        return array_merge(...$accessControlRules);
+    }
+
+    /**
+     * @param array<string, mixed> $entry
+     *
+     * @return list<AccessControlRule> the rule, or none for an entry without a path or a route
+     */
+    private function accessControlRuleOf(array $entry): array
+    {
+        $target = $this->targetOf($entry);
+        if (null === $target) {
+            return [];
+        }
+
+        return [new AccessControlRule($target, $this->accessControlRequirementReader->methodsOf($entry), $this->accessControlRequirementReader->restricts($entry))];
+    }
+
+    /**
+     * The `security` blocks of the document the production kernel reads, in the
+     * order it loads them: the root one, then the `when@prod` override,
+     * wherever the document writes them — a `when@test` or `when@dev` block
+     * protects nothing in production. A bare root-level
      * `access_control`/`firewalls` document (an imported partial) also counts
      * as a section.
      *
@@ -135,10 +211,10 @@ final readonly class SymfonyYamlSecurityConfigParser implements SecurityConfigPa
             $sections[] = $document;
         }
 
-        foreach ($document as $key => $value) {
-            $block = $this->securityBlockOf($key, $value);
-            if (null !== $block) {
-                $sections[] = $block;
+        $productionOverride = $this->mapOf($document[self::PRODUCTION_ENVIRONMENT_BLOCK] ?? null);
+        foreach ([$document['security'] ?? null, $productionOverride['security'] ?? null] as $security) {
+            if (\is_array($security)) {
+                $sections[] = $this->mapOf($security);
             }
         }
 
@@ -148,32 +224,14 @@ final readonly class SymfonyYamlSecurityConfigParser implements SecurityConfigPa
     private function parseYaml(string $configContent): mixed
     {
         try {
-            return Yaml::parse($configContent);
-        } catch (ParseException $parseException) {
+            return $this->repositoryYamlReader->read($configContent);
+        } catch (UnreadableYamlException $unreadableYamlException) {
             $this->logger->debug('Skipping unparseable YAML during security-config mapping', [
-                'error' => $parseException->getMessage(),
+                'error' => $unreadableYamlException->getMessage(),
             ]);
 
             return null;
         }
-    }
-
-    /**
-     * @return ?array<string, mixed>
-     */
-    private function securityBlockOf(string $key, mixed $value): ?array
-    {
-        if ('security' === $key) {
-            return \is_array($value) ? $this->mapOf($value) : null;
-        }
-
-        if (!str_starts_with($key, 'when@')) {
-            return null;
-        }
-
-        $security = $this->mapOf($value)['security'] ?? null;
-
-        return \is_array($security) ? $this->mapOf($security) : null;
     }
 
     /**
@@ -193,100 +251,6 @@ final readonly class SymfonyYamlSecurityConfigParser implements SecurityConfigPa
         }
 
         return null;
-    }
-
-    /**
-     * Distinguishes an entry that declares a requirement key but with an
-     * empty value (`roles: []` — a deliberate public rule) from one that
-     * declares no requirement key at all (a degenerate entry with nothing to
-     * record).
-     *
-     * @param array<string, mixed> $entry
-     */
-    private function hasAnyRequirementKey(array $entry): bool
-    {
-        foreach (self::REQUIREMENT_KEYS as $requirementKey) {
-            if (\array_key_exists($requirementKey, $entry)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * @param array<string, mixed> $entry
-     *
-     * @return list<string>
-     */
-    private function requirementsOf(array $entry): array
-    {
-        $requirements = $this->stringListOf($entry['roles'] ?? $entry['role'] ?? null);
-
-        if (\is_string($entry['allow_if'] ?? null)) {
-            $requirements[] = \sprintf('allow_if: %s', $entry['allow_if']);
-        }
-
-        return [...$requirements, ...$this->listedRequirements($entry), ...$this->scalarRequirements($entry)];
-    }
-
-    /**
-     * @param array<string, mixed> $entry
-     *
-     * @return list<string>
-     */
-    private function listedRequirements(array $entry): array
-    {
-        $requirements = [];
-        foreach (['methods' => '|', 'ips' => ', '] as $key => $separator) {
-            $values = $this->stringListOf($entry[$key] ?? null);
-            if ('methods' === $key) {
-                $values = array_map(strtoupper(...), $values);
-            }
-
-            if ([] !== $values) {
-                $requirements[] = \sprintf('%s: %s', $key, implode($separator, $values));
-            }
-        }
-
-        return $requirements;
-    }
-
-    /**
-     * @param array<string, mixed> $entry
-     *
-     * @return list<string>
-     */
-    private function scalarRequirements(array $entry): array
-    {
-        $scalarValues = array_filter(
-            ['requires_channel' => $entry['requires_channel'] ?? null, 'host' => $entry['host'] ?? null, 'port' => $entry['port'] ?? null],
-            static fn (mixed $value): bool => \is_string($value) || \is_int($value),
-        );
-
-        return array_map(
-            static fn (string $key, string|int $value): string => \sprintf('%s: %s', $key, $value),
-            array_keys($scalarValues),
-            $scalarValues,
-        );
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function stringListOf(mixed $value): array
-    {
-        if (\is_string($value)) {
-            $parts = array_map(trim(...), explode(',', $value));
-
-            return array_values(array_filter($parts, static fn (string $part): bool => '' !== $part));
-        }
-
-        if (!\is_array($value)) {
-            return [];
-        }
-
-        return array_values(array_filter($value, is_string(...)));
     }
 
     /**

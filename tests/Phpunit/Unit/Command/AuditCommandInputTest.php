@@ -13,8 +13,10 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Command;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\RiskLevel;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommandDefaults;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\AuditCommandInput;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\ConflictingCommandOptionsException;
 use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\WorkingDirectoryUnavailableException;
@@ -60,6 +62,33 @@ final class AuditCommandInputTest extends TestCase
         $auditCommandInput->format = OutputFormat::Json;
 
         self::assertFalse($auditCommandInput->isMachineReadableToStdout());
+    }
+
+    public function test_the_report_file_is_the_output_option_when_a_report_is_written(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->output = '/tmp/report.json';
+
+        self::assertSame('/tmp/report.json', $auditCommandInput->reportFile());
+    }
+
+    public function test_show_scanned_alone_has_no_report_file_since_it_writes_no_report(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->output = '/tmp/report.json';
+        $auditCommandInput->showScanned = true;
+
+        self::assertNull($auditCommandInput->reportFile());
+    }
+
+    public function test_show_scanned_with_dry_run_keeps_the_report_file_of_its_estimate(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->output = '/tmp/report.json';
+        $auditCommandInput->showScanned = true;
+        $auditCommandInput->dryRun = true;
+
+        self::assertSame('/tmp/report.json', $auditCommandInput->reportFile());
     }
 
     public function test_default_format_is_console(): void
@@ -193,6 +222,55 @@ final class AuditCommandInputTest extends TestCase
         self::assertSame('/custom/cwd', $auditCommandInput->resolvedProjectPath(static fn (): string => '/custom/cwd'));
     }
 
+    /**
+     * @throws WorkingDirectoryUnavailableException
+     */
+    #[DataProvider('projectPathsThatAreNotValidUtf8')]
+    public function test_resolved_project_path_accepts_a_path_that_is_not_valid_utf8(string $projectPath, string $expected): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->projectPath = $projectPath;
+
+        self::assertSame($expected, $auditCommandInput->resolvedProjectPath(static fn (): string => '/custom/cwd'));
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function projectPathsThatAreNotValidUtf8(): iterable
+    {
+        yield 'an absolute path' => ["/srv/caf\xE9", "/srv/caf\xE9"];
+        yield 'an absolute path with surrounding whitespace' => [" \t/srv/caf\xE9\n ", "/srv/caf\xE9"];
+        yield 'a relative path' => ["caf\xE9", "/custom/cwd/caf\xE9"];
+        yield 'a relative path with surrounding whitespace' => [" caf\xE9 ", "/custom/cwd/caf\xE9"];
+    }
+
+    /**
+     * @param list<string> $paths
+     * @param list<string> $expected
+     */
+    #[DataProvider('scanPathsThatAreNotValidUtf8')]
+    public function test_scan_paths_accept_paths_that_are_not_valid_utf8(array $paths, array $expected): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->paths = $paths;
+
+        self::assertSame($expected, $auditCommandInput->scanPaths());
+    }
+
+    /**
+     * @return iterable<string, array{list<string>, list<string>}>
+     */
+    public static function scanPathsThatAreNotValidUtf8(): iterable
+    {
+        yield 'a plain path' => [["src/caf\xE9"], ["src/caf\xE9"]];
+        yield 'surrounding whitespace' => [[" src/caf\xE9 "], ["src/caf\xE9"]];
+        yield 'trailing separators' => [["src/caf\xE9//"], ["src/caf\xE9"]];
+        yield 'a leading current directory segment' => [["./src/caf\xE9"], ["src/caf\xE9"]];
+        yield 'a doubled leading current directory segment' => [[".//./caf\xE9"], ["caf\xE9"]];
+        yield 'a blank entry between two paths' => [["caf\xE9", '  ', "src/caf\xE9"], ["caf\xE9", "src/caf\xE9"]];
+    }
+
     public function test_default_paths_is_empty_list(): void
     {
         $auditCommandInput = new AuditCommandInput();
@@ -270,6 +348,104 @@ final class AuditCommandInputTest extends TestCase
         self::assertNull($auditCommandInput->failOn);
     }
 
+    public function test_default_fail_on_incomplete_is_unset_so_the_configuration_can_decide(): void
+    {
+        self::assertNull((new AuditCommandInput())->failOnIncomplete);
+    }
+
+    public function test_the_flag_decides_whether_an_incomplete_run_fails_until_the_configuration_is_applied(): void
+    {
+        self::assertSame('--fail-on-incomplete', (new AuditCommandInput())->failOnIncompleteSetting());
+    }
+
+    public function test_the_configuration_decides_whether_an_incomplete_run_fails_when_the_flag_is_unset(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(failOnIncomplete: true));
+
+        self::assertSame('audit.fail_on_incomplete', $auditCommandInput->failOnIncompleteSetting());
+    }
+
+    #[DataProvider('failOnIncompleteFlags')]
+    public function test_the_flag_decides_whether_an_incomplete_run_fails_whatever_the_configuration_says(bool $failOnIncomplete): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->failOnIncomplete = $failOnIncomplete;
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(failOnIncomplete: true));
+
+        self::assertSame('--fail-on-incomplete', $auditCommandInput->failOnIncompleteSetting());
+    }
+
+    /**
+     * @return iterable<string, array{bool}>
+     */
+    public static function failOnIncompleteFlags(): iterable
+    {
+        yield '--fail-on-incomplete' => [true];
+        yield '--no-fail-on-incomplete' => [false];
+    }
+
+    public function test_the_configured_defaults_fill_what_the_command_line_left_unset(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(80, true, OutputFormat::Sarif, 'audit.sarif'));
+
+        self::assertSame(80, $auditCommandInput->minScore);
+        self::assertTrue($auditCommandInput->failsOnIncomplete());
+        self::assertSame(OutputFormat::Sarif, $auditCommandInput->format);
+        self::assertSame('audit.sarif', $auditCommandInput->output);
+    }
+
+    public function test_what_the_command_line_gave_wins_over_the_configured_defaults(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->minScore = 50;
+        $auditCommandInput->failOnIncomplete = false;
+        $auditCommandInput->givenFormat = OutputFormat::Markdown;
+        $auditCommandInput->output = 'cli.md';
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(80, true, OutputFormat::Sarif, 'audit.sarif'));
+
+        self::assertSame(50, $auditCommandInput->minScore);
+        self::assertFalse($auditCommandInput->failsOnIncomplete());
+        self::assertSame(OutputFormat::Markdown, $auditCommandInput->format);
+        self::assertSame('cli.md', $auditCommandInput->output);
+    }
+
+    public function test_a_format_named_on_the_command_line_wins_even_when_it_is_the_default_one(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->givenFormat = OutputFormat::Console;
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(format: OutputFormat::Json));
+
+        self::assertSame(OutputFormat::Console, $auditCommandInput->format);
+    }
+
+    public function test_an_unset_fail_on_incomplete_does_not_fail_the_run_when_nothing_configures_it(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults());
+
+        self::assertFalse($auditCommandInput->failsOnIncomplete());
+        self::assertNull($auditCommandInput->minScore);
+        self::assertSame(OutputFormat::Console, $auditCommandInput->format);
+        self::assertNull($auditCommandInput->output);
+    }
+
+    public function test_the_configured_format_decides_whether_the_report_goes_to_stdout(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(format: OutputFormat::Json));
+
+        self::assertTrue($auditCommandInput->isMachineReadableToStdout());
+    }
+
     public function test_fail_on_accepts_a_risk_level(): void
     {
         $auditCommandInput = new AuditCommandInput();
@@ -330,6 +506,149 @@ final class AuditCommandInputTest extends TestCase
 
         $this->expectException(ConflictingCommandOptionsException::class);
         $this->expectExceptionMessage('--generate-baseline requires a real audit run and cannot be combined with --show-scanned, which exits before the LLM is ever invoked.');
+
+        $auditCommandInput->assertNoConflictingOptions();
+    }
+
+    #[DataProvider('scoresWithinTheRange')]
+    public function test_a_score_from_zero_to_one_hundred_is_neither_below_nor_above_the_range(?int $minScore): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->minScore = $minScore;
+
+        self::assertNull($auditCommandInput->minScoreBelowRange());
+        self::assertNull($auditCommandInput->minScoreAboveRange());
+        self::assertSame($minScore, $auditCommandInput->minScore);
+    }
+
+    /**
+     * @return iterable<string, array{?int}>
+     */
+    public static function scoresWithinTheRange(): iterable
+    {
+        yield 'no gate' => [null];
+        yield 'the floor' => [0];
+        yield 'a middle score' => [75];
+        yield 'the ceiling' => [100];
+    }
+
+    #[DataProvider('scoresBelowTheRange')]
+    public function test_a_score_below_zero_is_returned_as_below_the_range_and_kept(int $minScore): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->minScore = $minScore;
+
+        self::assertSame($minScore, $auditCommandInput->minScoreBelowRange());
+        self::assertNull($auditCommandInput->minScoreAboveRange());
+        self::assertSame($minScore, $auditCommandInput->minScore);
+    }
+
+    /**
+     * @return iterable<string, array{int}>
+     */
+    public static function scoresBelowTheRange(): iterable
+    {
+        yield 'just below the floor' => [-1];
+        yield 'far below the floor' => [-50];
+    }
+
+    #[DataProvider('scoresAboveTheRange')]
+    public function test_a_score_above_one_hundred_is_returned_as_above_the_range_and_kept(int $minScore): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->minScore = $minScore;
+
+        self::assertSame($minScore, $auditCommandInput->minScoreAboveRange());
+        self::assertNull($auditCommandInput->minScoreBelowRange());
+        self::assertSame($minScore, $auditCommandInput->minScore);
+    }
+
+    /**
+     * @return iterable<string, array{int}>
+     */
+    public static function scoresAboveTheRange(): iterable
+    {
+        yield 'just above the ceiling' => [101];
+        yield 'far above the ceiling' => [150];
+    }
+
+    public function test_a_no_output_flag_keeps_the_configured_output_from_applying(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->noOutput = true;
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(output: 'audit.sarif'));
+
+        self::assertNull($auditCommandInput->reportFile());
+    }
+
+    public function test_a_dry_run_does_not_write_its_estimate_over_the_configured_output(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->dryRun = true;
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(output: 'audit.sarif'));
+
+        self::assertNull($auditCommandInput->reportFile());
+    }
+
+    public function test_a_dry_run_still_writes_to_an_output_given_on_the_command_line(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->dryRun = true;
+        $auditCommandInput->output = 'estimate.json';
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(output: 'audit.sarif'));
+
+        self::assertSame('estimate.json', $auditCommandInput->reportFile());
+    }
+
+    public function test_an_empty_configured_output_prints_the_report_as_an_unset_one_does(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->givenFormat = OutputFormat::Json;
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(output: ''));
+
+        self::assertNull($auditCommandInput->reportFile());
+        self::assertTrue($auditCommandInput->isMachineReadableToStdout());
+    }
+
+    public function test_a_no_output_flag_prints_a_machine_readable_report_to_stdout(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->noOutput = true;
+        $auditCommandInput->givenFormat = OutputFormat::Json;
+
+        $auditCommandInput->applyDefaults(new AuditCommandDefaults(output: 'audit.json'));
+
+        self::assertTrue($auditCommandInput->isMachineReadableToStdout());
+    }
+
+    /**
+     * @throws ConflictingCommandOptionsException
+     */
+    public function test_assert_no_conflicting_options_allows_no_output_alone(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->noOutput = true;
+
+        $auditCommandInput->assertNoConflictingOptions();
+
+        self::assertTrue($auditCommandInput->noOutput);
+    }
+
+    /**
+     * @throws ConflictingCommandOptionsException
+     */
+    public function test_assert_no_conflicting_options_rejects_output_with_no_output(): void
+    {
+        $auditCommandInput = new AuditCommandInput();
+        $auditCommandInput->output = 'report.json';
+        $auditCommandInput->noOutput = true;
+
+        $this->expectException(ConflictingCommandOptionsException::class);
+        $this->expectExceptionMessage('--output and --no-output cannot be combined: one writes the report to a file, the other prints it.');
 
         $auditCommandInput->assertNoConflictingOptions();
     }

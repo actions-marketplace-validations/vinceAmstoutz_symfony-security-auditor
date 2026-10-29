@@ -30,6 +30,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilitySeverit
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VulnerabilityType;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\BaselineSuppressingReportRendererInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportPackage;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportPathPrefix;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\ReportRendererInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Report\SarifReportRenderer;
 
@@ -76,6 +77,42 @@ final class SarifReportRendererTest extends AbstractReportRendererTestCase
         $decoded = $this->decodeSarif($this->makeReport($vulnerability));
 
         self::assertCount(1, $decoded['runs'][0]['results']);
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_render_records_a_complete_audit_as_a_successful_invocation(): void
+    {
+        self::assertSame([['executionSuccessful' => true]], $this->invocationsOf($this->makeReport()));
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_render_records_an_incomplete_audit_as_a_failed_invocation_and_says_why(): void
+    {
+        self::assertSame(
+            [[
+                'executionSuccessful' => false,
+                'toolExecutionNotifications' => [['level' => 'error', 'message' => ['text' => 'Audit incomplete: 2 file(s) could not be fully analyzed (a scan or LLM call failed, or the run was aborted), so this report cannot vouch that the project is free of vulnerabilities.']]],
+            ]],
+            $this->invocationsOf($this->makeIncompleteReport()),
+        );
+    }
+
+    /**
+     * @throws InvalidAuditContextException
+     */
+    public function test_render_records_a_scan_that_found_no_file_as_a_failed_invocation(): void
+    {
+        self::assertSame(
+            [[
+                'executionSuccessful' => false,
+                'toolExecutionNotifications' => [['level' => 'error', 'message' => ['text' => 'Audit incomplete: the scan found no file to audit, so this report has no verdict and cannot vouch that the project is free of vulnerabilities.']]],
+            ]],
+            $this->invocationsOf($this->makeReportOfAScanThatFoundNoFile()),
+        );
     }
 
     /**
@@ -188,6 +225,56 @@ final class SarifReportRendererTest extends AbstractReportRendererTestCase
         self::assertArrayHasKey('properties', $result);
         self::assertSame('9.3', $result['properties']['security-severity']);
         self::assertSame('CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N', $result['properties']['cvssV4_0Vector']);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_a_rule_spanning_several_severities_carries_only_the_cwe_tags_and_each_result_its_own_score(): void
+    {
+        $vulnerability = $this->makeValidatedVuln(VulnerabilityType::SQL_INJECTION, VulnerabilitySeverity::CRITICAL, 'src/Critical.php');
+        $low = $this->makeValidatedVuln(VulnerabilityType::XSS, VulnerabilitySeverity::LOW, 'src/Low.php');
+        $medium = $this->makeValidatedVuln(VulnerabilityType::COMMAND_INJECTION, VulnerabilitySeverity::MEDIUM, 'src/Medium.php');
+
+        $decoded = $this->decodeSarif($this->makeReport($low, $vulnerability, $medium));
+
+        self::assertSame(
+            [[
+                'id' => VulnerabilityType::COMMAND_INJECTION->owaspReference(),
+                'name' => 'command_injection',
+                'shortDescription' => ['text' => VulnerabilityType::COMMAND_INJECTION->category()],
+                'helpUri' => VulnerabilityType::COMMAND_INJECTION->owaspReferenceUrl(),
+                'properties' => ['tags' => ['external/cwe/cwe-78', 'external/cwe/cwe-89', 'external/cwe/cwe-79']],
+            ]],
+            $decoded['runs'][0]['tool']['driver']['rules'],
+        );
+        self::assertSame(
+            ['src/Critical.php' => '9.3', 'src/Medium.php' => '5.8', 'src/Low.php' => '3.1'],
+            $this->securitySeveritiesByFile($decoded['runs'][0]['results']),
+        );
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_a_baseline_leaves_the_rule_properties_as_the_cwe_tags_and_the_result_scores_as_they_are(): void
+    {
+        $vulnerability = $this->makeValidatedVuln(VulnerabilityType::SQL_INJECTION, VulnerabilitySeverity::CRITICAL, 'src/Accepted.php');
+        $open = $this->makeValidatedVuln(VulnerabilityType::XSS, VulnerabilitySeverity::LOW, 'src/Open.php');
+
+        $decoded = $this->decodeSarifWithSuppressions($this->makeReport($vulnerability, $open), [$vulnerability->fingerprint()]);
+
+        $rules = $decoded['runs'][0]['tool']['driver']['rules'];
+        self::assertCount(1, $rules);
+        self::assertSame(['tags' => ['external/cwe/cwe-89', 'external/cwe/cwe-79']], array_values($rules)[0]['properties']);
+        self::assertSame(['9.3', '3.1'], array_map(static fn (array $result): string => $result['properties']['security-severity'], $decoded['runs'][0]['results']));
+        self::assertSame([true, false], $this->suppressedFlags($decoded['runs'][0]['results']));
     }
 
     /**
@@ -502,6 +589,38 @@ final class SarifReportRendererTest extends AbstractReportRendererTestCase
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
      */
+    public function test_render_puts_the_configured_folder_before_the_artifact_location(): void
+    {
+        $sarifReportRenderer = new SarifReportRenderer(reportPathPrefix: new ReportPathPrefix('backend'));
+        $auditReport = $this->makeReport($this->makeValidatedVuln(filePath: 'src/Controller/UserController.php'));
+
+        $decoded = $this->decodeSarif($auditReport, $sarifReportRenderer);
+
+        self::assertSame('backend/src/Controller/UserController.php', $decoded['runs'][0]['results'][0]['locations'][0]['physicalLocation']['artifactLocation']['uri']);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_render_percent_encodes_the_configured_folder_with_the_rest_of_the_artifact_location(): void
+    {
+        $sarifReportRenderer = new SarifReportRenderer(reportPathPrefix: new ReportPathPrefix('apps/my shop#1'));
+        $auditReport = $this->makeReport($this->makeValidatedVuln(filePath: 'src/Foo.php'));
+
+        $decoded = $this->decodeSarif($auditReport, $sarifReportRenderer);
+
+        self::assertSame('apps/my%20shop%231/src/Foo.php', $decoded['runs'][0]['results'][0]['locations'][0]['physicalLocation']['artifactLocation']['uri']);
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
     public function test_render_percent_encodes_reserved_uri_characters_in_the_artifact_location(): void
     {
         $vulnerability = $this->makeValidatedVuln(filePath: 'src/Controller/Foo#Bar.php');
@@ -630,12 +749,83 @@ final class SarifReportRendererTest extends AbstractReportRendererTestCase
      * @throws InvalidAuditContextException
      * @throws InvalidVulnerabilityNarrativeException
      */
+    public function test_render_with_suppressions_marks_an_xss_finding_a_baseline_holds_under_the_type_it_was_reported_as_before(): void
+    {
+        $vulnerability = $this->makeValidatedVuln(VulnerabilityType::TWIG_INJECTION);
+        $decoded = $this->decodeSarifWithSuppressions($this->makeReport($this->makeValidatedVuln(VulnerabilityType::XSS)), [$vulnerability->fingerprint()]);
+
+        self::assertSame(
+            [['kind' => 'external', 'justification' => 'Accepted via audit baseline']],
+            $decoded['runs'][0]['results'][0]['suppressions'] ?? null,
+        );
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
     public function test_render_with_suppressions_leaves_a_non_baselined_finding_unsuppressed(): void
     {
         $vulnerability = $this->makeValidatedVuln();
         $decoded = $this->decodeSarifWithSuppressions($this->makeReport($vulnerability), ['SSA-UNRELATED']);
 
         self::assertArrayNotHasKey('suppressions', $decoded['runs'][0]['results'][0]);
+    }
+
+    /**
+     * `BaselineProcessor` credits an accepted entry once: one entry accepts one
+     * of several findings that share its fingerprint, so the report carries the
+     * others as the new findings they are.
+     *
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_render_with_suppressions_accepts_as_many_findings_as_the_baseline_lists_the_fingerprint(): void
+    {
+        $vulnerability = $this->makeValidatedVuln(lineStart: 10);
+        $second = $this->makeValidatedVuln(lineStart: 30);
+        self::assertSame($vulnerability->fingerprint(), $second->fingerprint());
+
+        $decoded = $this->decodeSarifWithSuppressions($this->makeReport($vulnerability, $second), [$vulnerability->fingerprint()]);
+
+        self::assertSame([true, false], $this->suppressedFlags($decoded['runs'][0]['results']));
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_render_with_suppressions_accepts_every_finding_the_baseline_lists_the_fingerprint_for(): void
+    {
+        $vulnerability = $this->makeValidatedVuln(lineStart: 10);
+        $second = $this->makeValidatedVuln(lineStart: 30);
+
+        $decoded = $this->decodeSarifWithSuppressions($this->makeReport($vulnerability, $second), [$vulnerability->fingerprint(), $vulnerability->fingerprint()]);
+
+        self::assertSame([true, true], $this->suppressedFlags($decoded['runs'][0]['results']));
+    }
+
+    /**
+     * @throws InvalidCodeLocationException
+     * @throws InvalidVulnerabilityClassificationException
+     * @throws InvalidAuditContextException
+     * @throws InvalidVulnerabilityNarrativeException
+     */
+    public function test_render_with_suppressions_spends_the_credit_on_the_most_severe_finding_as_the_baseline_does(): void
+    {
+        $vulnerability = $this->makeValidatedVuln(vulnerabilitySeverity: VulnerabilitySeverity::MEDIUM, lineStart: 10);
+        $critical = $this->makeValidatedVuln(vulnerabilitySeverity: VulnerabilitySeverity::CRITICAL, lineStart: 30);
+
+        $decoded = $this->decodeSarifWithSuppressions($this->makeReport($vulnerability, $critical), [$vulnerability->fingerprint()]);
+
+        self::assertSame([30, 10], $this->startLines($decoded['runs'][0]['results']));
+        self::assertSame([true, false], $this->suppressedFlags($decoded['runs'][0]['results']));
     }
 
     /**
@@ -718,9 +908,9 @@ final class SarifReportRendererTest extends AbstractReportRendererTestCase
      *     }>
      * }
      */
-    private function decodeSarif(AuditReport $auditReport): array
+    private function decodeSarif(AuditReport $auditReport, ?ReportRendererInterface $reportRenderer = null): array
     {
-        $decoded = json_decode($this->renderer->render($auditReport), true);
+        $decoded = json_decode(($reportRenderer ?? $this->renderer)->render($auditReport), true);
         $this->assertSarifShape($decoded);
 
         return $decoded;
@@ -733,8 +923,8 @@ final class SarifReportRendererTest extends AbstractReportRendererTestCase
      *     "$schema": string,
      *     version: string,
      *     runs: list<array{
-     *         tool: array{driver: array{name: string, version: string, informationUri: string, rules: array<int|string, array<string, mixed>>}},
-     *         results: list<array{ruleId: string, level: string, message: array{text: string}, partialFingerprints: array<string, string>, locations: list<array{physicalLocation: array{artifactLocation: array{uri: string}, region: array{startLine: int, endLine: int}}}>, suppressions?: list<array{kind: string, justification: string}>}>,
+     *         tool: array{driver: array{name: string, version: string, informationUri: string, rules: array<int|string, array{id: string, properties: array{tags: list<string>}}>}},
+     *         results: list<array{ruleId: string, level: string, message: array{text: string}, partialFingerprints: array<string, string>, locations: list<array{physicalLocation: array{artifactLocation: array{uri: string}, region: array{startLine: int, endLine: int}}}>, properties: array{'security-severity': string}, suppressions?: list<array{kind: string, justification: string}>}>,
      *         properties?: array<string, mixed>
      *     }>
      * }
@@ -743,9 +933,28 @@ final class SarifReportRendererTest extends AbstractReportRendererTestCase
     {
         self::assertInstanceOf(BaselineSuppressingReportRendererInterface::class, $this->renderer);
         $decoded = json_decode($this->renderer->renderWithSuppressions($auditReport, $baselinedFingerprints), true);
-        $this->assertSarifShape($decoded);
+        $this->assertSuppressedSarifShape($decoded);
 
         return $decoded;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function invocationsOf(AuditReport $auditReport): array
+    {
+        $decoded = json_decode($this->renderer->render($auditReport), true);
+        $this->assertInvocationsShape($decoded);
+
+        return $decoded['runs'][0]['invocations'];
+    }
+
+    /**
+     * @phpstan-assert array{runs: list<array{invocations: list<array<string, mixed>>}>} $value
+     */
+    private function assertInvocationsShape(mixed $value): void
+    {
+        self::assertIsArray($value);
     }
 
     /**
@@ -761,5 +970,57 @@ final class SarifReportRendererTest extends AbstractReportRendererTestCase
     private function assertSarifShape(mixed $value): void
     {
         self::assertIsArray($value);
+    }
+
+    /**
+     * @phpstan-assert array{
+     *     "$schema": string,
+     *     version: string,
+     *     runs: list<array{
+     *         tool: array{driver: array{name: string, version: string, informationUri: string, rules: array<int|string, array{id: string, properties: array{tags: list<string>}}>}},
+     *         results: list<array{ruleId: string, level: string, message: array{text: string}, partialFingerprints: array<string, string>, locations: list<array{physicalLocation: array{artifactLocation: array{uri: string}, region: array{startLine: int, endLine: int}}}>, properties: array{'security-severity': string}, suppressions?: list<array{kind: string, justification: string}>}>,
+     *         properties?: array<string, mixed>
+     *     }>
+     * } $value
+     */
+    private function assertSuppressedSarifShape(mixed $value): void
+    {
+        self::assertIsArray($value);
+    }
+
+    /**
+     * @param list<array{suppressions?: list<array{kind: string, justification: string}>}> $results
+     *
+     * @return list<bool>
+     */
+    private function suppressedFlags(array $results): array
+    {
+        return array_map(static fn (array $result): bool => \array_key_exists('suppressions', $result), $results);
+    }
+
+    /**
+     * @param list<array{locations: list<array{physicalLocation: array{artifactLocation: array{uri: string}}}>, properties?: array<string, string>}> $results
+     *
+     * @return array<string, string>
+     */
+    private function securitySeveritiesByFile(array $results): array
+    {
+        $scores = [];
+        foreach ($results as $result) {
+            self::assertArrayHasKey('properties', $result);
+            $scores[$result['locations'][0]['physicalLocation']['artifactLocation']['uri']] = $result['properties']['security-severity'];
+        }
+
+        return $scores;
+    }
+
+    /**
+     * @param list<array{locations: list<array{physicalLocation: array{region: array{startLine: int}}}>}> $results
+     *
+     * @return list<int>
+     */
+    private function startLines(array $results): array
+    {
+        return array_map(static fn (array $result): int => $result['locations'][0]['physicalLocation']['region']['startLine'], $results);
     }
 }

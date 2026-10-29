@@ -16,6 +16,7 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Pipeline;
 use Override;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
+use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Validator\Validation;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAgent;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAnalysisSettings;
@@ -34,6 +35,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Pipeline\Stage\Mappin
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditContextException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidTokenUsageException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditContext;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditReport;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\TokenUsageSnapshot;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMClientInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMResponse;
@@ -45,7 +47,9 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\NullSecurityConfigPar
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\NullStaticPreScanner;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\NullVoterCapabilityParser;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Cache\NullAttackerCache;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\Exception\SecretScrubberConfigurationException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\ProjectFileScanner;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\FileSystem\RegexSecretScrubber;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\AttackerPromptBuilder;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Prompt\ReviewerPromptBuilder;
 
@@ -158,6 +162,24 @@ final class AuditPipelineIntegrationTest extends TestCase
         self::assertNotNull($auditContext->getMeta('audit.risk_score'));
     }
 
+    /**
+     * @throws InvalidAuditContextException
+     * @throws InvalidTokenUsageException
+     * @throws SecretScrubberConfigurationException
+     */
+    public function test_a_file_the_secret_scrubber_cannot_scan_leaves_the_report_incomplete(): void
+    {
+        mkdir($this->tmpDir.'/src/Controller', 0o777, true);
+        file_put_contents($this->tmpDir.'/src/Controller/ReportController.php', "<?php\n// \xff\nsystem(\$_GET['cmd']);\n");
+        file_put_contents($this->tmpDir.'/src/Controller/HomeController.php', '<?php class HomeController {}');
+
+        $auditPipeline = $this->makePipeline('[]', '{}', new ProjectFileScanner(new NullLogger(), secretScrubber: new RegexSecretScrubber(['/INTERNAL-[A-Z0-9]{12}/u'])));
+        $auditContext = AuditContext::forProject($this->tmpDir);
+        $auditPipeline->process($auditContext);
+
+        self::assertSame(['src/Controller/ReportController.php'], AuditReport::fromContext($auditContext)->unanalyzedFiles());
+    }
+
     #[Override]
     protected function setUp(): void
     {
@@ -168,13 +190,13 @@ final class AuditPipelineIntegrationTest extends TestCase
     #[Override]
     protected function tearDown(): void
     {
-        $this->rmdirRecursive($this->tmpDir);
+        (new Filesystem())->remove($this->tmpDir);
     }
 
     /**
      * @throws InvalidTokenUsageException
      */
-    private function makePipeline(string $attackerResponse, string $reviewerResponse): AuditPipeline
+    private function makePipeline(string $attackerResponse, string $reviewerResponse, ProjectFileScanner $projectFileScanner = new ProjectFileScanner(new NullLogger())): AuditPipeline
     {
         $attackerLLM = self::createStub(LLMClientInterface::class);
         $attackerLLM->method('complete')->willReturn(
@@ -208,7 +230,7 @@ final class AuditPipelineIntegrationTest extends TestCase
 
         return new AuditPipeline(
             [
-                new IngestionStage(new ProjectFileScanner(new NullLogger()), new NullLogger()),
+                new IngestionStage($projectFileScanner, new NullLogger()),
                 new MappingStage(new NullLogger(), new NullControllerAccessControlParser(), new NullVoterCapabilityParser(), new NullFormBindingParser(), new NullSecurityConfigParser()),
                 new AuditStage($auditOrchestrator, new NullLogger()),
             ],
@@ -233,32 +255,5 @@ final class AuditPipelineIntegrationTest extends TestCase
             'remediation' => 'Add #[IsGranted("ROLE_ADMIN")]',
             'confidence' => 0.9,
         ]]);
-    }
-
-    private function rmdirRecursive(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-
-        $items = scandir($dir);
-        if (false === $items) {
-            return;
-        }
-
-        foreach ($items as $item) {
-            if ('.' === $item) {
-                continue;
-            }
-
-            if ('..' === $item) {
-                continue;
-            }
-
-            $path = $dir.'/'.$item;
-            is_dir($path) ? $this->rmdirRecursive($path) : unlink($path);
-        }
-
-        rmdir($dir);
     }
 }

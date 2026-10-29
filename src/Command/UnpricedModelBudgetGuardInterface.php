@@ -13,6 +13,7 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Command;
 
+use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 
@@ -26,4 +27,11 @@ interface UnpricedModelBudgetGuardInterface
      * under `--no-interaction`. Returns `true` to let the run proceed.
      */
     public function permitsRun(InputInterface $input, SymfonyStyle $symfonyStyle): bool;
+
+    /**
+     * The entry point with nobody to confirm (the MCP server) runs as it did
+     * before the guard existed — the cap never trips for an unpriced model —
+     * and says so in the log instead of refusing.
+     */
+    public function warnWhenBudgetCannotBeEnforced(LoggerInterface $logger): void;
 }

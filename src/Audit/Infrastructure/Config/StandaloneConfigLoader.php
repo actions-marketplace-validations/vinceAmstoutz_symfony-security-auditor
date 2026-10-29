@@ -13,49 +13,94 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config;
 
-use Symfony\Component\Yaml\Exception\ParseException;
-use Symfony\Component\Yaml\Yaml;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\MalformedProjectConfigException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\MissingEnvironmentVariableException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\MissingPlatformException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\ProjectConfigPlatformOverrideException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\ProjectConfigScanOverrideException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\ProjectConfigUserOnlyKeyException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\UnreadableCredentialFileException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\UnreadableCredentialStoreException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\UnresolvableConfigPathException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Config\Exception\UnsupportedEnvPlaceholderException;
 
 /**
  * @internal not part of the BC promise — see docs/versioning.md
  */
 final readonly class StandaloneConfigLoader
 {
-    private const array PLATFORM_KEYS = ['platform', 'provider'];
-
-    private const array SCAN_SURFACE_KEYS = ['import_sarif'];
-
     public function __construct(
         private XdgConfigPathResolver $xdgConfigPathResolver,
         private StandalonePlatformConfigResolver $standalonePlatformConfigResolver,
         private ?string $projectConfigFile = null,
+        private ProjectConfigValueGuard $projectConfigValueGuard = new ProjectConfigValueGuard(),
+        private StandaloneConfigFileReader $standaloneConfigFileReader = new StandaloneConfigFileReader(),
     ) {}
 
     /**
      * @throws UnresolvableConfigPathException
      * @throws MissingPlatformException
      * @throws MissingEnvironmentVariableException
+     * @throws UnreadableCredentialFileException
+     * @throws UnreadableCredentialStoreException
      * @throws MalformedProjectConfigException
      * @throws ProjectConfigPlatformOverrideException
      * @throws ProjectConfigScanOverrideException
+     * @throws ProjectConfigUserOnlyKeyException
+     * @throws UnsupportedEnvPlaceholderException
      */
-    public function load(bool $credentialsRequired = true): StandaloneConfig
+    public function load(bool $credentialsRequired = true, ?string $auditedProjectConfigFile = null): StandaloneConfig
     {
-        $rawConfig = $this->merge(
-            $this->read($this->xdgConfigPathResolver->configFile()),
-            $this->readProjectConfig(),
+        $userConfigFile = $this->xdgConfigPathResolver->configFile();
+        $userConfig = $this->standaloneConfigFileReader->read($userConfigFile);
+        $userTimeout = HttpTimeout::in($userConfig, $userConfigFile);
+        $projectConfig = $this->readProjectConfig($userConfig);
+        $workingDirectoryConfig = $this->merge($userConfig, $projectConfig);
+
+        $standalonePlatformConfig = $this->standalonePlatformConfigResolver->resolve($workingDirectoryConfig, $credentialsRequired);
+        $workingDirectoryTimeout = $this->projectTimeout($projectConfig, $userTimeout) ?? $userTimeout;
+        $auditedProjectConfig = $this->auditedProjectConfig($auditedProjectConfigFile, $workingDirectoryConfig, $userTimeout);
+        $rawConfig = $this->merge($workingDirectoryConfig, $auditedProjectConfig?->configForContainer() ?? []);
+        $auditConfig = array_diff_key($rawConfig, array_flip([...GuardedProjectConfigReader::PLATFORM_KEYS, HttpTimeout::KEY]));
+
+        return new StandaloneConfig(
+            $auditConfig,
+            $standalonePlatformConfig,
+            $this->existingProjectConfigFile(),
+            max($workingDirectoryTimeout, $auditedProjectConfig->httpTimeout ?? $workingDirectoryTimeout),
+            $auditedProjectConfig,
         );
+    }
 
-        $standalonePlatformConfig = $this->standalonePlatformConfigResolver->resolve($rawConfig, $credentialsRequired);
-        $auditConfig = array_diff_key($rawConfig, array_flip(self::PLATFORM_KEYS));
+    /**
+     * The `provider:` the user config selects, read without resolving
+     * anything, for a message that has to name it whether or not the
+     * configuration loads. Only the user config may select one.
+     */
+    public function configuredProvider(): ?string
+    {
+        try {
+            $provider = $this->standaloneConfigFileReader->read($this->xdgConfigPathResolver->configFile())['provider'] ?? null;
+        } catch (UnresolvableConfigPathException|MalformedProjectConfigException) {
+            return null;
+        }
 
-        return new StandaloneConfig($auditConfig, $standalonePlatformConfig);
+        return \is_string($provider) && '' !== $provider ? $provider : null;
+    }
+
+    /**
+     * @param array<array-key, mixed> $projectConfig
+     *
+     * @throws ProjectConfigUserOnlyKeyException
+     */
+    private function projectTimeout(array $projectConfig, float $userTimeout): ?float
+    {
+        return null !== $this->projectConfigFile ? HttpTimeout::raisedBy($projectConfig, $userTimeout, $this->projectConfigFile) : null;
+    }
+
+    private function existingProjectConfigFile(): ?string
+    {
+        return null !== $this->projectConfigFile && is_file($this->projectConfigFile) ? $this->projectConfigFile : null;
     }
 
     /**
@@ -90,77 +135,60 @@ final readonly class StandaloneConfigLoader
     }
 
     /**
-     * The audited repository ships its own config file, so letting it define
-     * the connection would let it point the user's resolved API credentials at
-     * an endpoint of its choosing.
+     * @param array<array-key, mixed> $userConfig
      *
      * @return array<array-key, mixed>
      *
      * @throws MalformedProjectConfigException
      * @throws ProjectConfigPlatformOverrideException
      * @throws ProjectConfigScanOverrideException
+     * @throws ProjectConfigUserOnlyKeyException
      */
-    private function readProjectConfig(): array
+    private function readProjectConfig(array $userConfig): array
     {
-        if (null === $this->projectConfigFile) {
-            return [];
-        }
-
-        $projectConfig = $this->read($this->projectConfigFile);
-        $connectionKeys = array_values(array_intersect(self::PLATFORM_KEYS, array_keys($projectConfig)));
-
-        if ([] !== $connectionKeys) {
-            throw ProjectConfigPlatformOverrideException::forKeys($this->projectConfigFile, $connectionKeys);
-        }
-
-        $this->guardAgainstScanSurfaceOverride($this->projectConfigFile, $projectConfig);
-
-        return $projectConfig;
+        return null === $this->projectConfigFile ? [] : $this->projectConfigReader()->read($this->projectConfigFile, $userConfig);
     }
 
     /**
-     * `scan.import_sarif` reads whatever file it names — an absolute path or
-     * one escaping the project root included — and folds its contents into
-     * the LLM prompt. Letting the audited repository declare it would let the
-     * repository point the scanner at paths of its own choosing, the same
-     * threat model already applied to `platform`/`provider`.
+     * The audited project's own file is layered over the other two, but the
+     * run never asked for it: a file this loader would refuse, or cannot read,
+     * is skipped as a whole and says why, instead of stopping a run that does
+     * not need it. The file of the working directory, read first, is the
+     * user's own and stays strict.
      *
-     * @param array<array-key, mixed> $projectConfig
-     *
-     * @throws ProjectConfigScanOverrideException
+     * @param array<array-key, mixed> $workingDirectoryConfig
      */
-    private function guardAgainstScanSurfaceOverride(string $projectConfigFile, array $projectConfig): void
+    private function auditedProjectConfig(?string $auditedProjectConfigFile, array $workingDirectoryConfig, float $userTimeout): ?AuditedProjectConfig
     {
-        $scanConfig = $projectConfig['scan'] ?? null;
-        if (!\is_array($scanConfig)) {
-            return;
-        }
-
-        $scanKeys = array_values(array_intersect(self::SCAN_SURFACE_KEYS, array_keys($scanConfig)));
-        if ([] === $scanKeys) {
-            return;
-        }
-
-        throw ProjectConfigScanOverrideException::forKeys($projectConfigFile, array_map(static fn (string $key): string => \sprintf('scan.%s', $key), $scanKeys));
-    }
-
-    /**
-     * @return array<array-key, mixed>
-     *
-     * @throws MalformedProjectConfigException
-     */
-    private function read(string $configFile): array
-    {
-        if (!is_file($configFile)) {
-            return [];
+        if (!$this->isAnotherProjectConfig($auditedProjectConfigFile)) {
+            return null;
         }
 
         try {
-            $parsed = Yaml::parseFile($configFile);
-        } catch (ParseException $parseException) {
-            throw MalformedProjectConfigException::fromParseException($configFile, $parseException);
+            $config = ProjectConfigPathAnchor::anchored($this->projectConfigReader()->read($auditedProjectConfigFile, $workingDirectoryConfig), $auditedProjectConfigFile);
+            $httpTimeout = HttpTimeout::raisedBy($config, $userTimeout, $auditedProjectConfigFile);
+            AuditedProjectBaseline::assertReadable($config, $auditedProjectConfigFile);
+        } catch (MalformedProjectConfigException|ProjectConfigPlatformOverrideException|ProjectConfigScanOverrideException|ProjectConfigUserOnlyKeyException $projectConfigRefusal) {
+            return AuditedProjectConfig::skipped($auditedProjectConfigFile, $projectConfigRefusal->getMessage());
         }
 
-        return \is_array($parsed) ? $parsed : [];
+        return AuditedProjectConfig::layered($auditedProjectConfigFile, $config, $httpTimeout);
+    }
+
+    /**
+     * @phpstan-assert-if-true string $auditedProjectConfigFile
+     */
+    private function isAnotherProjectConfig(?string $auditedProjectConfigFile): bool
+    {
+        if (null === $auditedProjectConfigFile || (!is_file($auditedProjectConfigFile) && !is_link($auditedProjectConfigFile))) {
+            return false;
+        }
+
+        return null === $this->projectConfigFile || realpath(\dirname($this->projectConfigFile)) !== realpath(\dirname($auditedProjectConfigFile));
+    }
+
+    private function projectConfigReader(): GuardedProjectConfigReader
+    {
+        return new GuardedProjectConfigReader($this->standaloneConfigFileReader, $this->projectConfigValueGuard);
     }
 }

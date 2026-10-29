@@ -22,16 +22,28 @@ final readonly class McpServeCommand
 {
     public const string NAME = 'mcp:serve';
 
-    public const string DESCRIPTION = 'Start a Model Context Protocol (MCP) server over stdio exposing the auditor as tools';
+    public const string DESCRIPTION = 'Start a Model Context Protocol (MCP) server over stdio exposing the auditor as tools (experimental)';
 
     public function __construct(
         private McpServerFactoryInterface $mcpServerFactory,
         private McpTransportFactoryInterface $mcpTransportFactory,
     ) {}
 
+    /**
+     * STDOUT is the JSON-RPC channel the client parses, and the CLI SAPI
+     * displays notices and warnings there by default: one stray notice would
+     * corrupt the protocol stream, so PHP's error display goes to STDERR while
+     * the server runs.
+     */
     public function __invoke(): int
     {
-        $this->mcpServerFactory->create()->run($this->mcpTransportFactory->create());
+        $displayErrors = ini_set('display_errors', 'stderr');
+
+        try {
+            $this->mcpServerFactory->create()->run($this->mcpTransportFactory->create());
+        } finally {
+            ini_set('display_errors', $displayErrors);
+        }
 
         return Command::SUCCESS;
     }

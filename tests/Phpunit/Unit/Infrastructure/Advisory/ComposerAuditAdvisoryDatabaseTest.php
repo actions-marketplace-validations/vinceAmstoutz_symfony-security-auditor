@@ -13,6 +13,7 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Unit\Infrastructure\Advisory;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -141,6 +142,39 @@ final class ComposerAuditAdvisoryDatabaseTest extends TestCase
             );
 
         new ComposerAuditAdvisoryDatabase($this->stubRunner('42'), new AuditedProjectPathHolder('/proj'), $logger);
+    }
+
+    #[DataProvider('failingRunners')]
+    public function test_it_reports_a_load_that_failed(ComposerAuditRunnerInterface $composerAuditRunner): void
+    {
+        $composerAuditAdvisoryDatabase = new ComposerAuditAdvisoryDatabase($composerAuditRunner, new AuditedProjectPathHolder('/proj'), new NullLogger());
+
+        self::assertTrue($composerAuditAdvisoryDatabase->hasFailedToLoad());
+    }
+
+    /**
+     * @return iterable<string, array{ComposerAuditRunnerInterface}>
+     */
+    public static function failingRunners(): iterable
+    {
+        $unavailable = self::createStub(ComposerAuditRunnerInterface::class);
+        $unavailable->method('run')->willThrowException(AdvisorySourceUnavailableException::forBinaryNotFound());
+        yield 'source unavailable' => [$unavailable];
+
+        $malformed = self::createStub(ComposerAuditRunnerInterface::class);
+        $malformed->method('run')->willReturn('not json at all');
+        yield 'malformed payload' => [$malformed];
+
+        $unexpected = self::createStub(ComposerAuditRunnerInterface::class);
+        $unexpected->method('run')->willThrowException(new RuntimeException('network blew up'));
+        yield 'unexpected failure' => [$unexpected];
+    }
+
+    public function test_an_audit_without_any_advisory_is_not_a_failed_load(): void
+    {
+        $composerAuditAdvisoryDatabase = new ComposerAuditAdvisoryDatabase($this->stubRunner('{"advisories": []}'), new AuditedProjectPathHolder('/proj'), new NullLogger());
+
+        self::assertFalse($composerAuditAdvisoryDatabase->hasFailedToLoad());
     }
 
     public function test_lookup_returns_empty_when_runner_throws_unexpected_exception(): void
@@ -358,6 +392,54 @@ final class ComposerAuditAdvisoryDatabaseTest extends TestCase
 
         self::assertSame([], $composerAuditAdvisoryDatabase->lookup('vendor/foo', '1.0.0'));
         self::assertCount(1, $composerAuditAdvisoryDatabase->lookup('vendor/bar', '1.0.0'));
+    }
+
+    public function test_lookup_returns_an_advisory_the_audited_project_ignores_in_its_composer_config(): void
+    {
+        $json = (string) json_encode([
+            'advisories' => [],
+            'ignored-advisories' => [
+                'vendor/foo' => [
+                    ['title' => 'Ignored by the project', 'affectedVersions' => '>=1.0', 'ignoreReason' => 'not exploitable here'],
+                ],
+            ],
+            'abandoned' => [],
+        ]);
+
+        $composerAuditAdvisoryDatabase = new ComposerAuditAdvisoryDatabase($this->stubRunner($json), new AuditedProjectPathHolder('/proj'), new NullLogger());
+
+        self::assertSame(['Ignored by the project'], array_column($composerAuditAdvisoryDatabase->lookup('vendor/foo', '1.2.3'), 'title'));
+    }
+
+    public function test_lookup_returns_both_the_reported_and_the_ignored_advisories_of_a_package(): void
+    {
+        $json = (string) json_encode([
+            'advisories' => [
+                'vendor/foo' => [['title' => 'Reported', 'affectedVersions' => '>=1.0']],
+            ],
+            'ignored-advisories' => [
+                'Vendor/Foo' => [['title' => 'Ignored', 'affectedVersions' => '>=1.0']],
+                'vendor/bar' => 'not a list',
+            ],
+        ]);
+
+        $composerAuditAdvisoryDatabase = new ComposerAuditAdvisoryDatabase($this->stubRunner($json), new AuditedProjectPathHolder('/proj'), new NullLogger());
+
+        self::assertSame(['Reported', 'Ignored'], array_column($composerAuditAdvisoryDatabase->lookup('vendor/foo', '1.2.3'), 'title'));
+    }
+
+    public function test_lookup_keeps_the_reported_advisories_when_the_ignored_ones_are_not_a_map(): void
+    {
+        $json = (string) json_encode([
+            'advisories' => [
+                'vendor/foo' => [['title' => 'Reported', 'affectedVersions' => '>=1.0']],
+            ],
+            'ignored-advisories' => 'unexpected',
+        ]);
+
+        $composerAuditAdvisoryDatabase = new ComposerAuditAdvisoryDatabase($this->stubRunner($json), new AuditedProjectPathHolder('/proj'), new NullLogger());
+
+        self::assertSame(['Reported'], array_column($composerAuditAdvisoryDatabase->lookup('vendor/foo', '1.2.3'), 'title'));
     }
 
     public function test_the_audit_runs_against_the_path_the_holder_carries(): void

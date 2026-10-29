@@ -15,6 +15,7 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget;
 
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\CacheAwarePricingProviderInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\PricingProviderInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ServingPlatformPricingProviderInterface;
 
 use function Symfony\Component\String\u;
 
@@ -41,6 +42,8 @@ final readonly class CostCalculator
 
     private const float ANTHROPIC_CACHE_CREATION_PRICE_MULTIPLIER = 1.25;
 
+    private const float ANTHROPIC_ONE_HOUR_CACHE_CREATION_PRICE_MULTIPLIER = 2.0;
+
     private const float PLAIN_INPUT_PRICE_MULTIPLIER = 1.0;
 
     public function __construct(private PricingProviderInterface $pricingProvider) {}
@@ -58,6 +61,35 @@ final readonly class CostCalculator
         $cacheCreationCost = ($cacheCreationTokens / self::TOKENS_PER_MILLION) * $this->cacheCreationPrice($model);
 
         return $inputCost + $outputCost + $cacheReadCost + $cacheCreationCost;
+    }
+
+    /**
+     * Anthropic bills a prompt-cache write it keeps for an hour
+     * (`cache_retention: long`) at twice the base input rate; a pricing
+     * source lists only the five-minute write rate.
+     */
+    public function costForOneHourCacheWrites(int $oneHourCacheCreationTokens, string $model): float
+    {
+        return ($oneHourCacheCreationTokens / self::TOKENS_PER_MILLION) * $this->pricingProvider->pricePerMillionInputTokens($model) * self::ANTHROPIC_ONE_HOUR_CACHE_CREATION_PRICE_MULTIPLIER;
+    }
+
+    /**
+     * The model a call is billed as: the one the provider reports serving it
+     * when the pricing source prices it at the serving platform's own rate,
+     * the configured one otherwise, so a gateway answering under an id no
+     * catalog lists still prices the call and another provider's listing of
+     * the reported id never sets its price.
+     */
+    public function billedModel(string $configuredModel, ?string $reportedModel): string
+    {
+        return null !== $reportedModel && $this->pricesReportedModel($reportedModel) ? $reportedModel : $configuredModel;
+    }
+
+    private function pricesReportedModel(string $reportedModel): bool
+    {
+        return $this->pricingProvider instanceof ServingPlatformPricingProviderInterface
+            ? $this->pricingProvider->hasServingPlatformPrice($reportedModel)
+            : $this->pricingProvider->hasModel($reportedModel);
     }
 
     private function cacheReadPrice(string $model): float

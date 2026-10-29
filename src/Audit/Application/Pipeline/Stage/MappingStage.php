@@ -15,10 +15,14 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Pipeline\Stage;
 
 use Override;
 use Psr\Log\LoggerInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Scan\ScanPathFilter;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AccessControlMap;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AccessControlRule;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ApplicationAccessControl;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditContext;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\BuiltInStageName;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\FormBinding;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProductionConfiguration;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFile;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ProjectFileInventory;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\RouteAccessControl;
@@ -27,6 +31,10 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\VoterCapability;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\StageInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ControllerAccessControlParserInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\FormBindingParserInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ImportAwareSecurityConfigParserInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LoadOrderAwareSecurityConfigParserInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ProductionAwareSecurityConfigParserInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\RuleOrderAwareSecurityConfigParserInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\SecurityConfigParserInterface;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\VoterCapabilityParserInterface;
 
@@ -68,7 +76,7 @@ final readonly class MappingStage implements StageInterface
         $projectFileInventory = ProjectFileInventory::fromFiles($files);
         $controllerLikeFiles = $this->controllerLikeFiles($files);
 
-        [$routeAccessMap, $firewallRules] = $this->extractSecurityConfig($files);
+        [$routeAccessMap, $firewallRules, $unreadableConfigurationFiles, $applicationAccessControls, $accessControlRules] = $this->extractSecurityConfig($files, ScanPathFilter::normalize($auditContext->scanPaths()));
         $routeAccessControls = $this->parseControllerAccessControls($controllerLikeFiles);
         $voterCapabilities = $this->parseVoterCapabilities($projectFileInventory->voters());
         $formBindings = $this->parseFormBindings($controllerLikeFiles);
@@ -81,6 +89,9 @@ final readonly class MappingStage implements StageInterface
                 $routeAccessControls,
                 $voterCapabilities,
                 $formBindings,
+                $unreadableConfigurationFiles,
+                $applicationAccessControls,
+                $accessControlRules,
             ),
         );
 
@@ -174,30 +185,116 @@ final readonly class MappingStage implements StageInterface
     }
 
     /**
-     * @param list<ProjectFile> $files
+     * The project's rules and firewalls, the configuration files that could
+     * not be read, and the rules and firewalls of each monorepo application
+     * the run is narrowed to, kept apart since they govern that application's
+     * routes only.
      *
-     * @return array{array<string, list<string>>, list<string>}
+     * @param list<ProjectFile> $files
+     * @param list<string>      $scanPaths
+     *
+     * @return array{array<string, list<string>>, list<string>, list<string>, array<string, ApplicationAccessControl>, list<AccessControlRule>}
      */
-    private function extractSecurityConfig(array $files): array
+    private function extractSecurityConfig(array $files, array $scanPaths): array
     {
-        $routeAccessMap = [];
-        $firewallRules = [];
+        $productionConfiguration = $this->productionConfiguration($files, $scanPaths);
+        $applicationAccessControl = $this->accessControlOf($productionConfiguration->projectFiles);
 
-        foreach ($files as $file) {
-            if (!$file->isConfiguration()) {
-                continue;
-            }
-
-            $content = $file->content();
-            $routeAccessMap = $this->mergeRouteAccessMaps($routeAccessMap, $this->securityConfigParser->parseAccessControl($content));
-            $firewallRules = [...$firewallRules, ...$this->securityConfigParser->parseFirewallRules($content)];
+        foreach ($productionConfiguration->unreadableFiles as $path => $reason) {
+            $this->logger->warning('A configuration file the production application loads could not be read, so the security rules it may hold are missing from the mapping', ['file' => $path, 'reason' => $reason]);
         }
 
-        return [$routeAccessMap, $firewallRules];
+        return [
+            $applicationAccessControl->routeAccessMap,
+            $applicationAccessControl->firewallRules,
+            array_keys($productionConfiguration->unreadableFiles),
+            array_map($this->accessControlOf(...), $productionConfiguration->applicationFiles),
+            $applicationAccessControl->accessControlRules,
+        ];
     }
 
     /**
-     * Mirrors {@see SymfonyYamlSecurityConfigParser::recordAccessControlEntry()}'s
+     * @param list<ProjectFile> $configurationFiles in load order
+     */
+    private function accessControlOf(array $configurationFiles): ApplicationAccessControl
+    {
+        $routeAccessMap = [];
+        $firewallRules = [];
+        $accessControlRules = [];
+        foreach ($configurationFiles as $configurationFile) {
+            $content = $configurationFile->content();
+            $routeAccessMap = $this->mergeRouteAccessMaps($routeAccessMap, $this->securityConfigParser->parseAccessControl($content));
+            $firewallRules = [...$firewallRules, ...$this->securityConfigParser->parseFirewallRules($content)];
+            $accessControlRules = [...$accessControlRules, ...$this->accessControlRulesOf($content)];
+        }
+
+        return new ApplicationAccessControl($routeAccessMap, $firewallRules, $accessControlRules);
+    }
+
+    /**
+     * @param list<ProjectFile> $files
+     * @param list<string>      $scanPaths
+     */
+    private function productionConfiguration(array $files, array $scanPaths): ProductionConfiguration
+    {
+        if ($this->securityConfigParser instanceof ImportAwareSecurityConfigParserInterface) {
+            return $this->securityConfigParser->productionConfiguration($files, $scanPaths);
+        }
+
+        return new ProductionConfiguration($this->configurationFilesInLoadOrder($files));
+    }
+
+    /**
+     * @return list<AccessControlRule> the rules in the order the file declares them, when the parser gives them
+     */
+    private function accessControlRulesOf(string $content): array
+    {
+        return $this->securityConfigParser instanceof RuleOrderAwareSecurityConfigParserInterface ? $this->securityConfigParser->parseAccessControlRules($content) : [];
+    }
+
+    /**
+     * Rules apply first-match-wins in the order the application loads them,
+     * which is not the order the scan lists the files in.
+     *
+     * @param list<ProjectFile> $files
+     *
+     * @return list<ProjectFile>
+     */
+    private function configurationFilesInLoadOrder(array $files): array
+    {
+        $loaded = array_values(array_filter($files, $this->isLoadedInProduction(...)));
+
+        if ($this->securityConfigParser instanceof LoadOrderAwareSecurityConfigParserInterface) {
+            usort($loaded, fn (ProjectFile $left, ProjectFile $right): int => $this->loadsBefore($this->securityConfigParser, $left, $right));
+        }
+
+        return $loaded;
+    }
+
+    private function loadsBefore(LoadOrderAwareSecurityConfigParserInterface $loadOrderAwareSecurityConfigParser, ProjectFile $left, ProjectFile $right): int
+    {
+        $byRank = $loadOrderAwareSecurityConfigParser->loadRank($left->relativePath()) <=> $loadOrderAwareSecurityConfigParser->loadRank($right->relativePath());
+
+        return 0 !== $byRank ? $byRank : strcmp($left->relativePath(), $right->relativePath());
+    }
+
+    /**
+     * A rule in configuration the production application never loads protects
+     * no route, so a parser that knows which files the application loads has
+     * the final word; any other parser reads every configuration file.
+     */
+    private function isLoadedInProduction(ProjectFile $projectFile): bool
+    {
+        if (!$projectFile->isConfiguration()) {
+            return false;
+        }
+
+        return !$this->securityConfigParser instanceof ProductionAwareSecurityConfigParserInterface
+            || $this->securityConfigParser->isLoadedInProduction($projectFile->relativePath());
+    }
+
+    /**
+     * Mirrors {@see SymfonyYamlSecurityConfigParser::accessControlOf()}'s
      * first-match-wins semantics across config files: a rule for a path already
      * covered by an earlier file is appended as an `or: …` requirement instead of
      * replacing it, so no file's rule is silently dropped.

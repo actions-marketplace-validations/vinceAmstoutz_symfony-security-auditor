@@ -13,10 +13,13 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Scan;
 
+use PhpParser\Node;
 use PhpParser\Node\Arg;
 use PhpParser\Node\Attribute;
 use PhpParser\Node\AttributeGroup;
+use PhpParser\Node\Expr\New_;
 use PhpParser\Node\Identifier;
+use PhpParser\Node\Name;
 use PhpParser\Node\Scalar\String_;
 
 /**
@@ -24,12 +27,30 @@ use PhpParser\Node\Scalar\String_;
  * `#[IsGranted]`'s value parameter is `$attribute`, `#[Security]`'s is
  * `$expression`; both are resolved the same way, matched by name when the
  * call uses named arguments (so a reordered call still yields the right
- * argument) or by position otherwise.
+ * argument) or by position otherwise. A value naming only `PUBLIC_ACCESS` or
+ * `IS_AUTHENTICATED_ANONYMOUSLY` is no access check: it lets everyone in,
+ * whether it is written as that name or as an expression that only calls
+ * `is_granted()` on it.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
 final readonly class IsGrantedAttributeParser
 {
+    /** @var list<string> */
+    private const array PUBLIC_ACCESS_ATTRIBUTES = ['PUBLIC_ACCESS', 'IS_AUTHENTICATED_ANONYMOUSLY'];
+
+    private const string PUBLIC_ACCESS_EXPRESSION_PATTERN = '/\A\s*is_granted\(\s*([\'"])(?:PUBLIC_ACCESS|IS_AUTHENTICATED_ANONYMOUSLY)\1\s*\)\s*\z/';
+
+    /**
+     * @param array<Node> $args the arguments of a `denyAccessUnlessGranted()`/`isGranted()` call
+     */
+    public function grantsOnlyPublicAccess(array $args): bool
+    {
+        $attributeArgument = $this->argumentBoundTo($args, 'attribute');
+
+        return $attributeArgument instanceof Arg && $this->isPublicAccessLiteral($attributeArgument);
+    }
+
     /**
      * @param array<AttributeGroup> $attributeGroups
      *
@@ -68,6 +89,18 @@ final readonly class IsGrantedAttributeParser
     }
 
     /**
+     * The argument an `#[IsGranted]`/`#[Security]` attribute passes as its
+     * value, whatever expression it holds; null for any other attribute, or
+     * one passing no value.
+     */
+    public function valueArgument(Attribute $attribute): ?Arg
+    {
+        $valueArgName = $this->valueArgNameFor($attribute->name->toString());
+
+        return null === $valueArgName ? null : $this->argumentBoundTo($attribute->args, $valueArgName);
+    }
+
+    /**
      * @param array<Attribute> $attributes
      *
      * @return list<string>
@@ -82,7 +115,7 @@ final readonly class IsGrantedAttributeParser
             }
 
             $attributeArg = $this->attributeArgValue($attribute->args, $valueArgName);
-            if (null !== $attributeArg) {
+            if (null !== $attributeArg && !$this->isPublicAccess($attributeArg)) {
                 $values[] = $attributeArg;
             }
         }
@@ -138,7 +171,7 @@ final readonly class IsGrantedAttributeParser
     private function attributeHasMatchingArg(array $args, string $valueArgName): bool
     {
         foreach ($args as $index => $arg) {
-            if ($this->isMatchingArg($arg, $index, $valueArgName)) {
+            if ($this->isMatchingArg($arg, $index, $valueArgName) && !$this->isPublicAccessLiteral($arg)) {
                 return true;
             }
         }
@@ -146,7 +179,47 @@ final readonly class IsGrantedAttributeParser
         return false;
     }
 
-    private function isMatchingArg(Arg $arg, int $index, string $valueArgName): bool
+    private function isPublicAccessLiteral(Arg $arg): bool
+    {
+        return match (true) {
+            $arg->value instanceof String_ => $this->isPublicAccess($arg->value->value),
+            $arg->value instanceof New_ => $this->isPublicAccessExpression($arg->value),
+            default => false,
+        };
+    }
+
+    private function isPublicAccessExpression(New_ $new): bool
+    {
+        if (!$new->class instanceof Name || 'Expression' !== $new->class->getLast()) {
+            return false;
+        }
+
+        $expression = $this->argumentBoundTo($new->args, 'expression')?->value;
+
+        return $expression instanceof String_ && $this->isPublicAccess($expression->value);
+    }
+
+    private function isPublicAccess(string $attribute): bool
+    {
+        return \in_array($attribute, self::PUBLIC_ACCESS_ATTRIBUTES, true)
+            || 1 === preg_match(self::PUBLIC_ACCESS_EXPRESSION_PATTERN, $attribute);
+    }
+
+    /**
+     * @param array<Node> $args
+     */
+    private function argumentBoundTo(array $args, string $parameterName): ?Arg
+    {
+        foreach ($args as $index => $arg) {
+            if ($arg instanceof Arg && $this->isMatchingArg($arg, $index, $parameterName)) {
+                return $arg;
+            }
+        }
+
+        return null;
+    }
+
+    private function isMatchingArg(Arg $arg, int|string $index, string $valueArgName): bool
     {
         return match (true) {
             $arg->name instanceof Identifier => $valueArgName === $arg->name->toString(),

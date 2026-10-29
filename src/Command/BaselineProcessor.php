@@ -19,6 +19,8 @@ use Symfony\Component\Clock\Clock;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\AuditReport;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\ReviewerFeedback;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\Vulnerability;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\BaselineWriteFailedException;
+use VinceAmstoutz\SymfonySecurityAuditor\Command\Exception\UnsafeBaselineWriteException;
 
 /**
  * Generates and applies the accepted-finding baseline: resolves the effective
@@ -35,11 +37,21 @@ final readonly class BaselineProcessor implements BaselineProcessorInterface
         private ClockInterface $clock = new Clock(),
     ) {}
 
+    /**
+     * @throws UnsafeBaselineWriteException
+     * @throws BaselineWriteFailedException
+     */
+    #[Override]
+    public function assertWritable(string $path, string $projectPath): void
+    {
+        $this->baseline->assertWritable($path, $projectPath);
+    }
+
     #[Override]
     public function generate(AuditReport $auditReport, string $path): int
     {
         $entries = $this->entriesFor($auditReport);
-        $this->baseline->save($path, $entries);
+        $this->baseline->save($path, $entries, $auditReport->projectPath());
 
         return \count($entries);
     }
@@ -47,14 +59,21 @@ final readonly class BaselineProcessor implements BaselineProcessorInterface
     #[Override]
     public function apply(AuditReport $auditReport, ?string $cliBaseline): BaselineResult
     {
-        $fingerprints = $this->acceptedFingerprints($cliBaseline);
+        $baselinePath = $cliBaseline ?? $this->configuredBaseline;
+        if (null === $baselinePath) {
+            return new BaselineResult($auditReport, 0, []);
+        }
+
+        $fingerprints = $this->baseline->load($baselinePath);
         if ([] === $fingerprints) {
             return new BaselineResult($auditReport, 0, $fingerprints);
         }
 
         $before = $auditReport->totalVulnerabilities();
         $remainingFingerprints = $this->withoutAlreadyConsumed($fingerprints, $auditReport->consumedBaselineFingerprints());
-        $filtered = $auditReport->withoutFingerprints($remainingFingerprints);
+        $filtered = $auditReport
+            ->withoutFingerprints($remainingFingerprints)
+            ->withFindingsAcceptedBeforeReviewNamedBy($this->entryFingerprintsByBaselineFingerprint($this->baseline->entries($baselinePath)));
 
         return new BaselineResult($filtered, $before - $filtered->totalVulnerabilities(), $fingerprints);
     }
@@ -68,6 +87,25 @@ final readonly class BaselineProcessor implements BaselineProcessorInterface
         }
 
         return $this->baseline->load($baselinePath);
+    }
+
+    #[Override]
+    public function filePaths(?string $cliBaseline): array
+    {
+        $baselinePath = $cliBaseline ?? $this->configuredBaseline;
+        if (null === $baselinePath) {
+            return [];
+        }
+
+        $filePaths = [];
+        foreach ($this->baseline->entries($baselinePath) as $baselineEntry) {
+            $file = $baselineEntry->file();
+            if (null !== $file) {
+                $filePaths[] = $file;
+            }
+        }
+
+        return $filePaths;
     }
 
     #[Override]
@@ -105,6 +143,28 @@ final readonly class BaselineProcessor implements BaselineProcessorInterface
         }
 
         return array_values($fingerprints);
+    }
+
+    /**
+     * The `fingerprint` of every entry carrying each baseline fingerprint, in
+     * the order of the entries: a reviewer-corrected entry carries its
+     * `attacker_fingerprint` too, under which the next run's attacker reports
+     * the finding the report lists under the entry's `fingerprint`.
+     *
+     * @param list<BaselineEntry> $entries
+     *
+     * @return array<string, list<string>>
+     */
+    private function entryFingerprintsByBaselineFingerprint(array $entries): array
+    {
+        $entryFingerprints = [];
+        foreach ($entries as $entry) {
+            foreach ($entry->fingerprints() as $fingerprint) {
+                $entryFingerprints[$fingerprint][] = $entry->fingerprint;
+            }
+        }
+
+        return $entryFingerprints;
     }
 
     /**

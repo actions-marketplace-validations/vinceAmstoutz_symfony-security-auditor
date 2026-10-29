@@ -18,6 +18,7 @@ use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use RuntimeException;
+use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Validator\Validation;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAgent;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Agent\AttackerAnalysisSettings;
@@ -214,6 +215,8 @@ final class RunAuditUseCaseIntegrationTest extends TestCase
             self::assertSame('Audit aborted: token budget exceeded (5000 / 100 tokens)', $auditAbortedByBudgetException->getMessage());
             self::assertSame(1, $auditAbortedByBudgetException->partialReport()->filesScanned());
             self::assertSame(0, $auditAbortedByBudgetException->partialReport()->totalVulnerabilities());
+            self::assertSame(['src/App.php'], $auditAbortedByBudgetException->partialReport()->unanalyzedFiles());
+            self::assertFalse($auditAbortedByBudgetException->partialReport()->isComplete());
         }
     }
 
@@ -244,6 +247,8 @@ final class RunAuditUseCaseIntegrationTest extends TestCase
             self::assertSame('LLM call failed with non-transient error: model retired', $auditAbortedByProviderException->getMessage());
             self::assertSame(1, $auditAbortedByProviderException->partialReport()->filesScanned());
             self::assertSame(0, $auditAbortedByProviderException->partialReport()->totalVulnerabilities());
+            self::assertSame(['src/App.php'], $auditAbortedByProviderException->partialReport()->unanalyzedFiles());
+            self::assertFalse($auditAbortedByProviderException->partialReport()->isComplete());
         }
     }
 
@@ -483,7 +488,7 @@ final class RunAuditUseCaseIntegrationTest extends TestCase
     #[Override]
     protected function tearDown(): void
     {
-        $this->rmdirRecursive($this->tmpDir);
+        (new Filesystem())->remove($this->tmpDir);
     }
 
     /**
@@ -626,32 +631,5 @@ final class RunAuditUseCaseIntegrationTest extends TestCase
             'remediation' => 'Add #[IsGranted("ROLE_ADMIN")]',
             'confidence' => 0.9,
         ]]);
-    }
-
-    private function rmdirRecursive(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-
-        $items = scandir($dir);
-        if (false === $items) {
-            return;
-        }
-
-        foreach ($items as $item) {
-            if ('.' === $item) {
-                continue;
-            }
-
-            if ('..' === $item) {
-                continue;
-            }
-
-            $path = $dir.'/'.$item;
-            is_dir($path) ? $this->rmdirRecursive($path) : unlink($path);
-        }
-
-        rmdir($dir);
     }
 }

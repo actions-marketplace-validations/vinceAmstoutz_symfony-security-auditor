@@ -54,11 +54,16 @@
                     }
                 }
             ],
+            "invocations": [
+                {
+                    "executionSuccessful": true
+                }
+            ],
             "properties": {
-                "input_tokens": 0,
+                "input_tokens": 8,
                 "output_tokens": 0,
-                "total_tokens": 0,
-                "estimated_cost_usd": 0.0,
+                "total_tokens": 8,
+                "estimated_cost_usd": "COST",
                 "primary_model": "gpt-4o"
             }
         }

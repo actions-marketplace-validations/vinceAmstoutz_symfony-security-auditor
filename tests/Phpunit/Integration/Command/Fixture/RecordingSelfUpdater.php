@@ -13,7 +13,9 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Tests\Integration\Command\Fixture;
 
+use Closure;
 use Override;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\ReleaseChannel;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\SelfUpdateResult;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\SelfUpdate\SelfUpdaterInterface;
 
@@ -23,16 +25,29 @@ final class RecordingSelfUpdater implements SelfUpdaterInterface
 
     public ?bool $checkOnly = null;
 
-    public function __construct(private readonly SelfUpdateResult $selfUpdateResult) {}
+    public ?ReleaseChannel $releaseChannel = null;
+
+    /**
+     * @param list<int> $downloadProgress the byte counts handed to the progress callback, in order
+     */
+    public function __construct(
+        private readonly SelfUpdateResult $selfUpdateResult,
+        private readonly array $downloadProgress = [],
+    ) {}
 
     /**
      * @throws void
      */
     #[Override]
-    public function run(string $currentVersion, bool $checkOnly): SelfUpdateResult
+    public function run(string $currentVersion, bool $checkOnly, ReleaseChannel $releaseChannel = ReleaseChannel::Stable, ?Closure $onDownloadProgress = null): SelfUpdateResult
     {
         $this->currentVersion = $currentVersion;
         $this->checkOnly = $checkOnly;
+        $this->releaseChannel = $releaseChannel;
+
+        foreach ($this->downloadProgress as $bytes) {
+            $onDownloadProgress?->__invoke($bytes);
+        }
 
         return $this->selfUpdateResult;
     }

@@ -17,14 +17,18 @@ use DateTimeImmutable;
 use Override;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidAuditContextException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\CoverageRecorderInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\FindingReviewRecorderInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Pipeline\RejectedFindingRecorderInterface;
 
-final class AuditContext implements CoverageRecorderInterface
+final class AuditContext implements CoverageRecorderInterface, RejectedFindingRecorderInterface, FindingReviewRecorderInterface
 {
     /** @var list<ProjectFile> */
     private array $projectFiles = [];
 
     /** @var ?list<ProjectFile> */
     private ?array $mappingFiles = null;
+
+    private ?int $filesDiscovered = null;
 
     private ?SymfonyMapping $symfonyMapping = null;
 
@@ -34,8 +38,11 @@ final class AuditContext implements CoverageRecorderInterface
     /** @var array<string, mixed> */
     private array $metadata = [];
 
-    /** @var list<array{stage: string, file: string, status: string}> */
+    /** @var array<int, array{stage: string, file: string, status: string}> */
     private array $coverage = [];
+
+    /** @var array<string, list<int>> the ledger positions of the review failures recorded for a finding, by vulnerability id */
+    private array $reviewFailurePositions = [];
 
     /** @var list<Vulnerability> */
     private array $pendingReviewedFindings = [];
@@ -43,11 +50,19 @@ final class AuditContext implements CoverageRecorderInterface
     /** @var list<Vulnerability> */
     private array $pendingFoundVulnerabilities = [];
 
+    /** @var array<string, true> keyed by vulnerability id */
+    private array $rejectedFindingIds = [];
+
     /** @var ?array<string, int> */
     private ?array $remainingBaselineBudget = null;
 
-    /** @var list<string> */
-    private array $consumedBaselineFingerprints = [];
+    /** @var list<SuppressedFinding> */
+    private array $baselineAcceptedFindings = [];
+
+    /** @var list<Vulnerability> */
+    private array $baselineSkippedFindings = [];
+
+    private bool $costEstimate = false;
 
     private DateTimeImmutable $startedAt;
 
@@ -118,14 +133,36 @@ final class AuditContext implements CoverageRecorderInterface
      */
     public function consumeBaselineCredit(string $fingerprint): bool
     {
+        return $this->spendBaselineCredit(new SuppressedFinding($fingerprint, $fingerprint));
+    }
+
+    /**
+     * Spends one baseline credit on `$vulnerability`: its own fingerprint's
+     * first, then the other ones a baseline written before may hold for it
+     * (`Vulnerability::fingerprintCandidates()`).
+     */
+    public function consumeBaselineCreditFor(Vulnerability $vulnerability): bool
+    {
+        foreach ($vulnerability->fingerprintCandidates() as $fingerprintCandidate) {
+            if ($this->spendBaselineCredit(new SuppressedFinding($vulnerability->fingerprint(), $fingerprintCandidate))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function spendBaselineCredit(SuppressedFinding $suppressedFinding): bool
+    {
         $this->remainingBaselineBudget ??= array_count_values($this->acceptedFingerprints);
+        $fingerprint = $suppressedFinding->baselineFingerprint;
 
         if (!\array_key_exists($fingerprint, $this->remainingBaselineBudget) || $this->remainingBaselineBudget[$fingerprint] <= 0) {
             return false;
         }
 
         --$this->remainingBaselineBudget[$fingerprint];
-        $this->consumedBaselineFingerprints[] = $fingerprint;
+        $this->baselineAcceptedFindings[] = $suppressedFinding;
 
         return true;
     }
@@ -133,7 +170,39 @@ final class AuditContext implements CoverageRecorderInterface
     /** @return list<string> */
     public function consumedBaselineFingerprints(): array
     {
-        return $this->consumedBaselineFingerprints;
+        return array_map(
+            static fn (SuppressedFinding $suppressedFinding): string => $suppressedFinding->baselineFingerprint,
+            $this->baselineAcceptedFindings,
+        );
+    }
+
+    /**
+     * The findings whose baseline credit was spent, each under its own
+     * fingerprint beside the baseline fingerprint it spent.
+     *
+     * @internal not part of the BC promise — see docs/versioning.md
+     *
+     * @return list<SuppressedFinding>
+     */
+    public function baselineAcceptedFindings(): array
+    {
+        return $this->baselineAcceptedFindings;
+    }
+
+    /**
+     * Remembers a finding whose baseline credit was spent before review, so
+     * a later iteration that re-reports it is skipped again instead of being
+     * reviewed against an already-exhausted budget.
+     */
+    public function recordBaselineSkippedFinding(Vulnerability $vulnerability): void
+    {
+        $this->baselineSkippedFindings[] = $vulnerability;
+    }
+
+    /** @return list<Vulnerability> */
+    public function baselineSkippedFindings(): array
+    {
+        return $this->baselineSkippedFindings;
     }
 
     public function diffSinceRef(): ?string
@@ -162,6 +231,21 @@ final class AuditContext implements CoverageRecorderInterface
         return $this->scanPaths;
     }
 
+    /**
+     * Marks the run as a cost estimate: a `--dry-run` reads the files in scope
+     * to price the audit and analyzes none of them, so its report can never
+     * read as complete.
+     */
+    public function markAsCostEstimate(): void
+    {
+        $this->costEstimate = true;
+    }
+
+    public function isCostEstimate(): bool
+    {
+        return $this->costEstimate;
+    }
+
     public function isCacheBypassed(): bool
     {
         return $this->cacheBypassed;
@@ -186,6 +270,18 @@ final class AuditContext implements CoverageRecorderInterface
     public function mappingFiles(): array
     {
         return $this->mappingFiles ?? $this->projectFiles;
+    }
+
+    /**
+     * How many files the scan found in the run's scope, before a `--since`
+     * diff narrowed them — what the report calls the files discovered. Falls
+     * back to the count of {@see self::mappingFiles()} when `IngestionStage`
+     * never calls {@see self::setFilesDiscovered()}, since a `--path`-less
+     * run maps exactly the files its scan found.
+     */
+    public function filesDiscovered(): int
+    {
+        return $this->filesDiscovered ?? \count($this->mappingFiles());
     }
 
     public function mapping(): ?SymfonyMapping
@@ -220,6 +316,11 @@ final class AuditContext implements CoverageRecorderInterface
         $this->mappingFiles = $files;
     }
 
+    public function setFilesDiscovered(int $filesDiscovered): void
+    {
+        $this->filesDiscovered = $filesDiscovered;
+    }
+
     public function setMapping(SymfonyMapping $symfonyMapping): void
     {
         $this->symfonyMapping = $symfonyMapping;
@@ -233,6 +334,11 @@ final class AuditContext implements CoverageRecorderInterface
     public function replaceVulnerability(Vulnerability $vulnerability): void
     {
         $this->vulnerabilities[$vulnerability->id()] = $vulnerability;
+    }
+
+    public function removeVulnerability(string $id): void
+    {
+        unset($this->vulnerabilities[$id]);
     }
 
     public function setMeta(string $key, mixed $value): void
@@ -277,7 +383,21 @@ final class AuditContext implements CoverageRecorderInterface
     #[Override]
     public function recordCoverage(string $stage, string $filePath, string $status): void
     {
-        $this->coverage[] = ['stage' => $stage, 'file' => $filePath, 'status' => $status];
+        $this->appendCoverage($stage, $filePath, $status);
+    }
+
+    #[Override]
+    public function recordFindingReview(Vulnerability $vulnerability, string $status): void
+    {
+        $position = $this->appendCoverage(AgentRole::Reviewer->value, $vulnerability->filePath(), $status);
+
+        if ('validated' === $status || 'rejected' === $status) {
+            $this->supersedeReviewFailures($vulnerability);
+
+            return;
+        }
+
+        $this->reviewFailurePositions[$vulnerability->id()][] = $position;
     }
 
     /**
@@ -285,13 +405,42 @@ final class AuditContext implements CoverageRecorderInterface
      */
     public function coverage(): array
     {
-        return $this->coverage;
+        return array_values($this->coverage);
+    }
+
+    private function appendCoverage(string $stage, string $filePath, string $status): int
+    {
+        $this->coverage[] = ['stage' => $stage, 'file' => $filePath, 'status' => $status];
+
+        return array_key_last($this->coverage);
+    }
+
+    private function supersedeReviewFailures(Vulnerability $vulnerability): void
+    {
+        foreach ($this->reviewFailurePositions[$vulnerability->id()] ?? [] as $position) {
+            unset($this->coverage[$position]);
+        }
     }
 
     #[Override]
     public function recordReviewedFinding(Vulnerability $vulnerability): void
     {
         $this->pendingReviewedFindings[] = $vulnerability;
+    }
+
+    #[Override]
+    public function recordRejectedFinding(Vulnerability $vulnerability): void
+    {
+        $this->rejectedFindingIds[$vulnerability->id()] = true;
+    }
+
+    /**
+     * Whether the reviewer rejected this finding — reached that verdict, as
+     * opposed to a review that failed and reached none.
+     */
+    public function wasRejectedByReviewer(Vulnerability $vulnerability): bool
+    {
+        return \array_key_exists($vulnerability->id(), $this->rejectedFindingIds);
     }
 
     #[Override]

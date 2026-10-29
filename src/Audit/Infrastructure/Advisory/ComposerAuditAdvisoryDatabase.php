@@ -13,7 +13,6 @@ declare(strict_types=1);
 
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory;
 
-use JsonException;
 use Override;
 use Psr\Log\LoggerInterface;
 use Throwable;
@@ -27,10 +26,17 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Advisory\Exception
  * entries are cached for the lifetime of the instance. Composer's advisories
  * stream is the same dataset that powers `composer audit` on the CLI.
  *
+ * The advisories the audited project filters out in its own composer config
+ * (`config.audit.ignore`, and `ignore-severity` where composer has it) are read
+ * from the `ignored-advisories` key composer reports them under: the repository
+ * under audit must not be able to hide a vulnerable dependency from its
+ * auditor.
+ *
  * Failure modes (composer missing, lock file absent, malformed JSON) degrade
  * gracefully to an empty database — `lookup()` always returns a list, never
  * propagates an exception, so the orchestrator and the tool layer stay
- * resilient.
+ * resilient. {@see self::hasFailedToLoad()} tells that empty database from
+ * the snapshot of a project with no advisory.
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
@@ -41,12 +47,22 @@ final readonly class ComposerAuditAdvisoryDatabase implements AdvisoryDatabaseIn
      */
     private array $entriesByPackage;
 
+    private bool $loadFailed;
+
     public function __construct(
         ComposerAuditRunnerInterface $composerAuditRunner,
         AuditedProjectPathHolder $auditedProjectPathHolder,
         LoggerInterface $logger,
     ) {
-        $this->entriesByPackage = $this->load($composerAuditRunner, $auditedProjectPathHolder->path(), $logger);
+        $entriesByPackage = $this->load($composerAuditRunner, $auditedProjectPathHolder->path(), $logger);
+        $this->entriesByPackage = $entriesByPackage ?? [];
+
+        $this->loadFailed = null === $entriesByPackage;
+    }
+
+    public function hasFailedToLoad(): bool
+    {
+        return $this->loadFailed;
     }
 
     #[Override]
@@ -56,13 +72,13 @@ final readonly class ComposerAuditAdvisoryDatabase implements AdvisoryDatabaseIn
     }
 
     /**
-     * @return array<string, list<array{cve: ?string, title: string, summary: string, affected_versions: string, link: ?string}>>
+     * @return array<string, list<array{cve: ?string, title: string, summary: string, affected_versions: string, link: ?string}>>|null null when the audit could not be loaded
      */
     private function load(
         ComposerAuditRunnerInterface $composerAuditRunner,
         string $projectPath,
         LoggerInterface $logger,
-    ): array {
+    ): ?array {
         try {
             $json = $composerAuditRunner->run($projectPath);
 
@@ -73,21 +89,21 @@ final readonly class ComposerAuditAdvisoryDatabase implements AdvisoryDatabaseIn
                 'error' => $exception->getMessage(),
             ]);
 
-            return [];
+            return null;
         } catch (MalformedAdvisoryPayloadException $exception) {
             $logger->warning('composer audit payload was unparseable; advisory lookups disabled', [
                 'project' => $projectPath,
                 'error' => $exception->getMessage(),
             ]);
 
-            return [];
+            return null;
         } catch (Throwable $exception) {
             $logger->warning('Unexpected composer audit failure; advisory lookups disabled', [
                 'project' => $projectPath,
                 'error' => $exception->getMessage(),
             ]);
 
-            return [];
+            return null;
         }
     }
 
@@ -98,30 +114,30 @@ final readonly class ComposerAuditAdvisoryDatabase implements AdvisoryDatabaseIn
      */
     private function parse(string $json): array
     {
-        try {
-            $decoded = json_decode($json, true, flags: \JSON_THROW_ON_ERROR);
-        } catch (JsonException $jsonException) {
-            throw MalformedAdvisoryPayloadException::forInvalidJson($jsonException);
-        }
+        $advisoryPayload = AdvisoryPayload::fromJson($json);
 
-        if (!\is_array($decoded)) {
-            throw MalformedAdvisoryPayloadException::forNonArrayPayload($decoded);
-        }
+        return $this->withAdvisories(
+            $this->withAdvisories([], $advisoryPayload->advisories),
+            $advisoryPayload->ignoredAdvisories,
+        );
+    }
 
-        if (!\array_key_exists('advisories', $decoded) || !\is_array($decoded['advisories'])) {
-            throw MalformedAdvisoryPayloadException::forMissingAdvisoriesKey();
-        }
-
-        $entries = [];
+    /**
+     * @param array<string, list<array{cve: ?string, title: string, summary: string, affected_versions: string, link: ?string}>> $entries
+     * @param array<array-key, mixed>                                                                                            $advisoriesByPackage
+     *
+     * @return array<string, list<array{cve: ?string, title: string, summary: string, affected_versions: string, link: ?string}>>
+     */
+    private function withAdvisories(array $entries, array $advisoriesByPackage): array
+    {
         /** @var array<string, mixed> $advisoriesByPackage */
-        $advisoriesByPackage = $decoded['advisories'];
-
         foreach ($advisoriesByPackage as $packageName => $advisories) {
             if (!\is_array($advisories)) {
                 continue;
             }
 
-            $entries[PackageNameNormalizer::normalize($packageName)] = $this->mapAdvisories($advisories);
+            $normalizedName = PackageNameNormalizer::normalize($packageName);
+            $entries[$normalizedName] = [...($entries[$normalizedName] ?? []), ...$this->mapAdvisories($advisories)];
         }
 
         return $entries;

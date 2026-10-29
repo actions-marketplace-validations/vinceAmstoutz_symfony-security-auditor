@@ -14,21 +14,27 @@ declare(strict_types=1);
 namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\Pricing;
 
 use Composer\InstalledVersions;
-use JsonException;
 use OutOfBoundsException;
 use Override;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Filesystem\Path;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\CacheAwarePricingProviderInterface;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\ServingPlatformPricingProviderInterface;
 
 /**
  * Sources per-million-token USD pricing (input/output and real prompt-cache
  * rates) from the daily `symfony/models-dev` catalog snapshot, read once from
  * `vendor/` with no network call. Replaces the hand-maintained price table.
+ * A model is priced from the listing of the `symfony/ai` platform the audit
+ * runs against first, and only then from the catalog at large. Each model's
+ * price is resolved once per run and remembered, since every call asks for it
+ * several times.
+ *
+ * @phpstan-import-type PricedCost from ModelsDevCatalog
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
-final class ModelsDevPricingProvider implements CacheAwarePricingProviderInterface
+final class ModelsDevPricingProvider implements CacheAwarePricingProviderInterface, ServingPlatformPricingProviderInterface
 {
     public const string CATALOG_PACKAGE = 'symfony/models-dev';
 
@@ -52,10 +58,19 @@ final class ModelsDevPricingProvider implements CacheAwarePricingProviderInterfa
     /** @var array<array-key, mixed>|null */
     private ?array $catalog = null;
 
+    /** @var array<string, ?ModelPrice> */
+    private array $pricesByModel = [];
+
+    /** @var array<string, ?ModelPrice> */
+    private array $servingPlatformPricesByModel = [];
+
+    private ?string $loadedCatalogPath = null;
+
     public function __construct(
         private readonly LoggerInterface $logger,
         private readonly ?string $catalogPath = null,
         private readonly string $catalogPackage = self::CATALOG_PACKAGE,
+        private readonly ?string $platform = null,
     ) {}
 
     #[Override]
@@ -82,10 +97,33 @@ final class ModelsDevPricingProvider implements CacheAwarePricingProviderInterfa
         return $this->priced($model)->cacheCreation;
     }
 
+    /**
+     * The models the listing of `$platform`'s own provider holds, as the
+     * catalog the run prices from has them.
+     *
+     * @return array<array-key, mixed>
+     */
+    public function platformListing(string $platform): array
+    {
+        $provider = PlatformCatalogProviders::providerOf($platform);
+
+        return null === $provider ? [] : $this->arrayAt($this->arrayAt($this->catalog(), $provider), 'models');
+    }
+
     #[Override]
     public function hasModel(string $model): bool
     {
         return $this->lookup($model) instanceof ModelPrice;
+    }
+
+    #[Override]
+    public function hasServingPlatformPrice(string $model): bool
+    {
+        if (!$this->hasServingPlatformListing()) {
+            return $this->hasModel($model);
+        }
+
+        return $this->servingPlatformPrice($model) instanceof ModelPrice;
     }
 
     private function priced(string $model): ModelPrice
@@ -102,8 +140,64 @@ final class ModelsDevPricingProvider implements CacheAwarePricingProviderInterfa
 
     private function lookup(string $model): ?ModelPrice
     {
-        $model = $this->stripOptionsQueryString($model);
+        if (!\array_key_exists($model, $this->pricesByModel)) {
+            $this->pricesByModel[$model] = $this->servingPlatformPrice($model) ?? $this->priceFromCatalog($this->stripOptionsQueryString($model));
+        }
 
+        return $this->pricesByModel[$model];
+    }
+
+    private function servingPlatformPrice(string $model): ?ModelPrice
+    {
+        if (!\array_key_exists($model, $this->servingPlatformPricesByModel)) {
+            $this->servingPlatformPricesByModel[$model] = $this->priceFromServingPlatform($this->stripOptionsQueryString($model));
+        }
+
+        return $this->servingPlatformPricesByModel[$model];
+    }
+
+    /**
+     * A platform the catalog has no listing for leaves the catalog at large
+     * as the only rate there is.
+     */
+    private function hasServingPlatformListing(): bool
+    {
+        if (null === $this->platform) {
+            return false;
+        }
+
+        $provider = PlatformCatalogProviders::providerOf($this->platform);
+
+        return null !== $provider && \array_key_exists($provider, $this->catalog());
+    }
+
+    /**
+     * The platform the audit runs against bills at its own listed rate, which
+     * an aggregator or another cloud re-listing the same id does not share.
+     */
+    private function priceFromServingPlatform(string $model): ?ModelPrice
+    {
+        if (null === $this->platform) {
+            return null;
+        }
+
+        $provider = PlatformCatalogProviders::providerOf($this->platform);
+        if (null === $provider) {
+            return null;
+        }
+
+        foreach (PlatformCatalogProviders::listedIds($this->platform, $model) as $listedId) {
+            $cost = $this->costEntry($provider, $listedId);
+            if (null !== $cost) {
+                return $this->toModelPrice($cost);
+            }
+        }
+
+        return null;
+    }
+
+    private function priceFromCatalog(string $model): ?ModelPrice
+    {
         $firstParty = $this->priceFromProviders($model, self::FIRST_PARTY_PROVIDERS);
         if ($firstParty instanceof ModelPrice) {
             return $firstParty;
@@ -164,33 +258,31 @@ final class ModelsDevPricingProvider implements CacheAwarePricingProviderInterfa
         return $zeroPriceFallback;
     }
 
-    /** @return array<array-key, mixed>|null */
+    /** @return PricedCost|null */
     private function costEntry(int|string $provider, string $model): ?array
     {
-        $providerData = $this->catalog()[$provider] ?? null;
-        if (!\is_array($providerData)) {
-            return null;
-        }
+        $models = $this->arrayAt($this->arrayAt($this->catalog(), $provider), 'models');
+        $cost = $this->arrayAt($models, $model)['cost'] ?? null;
 
-        $models = $providerData['models'] ?? null;
-        if (!\is_array($models)) {
-            return null;
-        }
-
-        $entry = $models[$model] ?? null;
-        if (!\is_array($entry)) {
-            return null;
-        }
-
-        $cost = $entry['cost'] ?? null;
-
-        return \is_array($cost) ? $cost : null;
+        return ModelsDevCatalog::isPricedCost($cost) ? $cost : null;
     }
 
-    /** @param array<array-key, mixed> $cost */
+    /**
+     * @param array<array-key, mixed> $array
+     *
+     * @return array<array-key, mixed>
+     */
+    private function arrayAt(array $array, int|string $key): array
+    {
+        $value = $array[$key] ?? null;
+
+        return \is_array($value) ? $value : [];
+    }
+
+    /** @param PricedCost $cost */
     private function toModelPrice(array $cost): ModelPrice
     {
-        $input = $this->numericOr($cost['input'] ?? null, 0.0);
+        $input = $cost['input'];
         $output = $this->numericOr($cost['output'] ?? null, 0.0);
         $cacheRead = $this->numericOr($cost['cache_read'] ?? null, $input);
         $cacheCreation = $this->numericOr($cost['cache_write'] ?? null, $input);
@@ -236,31 +328,52 @@ final class ModelsDevPricingProvider implements CacheAwarePricingProviderInterfa
     /** @return array<array-key, mixed> */
     private function loadCatalog(): array
     {
-        $path = $this->effectiveCatalogPath();
-        $contents = null !== $path && is_file($path) ? file_get_contents($path) : false;
-        if (false === $contents) {
-            return $this->disablePricing('catalog file not found or unreadable', $path);
+        $path = $this->preferredCatalogPath();
+        $catalog = ModelsDevCatalog::fromFile($path);
+        $packagedPath = $this->packagedCatalogPath();
+
+        if (\is_string($catalog) && null !== $packagedPath && $path !== $packagedPath) {
+            $this->logger->warning('Ignoring the unusable pricing catalog override; falling back to the packaged catalog', [
+                'reason' => $catalog,
+                'path' => $path,
+            ]);
+            $path = $packagedPath;
+            $catalog = ModelsDevCatalog::fromFile($path);
         }
 
-        try {
-            $decoded = json_decode($contents, true, flags: \JSON_THROW_ON_ERROR);
-        } catch (JsonException) {
-            return $this->disablePricing('catalog JSON invalid', $path);
+        if (\is_string($catalog)) {
+            return $this->disablePricing($catalog, $path);
         }
 
-        return \is_array($decoded) ? $decoded : $this->disablePricing('catalog root is not an object', $path);
+        $this->loadedCatalogPath = $path;
+
+        return $catalog;
     }
 
     /**
      * The catalog file this provider actually reads, so `doctor` can name it
      * instead of assuming the packaged one — a `self-update` refresh writes an
-     * override that takes precedence. An override that does not exist yet falls
-     * through to the packaged catalog rather than shadowing it, which is what
-     * makes the override location safe to point at before anything writes there.
+     * override that takes precedence, unless it cannot serve as a catalog or the
+     * packaged one is newer, in which case the packaged one is read in its
+     * place.
      */
     public function effectiveCatalogPath(): ?string
     {
-        if (null !== $this->catalogPath && is_file($this->catalogPath)) {
+        $this->catalog();
+
+        return $this->loadedCatalogPath ?? $this->preferredCatalogPath();
+    }
+
+    /**
+     * An override that does not exist yet falls through to the packaged
+     * catalog rather than shadowing it, which is what makes the override
+     * location safe to point at before anything writes there. One the packaged
+     * catalog has since overtaken, by an upgrade of the binary, gives way to
+     * it as well.
+     */
+    private function preferredCatalogPath(): ?string
+    {
+        if (null !== $this->catalogPath && is_file($this->catalogPath) && !ModelsDevCatalog::isFileNewer($this->packagedCatalogPath(), $this->catalogPath)) {
             return $this->catalogPath;
         }
 

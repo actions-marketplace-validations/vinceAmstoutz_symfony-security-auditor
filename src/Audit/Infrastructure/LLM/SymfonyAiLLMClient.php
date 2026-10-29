@@ -15,7 +15,6 @@ namespace VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM;
 
 use Override;
 use Psr\Log\LoggerInterface;
-use Symfony\AI\Platform\Exception\UnexpectedResultTypeException;
 use Symfony\AI\Platform\Message\Message;
 use Symfony\AI\Platform\Message\MessageBag;
 use Throwable;
@@ -23,6 +22,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\BudgetTracker;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Budget\Exception\BudgetExceededException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Application\Exception\NegativeTokenCountException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\InvalidTokenUsageException;
+use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Exception\LLMRequestTooLargeException;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Model\TokenUsageSnapshot;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMRequest;
 use VinceAmstoutz\SymfonySecurityAuditor\Audit\Domain\Port\LLMResponse;
@@ -44,7 +44,7 @@ use VinceAmstoutz\SymfonySecurityAuditor\Audit\Infrastructure\LLM\Exception\Tran
  *
  * @internal not part of the BC promise — see docs/versioning.md
  */
-final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInterface
+final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInterface, UsageBookingLLMClientInterface
 {
     public const ?float DEFAULT_TEMPERATURE = null;
 
@@ -91,11 +91,22 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
         $this->rateLimiter = $platformResilienceConfig->rateLimiter;
         $this->promptTokenEstimator = new PromptTokenEstimator($platformRequestConfig->tokenEstimator, $platformBinding->model);
         $this->platformResultExtractor = new PlatformResultExtractor($platformAccountingConfig->tokenUsageRecorder, $platformBinding->logger);
-        $platformOptionsFactory = new PlatformOptionsFactory($platformBinding->model, $platformRequestConfig->temperature, $platformRequestConfig->providerJsonMode, $platformBinding->maxOutputTokens);
+        $platformOptionsFactory = new PlatformOptionsFactory($platformBinding->model, $platformRequestConfig->temperature, $platformRequestConfig->providerJsonMode, $platformBinding->maxOutputTokens, $platformRequestConfig->servingPlatform);
         $this->platformOptionsFactory = $platformOptionsFactory;
 
+        $conversionFailureExplainer = new ConversionFailureExplainer();
+        $degradedAnswerBooker = new DegradedAnswerBooker(
+            $platformBinding->model,
+            $platformAccountingConfig->budgetTracker,
+            $platformBinding->logger,
+            $this->rateLimiter,
+            $platformResilienceConfig->transientFailureClassifier,
+            $this->platformResultExtractor,
+            $platformAccountingConfig->tokenUsageRecorder,
+        );
+
         $this->retryingPlatformInvoker = new RetryingPlatformInvoker(
-            $platformBinding->platform,
+            $platformBinding,
             $platformBinding->model,
             $platformBinding->logger,
             $this->rateLimiter,
@@ -103,8 +114,12 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
             $platformResilienceConfig->transientFailureClassifier,
             $platformResilienceConfig->sleeper,
             $platformResilienceConfig->retryAfterHeaderParser,
+            $conversionFailureExplainer,
+            $degradedAnswerBooker,
+            $platformAccountingConfig->budgetTracker,
         );
         $this->emptyLLMResponseFactory = new EmptyLLMResponseFactory();
+        $toolIterationBooker = new ToolIterationBooker($platformBinding->model, $this->rateLimiter, $platformAccountingConfig->budgetTracker, $this->platformResultExtractor);
 
         $this->sequentialToolLoop = new SequentialToolLoop(
             $platformBinding->model,
@@ -116,10 +131,13 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
             $platformOptionsFactory,
             $this->promptTokenEstimator,
             $this->emptyLLMResponseFactory,
+            $toolIterationBooker,
         );
 
+        $inFlightRequestCanceller = new InFlightRequestCanceller($platformBinding->model, $this->rateLimiter, $platformAccountingConfig->budgetTracker, $platformBinding->logger, $platformAccountingConfig->tokenUsageRecorder);
+
         $this->batchWindowResolver = new BatchWindowResolver(
-            $platformBinding->platform,
+            $platformBinding,
             $platformBinding->model,
             $this->rateLimiter,
             $platformAccountingConfig->budgetTracker,
@@ -128,10 +146,14 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
             $this->promptTokenEstimator,
             $this,
             $platformBinding->logger,
+            $platformResilienceConfig->transientFailureClassifier,
+            $inFlightRequestCanceller,
+            $degradedAnswerBooker,
+            $conversionFailureExplainer,
         );
 
         $this->toolConversationWavefront = new ToolConversationWavefront(
-            $platformBinding->platform,
+            $platformBinding,
             $platformBinding->model,
             $platformBinding->logger,
             $this->rateLimiter,
@@ -141,6 +163,11 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
             $this->promptTokenEstimator,
             $this,
             $this->retryingPlatformInvoker,
+            $platformResilienceConfig->transientFailureClassifier,
+            $inFlightRequestCanceller,
+            $degradedAnswerBooker,
+            $conversionFailureExplainer,
+            $toolIterationBooker,
         );
     }
 
@@ -148,11 +175,11 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
      * @throws BudgetExceededException
      * @throws MissingAiPlatformException
      * @throws TransientLLMFailureException
+     * @throws LLMRequestTooLargeException
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
      * @throws InvalidRetryConfigurationException
-     * @throws UnexpectedResultTypeException
      */
     #[Override]
     public function complete(string $systemPrompt, string $userMessage): LLMResponse
@@ -171,6 +198,7 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
         \assert('' !== $this->model, 'Model must be a non-empty string');
 
         $estimatedInputTokens = $this->promptTokenEstimator->estimate($systemPrompt, $userMessage);
+        $this->budgetTracker?->assertWithinBudget();
         try {
             $deferredResult = $this->retryingPlatformInvoker->invoke($messageBag, $this->platformOptionsFactory->baseOptions(), $estimatedInputTokens);
         } catch (EmptyLLMResponseException $emptyllmResponseException) {
@@ -178,15 +206,16 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
         }
 
         try {
-            $content = $deferredResult->asText();
-            [$inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens] = $this->platformResultExtractor->extractTokens($deferredResult);
+            $content = $this->platformResultExtractor->extractText($deferredResult->getResult());
+            [$inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens] = $this->platformResultExtractor->extractTokens($deferredResult, $estimatedInputTokens);
         } catch (Throwable $throwable) {
             $this->rateLimiter->record(0, 0);
 
             throw $throwable;
         }
 
-        $this->rateLimiter->record($inputTokens, $outputTokens);
+        $tokenUsageSnapshot = TokenUsageSnapshot::of($inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens);
+        $this->rateLimiter->record($this->platformResultExtractor->rateLimitedInputTokens($deferredResult, $tokenUsageSnapshot), $outputTokens);
 
         $this->logger->debug('symfony/ai platform responded', [
             'content_length' => \strlen($content),
@@ -198,9 +227,9 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
             $content,
             $this->model,
             $this->platformResultExtractor->extractStopReason($deferredResult) ?? 'end_turn',
-            TokenUsageSnapshot::of($inputTokens, $outputTokens, $cacheReadTokens, $cacheCreationTokens),
-        );
-        $this->budgetTracker?->recordCall($llmResponse);
+            $tokenUsageSnapshot,
+        )->withReportedModel($this->platformResultExtractor->extractReportedModel($deferredResult));
+        $this->budgetTracker?->recordCall($llmResponse, $this->platformResultExtractor->extractOneHourCacheCreationTokens($deferredResult, $cacheCreationTokens));
         $this->budgetTracker?->assertWithinBudget();
 
         return $llmResponse;
@@ -209,6 +238,11 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
     /**
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
+     * @throws InvalidTokenUsageException
+     * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
      */
     #[Override]
     public function completeBatch(array $requests, int $maxConcurrent): array
@@ -228,10 +262,17 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
     }
 
     /**
+     * A conversation that fails before any tool ran is restarted through
+     * `completeWithTools()`, reached as the `LLMClientInterface` port, whose
+     * failures PHPStan cannot see; the three it lets through are listed last.
+     *
      * @throws MissingAiPlatformException
      * @throws BudgetExceededException
      * @throws InvalidTokenUsageException
      * @throws NonTransientLLMFailureException
+     * @throws TransientLLMFailureException
+     * @throws NegativeTokenCountException
+     * @throws InvalidRetryConfigurationException
      */
     #[Override]
     public function completeBatchWithTools(array $requests, int $maxConcurrent, int $maxToolIterations): array
@@ -254,6 +295,7 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
      * @throws BudgetExceededException
      * @throws MissingAiPlatformException
      * @throws TransientLLMFailureException
+     * @throws LLMRequestTooLargeException
      * @throws NonTransientLLMFailureException
      * @throws InvalidTokenUsageException
      * @throws NegativeTokenCountException
@@ -281,9 +323,10 @@ final readonly class SymfonyAiLLMClient implements ToolBatchCapableLLMClientInte
     private function emptyResponseAndLog(EmptyLLMResponseException $emptyllmResponseException): LLMResponse
     {
         $this->logger->warning('LLM returned a response with no content blocks', [
+            'stop_reason' => $emptyllmResponseException->stopReason,
             'error' => $emptyllmResponseException->getMessage(),
         ]);
 
-        return $this->emptyLLMResponseFactory->create($this->model, TokenUsageSnapshot::of(0, 0));
+        return $this->emptyLLMResponseFactory->create($this->model, TokenUsageSnapshot::of(0, 0), $emptyllmResponseException->stopReason);
     }
 }
